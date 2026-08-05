@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f5f8fc">
+    <title>Codex 工作台</title>
+    <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.16.22">
+    <link rel="stylesheet" href="/styles.css?v=0.6.46-math">
+  </head>
+  <body>
+    <main id="auth-shell" class="auth-shell" hidden>
+      <section class="auth-card" aria-labelledby="auth-title">
+        <div class="auth-identity" aria-hidden="true"><span>C</span><i></i><span>你</span></div>
+        <div class="auth-heading">
+          <span id="auth-kicker">个人工作区</span>
+          <h1 id="auth-title">登录 Codex 工作台</h1>
+          <p id="auth-description">进入只属于你的项目与聊天。</p>
+        </div>
+        <form id="login-form" class="auth-form">
+          <label>用户名<input id="login-username" name="username" autocomplete="username" autocapitalize="none" required></label>
+          <label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button class="primary-button auth-submit" type="submit">进入我的工作区</button>
+        </form>
+        <form id="setup-form" class="auth-form" hidden>
+          <label>初始化密钥<input id="setup-token" autocomplete="one-time-code" autocapitalize="none" required></label>
+          <div class="auth-field-row">
+            <label>用户名<input id="setup-username" autocomplete="username" autocapitalize="none" minlength="2" maxlength="32" required></label>
+            <label>显示名称<input id="setup-display-name" autocomplete="name" maxlength="40" required></label>
+          </div>
+          <label>管理员密码<input id="setup-password" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+          <label>确认密码<input id="setup-password-confirm" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+          <p id="setup-error" class="form-error" role="alert"></p>
+          <button class="primary-button auth-submit" type="submit">创建管理员并接管现有聊天</button>
+        </form>
+        <footer class="auth-footnote"><span class="status-dot"></span><span>账号只保存在这台 Windows 主机上</span></footer>
+      </section>
+    </main>
+
+    <div id="app" class="workspace-shell" hidden>
+      <aside id="sidebar" class="sidebar" aria-label="项目和聊天">
+        <div class="sidebar-brand">
+          <span class="brand-mark">C</span>
+          <div><strong>Codex</strong><span>局域网工作台</span></div>
+          <button id="close-sidebar" class="icon-button mobile-only" type="button" aria-label="关闭项目面板">×</button>
+        </div>
+        <section class="sidebar-section projects-section">
+          <div class="section-heading"><span>项目</span><span class="section-actions"><button id="add-project" class="text-button" type="button">新建</button><button id="manage-projects-side" class="text-button" type="button">管理</button></span></div>
+          <div id="project-list" class="project-list"></div>
+        </section>
+        <section class="sidebar-section chats-section">
+          <div class="section-heading"><span>聊天</span><button id="new-thread" class="text-button" type="button">新建</button></div>
+          <div id="thread-list" class="thread-list"></div>
+        </section>
+        <section class="sidebar-tools" aria-label="工作台与账号">
+          <div class="sidebar-tool-grid">
+            <button id="refresh-workspace" class="sidebar-tool-button" type="button"><span aria-hidden="true">↻</span><strong>刷新页面</strong></button>
+            <button id="open-global-settings" class="sidebar-tool-button" type="button"><span aria-hidden="true">⚙</span><strong>聊天配置</strong></button>
+          </div>
+          <div id="account-menu-wrap" class="sidebar-account-wrap">
+            <button id="open-account-menu" class="sidebar-account-button" type="button" aria-label="用户属性与账号菜单" aria-controls="account-menu" aria-expanded="false">
+              <span id="account-avatar" class="sidebar-account-avatar">我</span>
+              <span class="sidebar-account-copy"><strong id="account-display-name">—</strong><small id="account-username">—</small></span>
+              <span id="account-limits" class="sidebar-account-limits" aria-label="Codex 使用限额" hidden>
+                <span id="account-limit-five-hour"></span>
+                <span id="account-limit-week"></span>
+              </span>
+              <span class="sidebar-account-chevron" aria-hidden="true">›</span>
+            </button>
+            <div id="account-menu" class="topbar-menu account-menu" hidden>
+              <button id="manage-users" class="quiet-button" type="button" hidden>管理成员账号</button>
+              <button id="change-password" class="quiet-button" type="button">修改我的密码</button>
+              <button id="logout" class="quiet-button" type="button">退出登录</button>
+            </div>
+          </div>
+        </section>
+        <footer class="sidebar-footer"><span id="server-status" class="status-dot">正在连接主机</span><button id="open-settings" class="text-button" type="button">服务地址</button></footer>
+      </aside>
+
+      <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="收起项目和聊天侧边栏" tabindex="-1"></button>
+
+      <main class="workbench">
+        <header class="topbar">
+          <button id="open-sidebar" class="icon-button mobile-only" type="button" aria-label="打开项目和聊天" aria-controls="sidebar" aria-expanded="false">
+            <span class="drawer-lines" aria-hidden="true"></span>
+          </button>
+          <div class="topbar-context">
+            <span id="desktop-project-name">尚未选择</span>
+            <span class="context-separator" aria-hidden="true">/</span>
+            <div id="recent-thread-wrap" class="recent-thread-wrap">
+              <button id="open-recent-threads" class="thread-switcher-button" type="button" aria-label="切换最近聊天" aria-controls="recent-thread-menu" aria-expanded="false" disabled>
+                <strong id="thread-name">尚未打开聊天</strong><span class="thread-switcher-chevron" aria-hidden="true">⌄</span>
+              </button>
+              <div id="recent-thread-menu" class="topbar-menu recent-thread-menu" hidden></div>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <button id="run-status" class="run-status-button icon-button" type="button" aria-label="查看运行中的任务" aria-controls="run-strip" aria-expanded="false" hidden><span class="run-status-dot" aria-hidden="true"></span><span id="run-status-label" class="run-status-label">运行中</span></button>
+            <button id="quick-new-thread" class="icon-button quick-new-thread" type="button" aria-label="新建聊天" title="在当前项目新建聊天">＋</button>
+            <div id="thread-menu-wrap" class="topbar-menu-wrap">
+              <button id="open-thread-menu" class="icon-button" type="button" aria-label="聊天操作" aria-controls="thread-menu" aria-expanded="false"><span class="more-dots" aria-hidden="true"></span></button>
+              <div id="thread-menu" class="topbar-menu" hidden>
+                <button id="rename-thread" class="quiet-button" type="button" disabled>修改聊天名称</button>
+                <button id="delete-thread" class="danger-button" type="button" disabled>删除聊天记录</button>
+              </div>
+            </div>
+          </div>
+          <section id="run-strip" class="run-strip" aria-label="运行中的任务" hidden></section>
+        </header>
+        <p id="activity" class="global-activity" role="status" hidden></p>
+
+        <div class="conversation-stage">
+          <section id="conversation" class="conversation" aria-live="polite"></section>
+          <button id="jump-latest" class="jump-latest" type="button" hidden>↓ 回到最新</button>
+        </div>
+        <section id="queue-panel" class="queue-panel" hidden></section>
+
+        <section class="composer-zone">
+          <div class="composer-toolbar">
+            <input id="upload-file-input" type="file" accept="*/*" multiple hidden>
+            <button id="upload-files" class="compact-attachment-button" type="button" aria-label="上传附件" title="上传文件或图片；也可直接粘贴剪贴板图片">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 7v9a3 3 0 0 0 6 0V5a4 4 0 0 0-8 0v11a5 5 0 0 0 10 0V8"/></svg>
+            </button>
+            <div class="composer-quick-settings">
+              <label class="compact-select compact-model" aria-label="当前聊天模型"><select id="composer-model-select"></select></label>
+              <label class="compact-select compact-effort" aria-label="当前聊天推理深度"><select id="composer-effort-select"></select></label>
+              <label class="compact-select compact-tier" aria-label="当前聊天优先级"><select id="composer-tier-select"></select></label>
+            </div>
+            <div class="mode-switch" role="group" aria-label="消息模式">
+              <button id="mode-guide" type="button"><span aria-hidden="true">↗</span> 引导</button>
+              <button id="mode-queue" type="button">排队</button>
+            </div>
+          </div>
+          <div id="context-usage" class="context-usage" hidden>
+            <span class="context-usage-track" aria-hidden="true"><i id="context-usage-fill"></i></span>
+            <span id="context-usage-label" class="context-usage-label">窗口 —</span>
+          </div>
+          <div id="composer-attachments" class="composer-attachments" aria-label="待发送附件" hidden></div>
+          <form id="composer" class="composer">
+            <textarea id="prompt" rows="1" maxlength="200000" enterkeyhint="enter" aria-label="任务内容"></textarea>
+            <div class="composer-actions">
+              <button id="stop" class="composer-stop-button" type="button" hidden disabled aria-label="停止当前任务" title="停止当前任务"><span aria-hidden="true">■</span></button>
+              <button id="send" class="send-button" type="submit" aria-label="发送" title="发送"><span aria-hidden="true">↑</span></button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="project-dialog" class="project-dialog">
+      <form id="project-form" method="dialog">
+        <div class="dialog-heading"><div><span id="project-dialog-kicker">项目</span><h2 id="project-dialog-title">新建项目</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <label>项目名称<input id="project-name-input" name="name" maxlength="80" required></label>
+        <label>项目目录<input id="project-path-input" name="path" readonly aria-readonly="true"></label>
+        <p id="project-form-error" class="form-error"></p>
+        <div class="dialog-actions"><button id="delete-project" class="danger-button" type="button" hidden>删除项目记录</button><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button id="save-project" class="primary-button" value="default" type="submit">保存项目</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="project-rename-dialog" class="thread-dialog project-rename-dialog">
+      <form id="project-rename-form" method="dialog">
+        <div class="dialog-heading"><div><span>项目管理</span><h2>项目改名</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <label>新名称<input id="project-rename-input" maxlength="80" required></label>
+        <p id="project-rename-error" class="form-error"></p>
+        <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">确认改名</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="connection-dialog" class="project-dialog connection-dialog">
+      <form method="dialog">
+        <div class="dialog-heading"><div><span>Android APK</span><h2>连接地址</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <p>打开地址后使用自己的账号登录。请只在可信的专用局域网中使用。</p>
+        <code id="connection-address">—</code>
+      </form>
+    </dialog>
+
+    <dialog id="project-manager-dialog" class="project-manager-dialog">
+      <form method="dialog">
+        <div class="dialog-heading"><div><span>项目管理</span><h2>本机项目目录</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <p class="dialog-intro">项目记录只保存目录和执行配置。删除记录不会删除磁盘文件或 Codex 历史。</p>
+        <div id="project-manager-list" class="project-manager-list"></div>
+        <div class="dialog-actions"><button id="new-project-from-manager" class="primary-button" type="button">新增项目</button><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">完成</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="global-config-dialog" class="global-config-dialog">
+      <form method="dialog">
+        <div class="dialog-heading"><div><span>工作台配置</span><h2>刷新与聊天配置</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <section class="config-card">
+          <div><strong>工作台</strong><p>局域网连接与当前账号的本地显示偏好。</p></div>
+          <label>自动刷新<select id="refresh-interval"><option value="0">关闭（只手动刷新）</option><option value="15">每 15 秒</option><option value="30">每 30 秒</option><option value="60">每分钟</option></select></label>
+          <div class="connection-readout"><span>服务地址</span><code id="global-connection-address">—</code></div>
+          <button id="refresh-from-config" class="quiet-button" type="button">立即刷新</button>
+        </section>
+        <section class="config-card thread-execution-card">
+          <div><strong>当前聊天执行配置</strong><p id="config-thread-name">请先选择聊天。</p></div>
+          <div class="model-controls config-model-controls">
+            <label>模型<select id="model-select"></select></label>
+            <label>推理深度<select id="effort-select"></select></label>
+            <label id="tier-field">速度档位<select id="tier-select"></select></label>
+            <label>思路摘要<select id="summary-select"><option value="auto">自动</option><option value="concise">简洁</option><option value="detailed">详细</option><option value="none">关闭</option></select></label>
+          </div>
+          <p id="tier-description" class="tier-description"></p>
+          <p class="config-note">每个聊天独立保存。修改后只影响这个聊天随后启动的任务，不改变其他聊天或正在运行的任务。</p>
+        </section>
+      </form>
+    </dialog>
+
+    <dialog id="thread-dialog" class="thread-dialog">
+      <form id="thread-form" method="dialog">
+        <div class="dialog-heading"><div><span>聊天记录</span><h2>修改聊天名称</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <label>聊天名称<input id="thread-name-input" maxlength="100" required></label>
+        <p id="thread-form-error" class="form-error"></p>
+        <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">保存名称</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="password-dialog" class="thread-dialog password-dialog">
+      <form id="password-form" method="dialog">
+        <div class="dialog-heading"><div><span>账号安全</span><h2>修改我的密码</h2></div><button id="close-password-dialog" class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <p id="password-intro" class="dialog-intro">修改后，其他设备上的登录会立即失效。</p>
+        <label>当前密码<input id="current-password" type="password" autocomplete="current-password" required></label>
+        <label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+        <label>确认新密码<input id="new-password-confirm" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+        <p id="password-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">保存新密码</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="user-manager-dialog" class="project-manager-dialog user-manager-dialog">
+      <form method="dialog">
+        <div class="dialog-heading"><div><span>成员账号</span><h2>谁可以使用工作台</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <p class="dialog-intro">每个人拥有独立的项目列表、聊天、队列和设置。底层仍共用这台 Windows 的 Codex 与文件权限。</p>
+        <div id="user-list" class="user-list"></div>
+        <div class="dialog-actions"><button id="add-user" class="primary-button" type="button">新增成员账号</button><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">完成</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="user-dialog" class="thread-dialog user-dialog">
+      <form id="user-form" method="dialog">
+        <div class="dialog-heading"><div><span>成员账号</span><h2 id="user-dialog-title">新增账号</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <div id="new-user-fields">
+          <label>用户名<input id="user-username" autocapitalize="none" minlength="2" maxlength="32" required></label>
+          <label>显示名称<input id="user-display-name" maxlength="40" required></label>
+        </div>
+        <label>临时密码<input id="user-password" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+        <label>确认临时密码<input id="user-password-confirm" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
+        <p class="config-note">对方第一次登录后会被要求修改密码。</p>
+        <p id="user-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">保存账号</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="queue-edit-dialog" class="thread-dialog">
+      <form id="queue-edit-form" method="dialog">
+        <div class="dialog-heading"><div><span>等待队列</span><h2>编辑排队任务</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <label>任务内容<textarea id="queue-edit-input" rows="6" maxlength="200000" required></textarea></label>
+        <p id="queue-edit-error" class="form-error"></p>
+        <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">保存修改</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <form id="confirm-form" method="dialog">
+        <div class="dialog-heading"><div><span id="confirm-kicker">确认操作</span><h2 id="confirm-title">请确认</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <p id="confirm-message" class="dialog-intro"></p>
+        <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button id="confirm-submit" value="default" type="submit" class="danger-button">确认删除</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="markdown-preview-dialog" class="markdown-preview-dialog" aria-labelledby="markdown-preview-name">
+      <section class="markdown-preview-shell">
+        <header class="markdown-preview-header">
+          <div class="markdown-preview-heading">
+            <span id="file-preview-kicker">文件预览</span>
+            <h2 id="markdown-preview-name">文档</h2>
+            <code id="markdown-preview-path"></code>
+          </div>
+          <div class="markdown-preview-actions">
+            <a id="markdown-preview-download" class="quiet-button" href="#">下载 ↓</a>
+            <button id="close-markdown-preview" class="icon-button" type="button" aria-label="关闭预览">×</button>
+          </div>
+        </header>
+        <div class="markdown-preview-scroll">
+          <p id="markdown-preview-status" class="markdown-preview-status" role="status">正在读取文档…</p>
+          <article id="markdown-preview-body" class="markdown-document" tabindex="-1" hidden></article>
+        </div>
+      </section>
+    </dialog>
+
+    <template id="message-template"><article class="message"><div class="message-meta"></div><div class="message-body"></div></article></template>
+    <template id="queue-item-template"><li class="queue-item"><span class="queue-index"></span><span class="queue-text"></span><div class="queue-actions"><button data-action="guide" type="button" aria-label="转为当前任务的引导" title="转为引导">↗</button><button data-action="edit" type="button" aria-label="编辑排队任务">✎</button><button data-action="up" type="button" aria-label="上移">↑</button><button data-action="down" type="button" aria-label="下移">↓</button><button data-action="remove" type="button" aria-label="移除">×</button></div></li></template>
+    <script src="/vendor/katex/katex.min.js?v=0.16.22"></script>
+    <script type="module" src="/app.js?v=0.6.46-math"></script>
+  </body>
+</html>

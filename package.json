@@ -1,0 +1,14 @@
+{
+  "name": "codex-lan-workspace",
+  "version": "0.6.11",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check attachment-paths.js && node --check public/app.js && node --check public/ansi-output.js && node --check public/diff-output.js && node --check public/composer-input.js && node --check public/composer-attachments.js && node --check public/math-renderer.js && node --check public/usage-indicators.js && node --check public/file-access.js && node --check public/file-downloads.js && node --check public/file-preview.js && node --check public/execution-events.js && node --check public/execution-snapshot.js && node --check public/execution-timing.js && node --check public/elapsed-time.js && node --check public/recent-threads.js && node --check public/thread-defaults.js && node --check public/timing-alignment.js && node --check public/timing-persistence.js && node --check public/text-format.js && node --check public/markdown-preview.js && node --test"
+  }
+}
