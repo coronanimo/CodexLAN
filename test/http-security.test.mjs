@@ -88,7 +88,9 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       headers: { Cookie: adminCookie },
     });
     assert.equal(workspaceEventStream.status, 200);
-    const initialWorkspaceEvent = await readSseUntil(workspaceEventStream.body.getReader(), (contents) => contents.includes('event: server'));
+    const initialWorkspaceEvent = await readSseUntil(workspaceEventStream.body.getReader(), (contents) => (
+      contents.includes('event: server') && contents.includes('"status":"ready"')
+    ));
     assert.match(initialWorkspaceEvent, /"status":"ready"/);
     assert.equal((await fetch(`${origin}/api/health`)).status, 200);
 
