@@ -16,12 +16,12 @@ The service requires Node 20 or newer. Complete `codex login` before using Codex
 
 The local workbench remains available. LAN access stays unavailable until the machine has an RFC1918 private IPv4 address (`10.x`, `172.16-31.x`, or `192.168.x`). Connect to the intended trusted LAN, then restart the Node service. VPN route priority can change which adapter is selected.
 
-## The page opens on the host but not another device
+## The page opens on the server computer but not another device
 
 - Confirm both devices use the same trusted network and the exact LAN address shown by CodexLAN.
 - Confirm Windows labels that network as Private.
 - Check guest Wi-Fi or client isolation settings.
-- Run `Get-NetTCPConnection -LocalPort 8687 -State Listen` on the host.
+- Run `Get-NetTCPConnection -LocalPort 8687 -State Listen` on the server computer.
 - If necessary, add an inbound TCP rule for port `8687` to the Windows Private profile; do not create a Public-profile rule.
 
 ## The server exits during startup

@@ -13,6 +13,7 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 - Markdown, fenced code, tables, links, and local KaTeX formula rendering in assistant messages.
 - Loopback-only first-administrator setup, member accounts, sessions, password management, CSRF checks, and login throttling.
 - Node and Android CI builds plus isolated HTTP security tests.
+- A page-refresh control in the mobile top bar for iPhone Home Screen use.
 
 ### Changed
 
@@ -26,6 +27,7 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 - The local workbench remains available while Codex is missing, signed out, or reconnecting, and while LAN publishing is unavailable.
 - Runtime state, queue revisions, timing, and thread access metadata now live in the server state instead of browser storage.
 - The Android application ID is now `com.hushiwei.codexlan`; installations using the previous private ID require a fresh install.
+- User-facing copy refers to the Windows machine as the server computer rather than the retired Host product name.
 
 ### Fixed
 

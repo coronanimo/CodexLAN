@@ -5,7 +5,7 @@ Thanks for helping improve CodexLAN. This project values small, reviewable chang
 ## Before opening a change
 
 1. Read [SECURITY.md](SECURITY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-2. Discuss protocol changes, persistence-format changes, broad rewrites, and new host-platform claims before implementation.
+2. Discuss protocol changes, persistence-format changes, broad rewrites, and new operating-system support claims before implementation.
 3. Never use production account data, logs, chats, or real workspaces as fixtures.
 
 ## Development setup

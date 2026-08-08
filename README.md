@@ -19,7 +19,7 @@ This is an independent community project built on the experimental `codex app-se
 
 | Component | Requirement |
 | --- | --- |
-| Host | Windows 10 or 11 |
+| Server computer | Windows 10 or 11 |
 | Node.js | 20 or newer for source runs |
 | Codex | Codex CLI installed and signed in |
 | Browser | A current desktop or mobile browser |
@@ -54,7 +54,7 @@ New-NetFirewallRule -DisplayName 'CodexLAN 8687' -Direction Inbound -Action Allo
 
 ## Clients and packages
 
-- PC and iPhone use the web interface directly. Safari users can add the workbench to the Home Screen from the Share menu.
+- PC and iPhone use the web interface directly. Safari users can add the workbench to the Home Screen from the Share menu; the mobile top bar keeps a page-refresh button available in standalone mode.
 - The optional Android WebView client is under [`android/`](android/).
 - Current artifact status and release procedures are in [docs/RELEASES.md](docs/RELEASES.md).
 

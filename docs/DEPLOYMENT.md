@@ -2,7 +2,7 @@
 
 ## Supported deployment
 
-The verified deployment target is a Windows 10/11 host on a trusted private LAN. The Node listener does not provide TLS.
+The verified deployment target is a Windows 10/11 server computer on a trusted private LAN. The Node listener does not provide TLS.
 
 ```powershell
 npm start
@@ -24,7 +24,7 @@ There is no default username or password. On empty application state, open the p
 2. Select the smallest practical workspace root.
 3. Start without a firewall rule first; add a Private-profile rule only if another LAN device cannot connect.
 4. Allow accounts only for mutually trusted people.
-5. Prevent host sleep while long-running work must remain reachable.
+5. Prevent the server computer from sleeping while long-running work must remain reachable.
 
 ## HTTPS and remote access
 

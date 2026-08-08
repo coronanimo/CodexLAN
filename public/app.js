@@ -41,6 +41,7 @@ const ui = {
   addProject: $("#add-project"),
   manageProjectsSide: $("#manage-projects-side"),
   refreshWorkspace: $("#refresh-workspace"),
+  mobileRefresh: $("#mobile-refresh"),
   openGlobalSettings: $("#open-global-settings"),
   newThread: $("#new-thread"),
   quickNewThread: $("#quick-new-thread"),
@@ -273,7 +274,7 @@ function showAuth(setupRequired, message = "") {
   ui.authKicker.textContent = setupRequired ? "首次初始化" : "个人工作区";
   ui.authTitle.textContent = setupRequired ? "创建管理员账号" : "登录 CodexLAN";
   ui.authDescription.textContent = setupRequired
-    ? "创建这台主机的管理员账号。首次设置只能在服务器电脑上完成。"
+    ? "创建这个服务的管理员账号。首次设置只能在服务器电脑上完成。"
     : "进入只属于你的项目与聊天。";
   setTimeout(() => (setupRequired ? ui.setupUsername : ui.loginUsername).focus(), 0);
 }
@@ -4104,9 +4105,12 @@ ui.addUser.addEventListener("click", () => openUserDialog());
 ui.userForm.addEventListener("submit", saveUser);
 ui.addProject.addEventListener("click", () => openProjectDialog());
 ui.manageProjectsSide.addEventListener("click", openProjectManager);
-ui.refreshWorkspace.addEventListener("click", () => {
+function reloadPage() {
   location.reload();
-});
+}
+
+ui.refreshWorkspace.addEventListener("click", reloadPage);
+ui.mobileRefresh.addEventListener("click", reloadPage);
 ui.openGlobalSettings.addEventListener("click", openGlobalSettings);
 ui.newThread.addEventListener("click", () => createThread().catch(showError));
 ui.quickNewThread.addEventListener("click", () => createThread().catch(showError));

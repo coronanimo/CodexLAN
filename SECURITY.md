@@ -14,9 +14,9 @@ Include the affected version or commit, impact, minimal reproduction steps, and 
 
 CodexLAN can remotely drive Codex, execute commands, and read or modify files. It is intended only for one person or a small group of mutually trusted users.
 
-- Web accounts share the Windows user, Codex sign-in, host permissions, usage limits, and service workspace.
+- Web accounts share the Windows user, Codex sign-in, operating-system permissions, usage limits, and service workspace.
 - Accounts separate project and thread records in the application; they do not provide operating-system, process, quota, or credential isolation.
-- An administrator has a broader local-file download endpoint than ordinary members. Treat every administrator as trusted with the service host.
+- An administrator has a broader local-file download endpoint than ordinary members. Treat every administrator as trusted with the server computer.
 - The configured workspace root must not be a drive root, an entire user profile, or any directory containing material members must not access.
 - A compromised account can consume Codex quota and may cause commands to run with the service user's effective permissions.
 

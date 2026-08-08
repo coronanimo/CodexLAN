@@ -19,7 +19,7 @@ CodexLAN 是一个运行在 Windows 上的自托管工作台，让同一网络�
 
 | 组件 | 要求 |
 | --- | --- |
-| 主机 | Windows 10 或 11 |
+| 服务端电脑 | Windows 10 或 11 |
 | Node.js | 源码运行需要 20 或更高版本 |
 | Codex | 已安装并登录 Codex CLI |
 | 浏览器 | 当前版本的桌面或移动浏览器 |
@@ -54,7 +54,7 @@ New-NetFirewallRule -DisplayName 'CodexLAN 8687' -Direction Inbound -Action Allo
 
 ## 客户端与安装包
 
-- PC 和 iPhone 直接使用网页界面；iPhone 可以通过 Safari 的共享菜单添加到主屏幕。
+- PC 和 iPhone 直接使用网页界面；iPhone 可以通过 Safari 的共享菜单添加到主屏幕，独立运行时可使用顶栏的刷新按钮。
 - Android WebView 客户端位于 [`android/`](android/)。
 - 当前产物状态和发布步骤见 [docs/RELEASES.md](docs/RELEASES.md)。
 

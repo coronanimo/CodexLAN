@@ -35,7 +35,7 @@
           <p id="setup-error" class="form-error" role="alert"></p>
           <button class="primary-button auth-submit" type="submit">创建管理员</button>
         </form>
-        <footer class="auth-footnote"><span class="status-dot"></span><span>账号只保存在这台 Windows 主机上</span></footer>
+        <footer class="auth-footnote"><span class="status-dot"></span><span>账号只保存在运行服务的电脑上</span></footer>
       </section>
     </main>
 
@@ -76,7 +76,7 @@
             </div>
           </div>
         </section>
-        <footer class="sidebar-footer"><span id="server-status" class="status-dot">正在连接主机</span><button id="open-settings" class="text-button" type="button">服务地址</button></footer>
+        <footer class="sidebar-footer"><span id="server-status" class="status-dot">正在连接服务</span><button id="open-settings" class="text-button" type="button">服务地址</button></footer>
       </aside>
 
       <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="收起项目和聊天侧边栏" tabindex="-1"></button>
@@ -102,6 +102,9 @@
           </div>
           <div class="topbar-actions">
             <button id="run-status" class="run-status-button icon-button" type="button" aria-label="查看运行中的任务" aria-controls="run-strip" aria-expanded="false" hidden><span class="run-status-dot" aria-hidden="true"></span><span id="run-status-label" class="run-status-label">运行中</span></button>
+            <button id="mobile-refresh" class="icon-button mobile-only mobile-refresh" type="button" aria-label="刷新页面" title="刷新页面">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+            </button>
             <button id="quick-new-thread" class="icon-button quick-new-thread" type="button" aria-label="新建聊天" title="在当前项目新建聊天"><span class="quick-new-thread-plus" aria-hidden="true"></span></button>
             <div id="thread-menu-wrap" class="topbar-menu-wrap">
               <button id="open-thread-menu" class="icon-button" type="button" aria-label="聊天操作" aria-controls="thread-menu" aria-expanded="false"><span class="more-dots" aria-hidden="true"></span></button>

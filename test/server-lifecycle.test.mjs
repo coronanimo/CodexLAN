@@ -13,7 +13,7 @@ const packageVersion = JSON.parse(await readFile(join(repositoryRoot, "package.j
 
 test("keeps the loopback service available when the LAN port is occupied", { timeout: 20_000 }, async (context) => {
   const privateAddress = privateIpv4Address();
-  if (!privateAddress) return context.skip("No private IPv4 address is available on this test host.");
+  if (!privateAddress) return context.skip("No private IPv4 address is available on this test machine.");
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), "codex-lan-server-lifecycle-"));
   const workspace = join(temporaryRoot, "workspace");
