@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -110,7 +110,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       body: { name: "Admin selected project", path: arbitraryAdminPath },
     });
     assert.equal(arbitraryAdminProject.status, 201);
-    assert.equal(arbitraryAdminProject.body.project.path, resolve(arbitraryAdminPath));
+    assert.equal(arbitraryAdminProject.body.project.path, await realpath(arbitraryAdminPath));
     const duplicateAdminPath = await request(origin, "/api/projects", {
       method: "POST",
       cookie: adminCookie,
