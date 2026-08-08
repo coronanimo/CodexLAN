@@ -33,3 +33,19 @@ export function messageWithAttachments(text, attachments) {
   const references = attachments.map(attachmentReference).join("\n");
   return [body, references].filter(Boolean).join("\n");
 }
+
+export function shouldSubmitPromptFromKeyboard(event, { compositionActive = false, mobile = false } = {}) {
+  if (event.key !== "Enter" || event.shiftKey) return false;
+  if (mobile || compositionActive || event.isComposing || event.keyCode === 229) return false;
+  return true;
+}
+
+export function isMobileComposer(navigatorLike = {}) {
+  if (navigatorLike.userAgentData?.mobile === true) return true;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(String(navigatorLike.userAgent || ""));
+}
+
+export function resizeComposerInput(input, maximumHeight = 145) {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, maximumHeight)}px`;
+}

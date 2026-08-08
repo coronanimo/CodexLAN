@@ -2,45 +2,43 @@
 
 ## Supported deployment
 
-The verified deployment target is a Windows 10/11 host on a trusted private LAN. The built-in launcher is not a Windows service installer and the Node listener does not provide TLS.
+The verified deployment target is a Windows 10/11 host on a trusted private LAN. The Node listener does not provide TLS.
 
 ```powershell
-.\Start-Codex-Web.ps1 [-Workspace <directory>] [-Port <port>] [-OpenFirewall]
+npm start
 ```
 
-- `Workspace`: root that may contain user-managed project directories; defaults to repository-local `workspace/`.
-- `Port`: HTTP port, default `8687`.
-- `OpenFirewall`: creates an inbound rule for the Windows Private network profile and requires elevation.
+- `CODEX_WORKDIR`: root that may contain user-managed project directories; source runs default to repository-local `workspace/`.
+- `CODEX_WEB_PORT`: LAN HTTP port; defaults to `8687`.
+- `CODEX_WEB_DATA_DIR`: state directory; source runs default to repository-local `data/`.
 
-The launcher checks for Node and Codex, selects a private IPv4 address on the default route, binds only to that address, starts the Node child process, and monitors `/api/health`. Keep its PowerShell process running. It prints the access URL and first-run setup information directly.
+The service currently runs from source and requires Node.js. There is no Windows binary package.
 
 ## First administrator
 
-There is no default username or password. On an empty `data/` directory, the server creates a one-time setup token and prints it in the launcher terminal. Use it to create the first administrator. The token cannot initialize another administrator after users exist.
-
-The same output is recorded in `logs/service-supervised.out.log`. Treat that log as sensitive while the setup token is valid.
+There is no default username or password. On empty application state, open the printed loopback workbench address on the server machine and create the first administrator. The setup endpoint rejects LAN clients and creates the administrator's default project at the same time.
 
 ## LAN checklist
 
 1. Keep the Windows network profile set to Private.
 2. Select the smallest practical workspace root.
-3. Start without `-OpenFirewall` first; add a rule only if another LAN device cannot connect.
+3. Start without a firewall rule first; add a Private-profile rule only if another LAN device cannot connect.
 4. Allow accounts only for mutually trusted people.
 5. Prevent host sleep while long-running work must remain reachable.
 
 ## HTTPS and remote access
 
-Do not forward the service port directly from a router. For remote access, place a maintained reverse proxy or private-network gateway in front of the service, use a trusted HTTPS certificate, restrict who can reach it, and retain an end-to-end threat model. The proxy must preserve the requested host correctly because the service enforces same-origin checks and marks cookies Secure when it observes HTTPS-forwarding headers.
+Do not forward the service port directly from a router. For remote access, place a maintained reverse proxy or private-network gateway in front of the service, use a trusted HTTPS certificate, and restrict who can reach it. The proxy must preserve the requested host and scheme because the service enforces same-origin checks and marks cookies Secure for HTTPS.
 
-No reverse-proxy recipe is currently declared verified. Validate login, logout, CSRF-protected writes, SSE streaming, large uploads, downloads, timeouts, and secure cookies before relying on a chosen proxy. CGNAT and router NAT-loopback behavior are network constraints, not application features.
+The project does not yet include a tested reverse-proxy configuration. Test login, logout, writes, SSE, uploads, downloads, timeouts, and secure cookies with the selected proxy.
 
 ## Backup
 
-Stop the launcher before taking a consistent backup. Back up separately and protect:
+Stop CodexLAN before taking a consistent backup. Back up separately and protect:
 
-- `data/`: users, password hashes, sessions, ownership, queues, and UI state.
+- `CODEX_WEB_DATA_DIR`, or `data/` when it is unset: users, password hashes, sessions, ownership, queues, and UI state.
 - The configured workspace root and project files.
-- Codex CLI configuration and conversation state only if your recovery plan requires them.
+- Codex CLI configuration and conversation state when they are part of the recovery scope.
 
 Do not put backups in the repository or a public release. Test restoration with the same Windows user permissions and a compatible Codex CLI version.
 
@@ -48,10 +46,10 @@ Do not put backups in the repository or a public release. Test restoration with 
 
 1. Read `CHANGELOG.md` and known issues.
 2. Back up `data/` and every configured workspace.
-3. Stop the launcher and confirm the Node/app-server processes have exited.
+3. Stop CodexLAN and confirm the Node/app-server processes have exited.
 4. Replace source files without replacing runtime data.
 5. Run `npm run check`.
-6. Start with the previous arguments and run the app-server compatibility checks in [DEVELOPMENT.md](DEVELOPMENT.md).
+6. Start with the previous configuration and run the app-server compatibility checks in [DEVELOPMENT.md](DEVELOPMENT.md).
 7. Keep the backup until login, projects, history, queues, files, and active work are verified.
 
-There is not yet a formal data migration or rollback framework. Never downgrade over the only copy of production data.
+State upgrades are one-way. Version 9 state migrates directly to version 13; unsupported versions fail at startup. Keep a backup when testing an upgrade or downgrade.

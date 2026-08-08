@@ -1,13 +1,20 @@
 package com.hushiwei.codexlan;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.DownloadManager;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Insets;
-import android.graphics.Rect;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,12 +22,16 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.MediaStore;
 import android.text.InputType;
 import android.view.Gravity;
-import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.Window;
+import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.CookieManager;
 import android.webkit.URLUtil;
@@ -35,41 +46,65 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.window.OnBackInvokedDispatcher;
 
+import org.json.JSONArray;
+
 import java.io.File;
-import java.util.Collections;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 
 public final class MainActivity extends Activity {
     private static final String PREFERENCES = "codex_workspace";
     private static final String ADDRESS_KEY = "address";
+    private static final String SERVERS_KEY = "servers";
+    private static final String ORB_POSITION_KEY = "orb_position";
+    private static final int MAX_SAVED_SERVERS = 8;
     private static final int FILE_CHOOSER_REQUEST = 4107;
     private static final long EXIT_GESTURE_WINDOW_MS = 1800;
-    private static final long ADDRESS_GESTURE_WINDOW_MS = 1400;
     private static final long CONNECTION_TIMEOUT_MS = 12000;
     private SharedPreferences preferences;
     private FrameLayout appRoot;
     private FrameLayout workspaceContainer;
     private WebView webView;
+    private LinearLayout controlDock;
+    private LinearLayout controlMenu;
+    private ControlOrbView controlOrbButton;
+    private View controlOrbSurface;
+    private TextView controlHost;
+    private View controlStatusDot;
     private LinearLayout connectionPanel;
     private EditText addressInput;
     private TextView errorText;
     private long lastExitGestureAt;
-    private long firstAddressGestureAt;
     private Toast exitToast;
     private ValueCallback<Uri[]> fileChooserCallback;
+    private final ArrayList<Uri> pendingSharedUris = new ArrayList<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable connectionTimeout;
+    private String orbConnectionState = "offline";
+    private float orbDragStartRawY;
+    private float orbDragStartTranslationY;
+    private boolean orbMoved;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         configureWebView();
+        captureSharedFiles(getIntent());
         registerBackHandler();
         showStoredAddressOrEditor();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        captureSharedFiles(intent);
     }
 
     private void registerBackHandler() {
@@ -98,15 +133,13 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
     private void configureWebView() {
-        appRoot = new AddressGestureLayout(this);
+        appRoot = new FrameLayout(this);
         appRoot.setBackgroundColor(Color.rgb(245, 248, 252));
-        appRoot.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) ->
-            updateAddressGestureExclusion()
-        );
         workspaceContainer = new FrameLayout(this);
         workspaceContainer.setBackgroundColor(Color.rgb(245, 248, 252));
-        workspaceContainer.setPadding(0, initialTopSystemInset(), 0, 0);
+        workspaceContainer.setPadding(0, 0, 0, 0);
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -138,16 +171,63 @@ public final class MainActivity extends Activity {
             FrameLayout.LayoutParams.MATCH_PARENT
         ));
         applyTopSystemInset(workspaceContainer, 0, 0, 0, 0);
+        configureControlDock();
+    }
+
+    private void configureControlDock() {
+        controlDock = new LinearLayout(this);
+        controlDock.setOrientation(LinearLayout.HORIZONTAL);
+        controlDock.setGravity(Gravity.CENTER_VERTICAL);
+        controlDock.setElevation(dp(12));
+
+        controlMenu = new LinearLayout(this);
+        controlMenu.setOrientation(LinearLayout.VERTICAL);
+        controlMenu.setPadding(dp(6), dp(7), dp(6), dp(7));
+        controlMenu.setBackground(roundedBackground(Color.argb(250, 255, 255, 255), 16));
+        controlMenu.setVisibility(View.GONE);
+
+        controlHost = text("尚未连接服务器", 12, Color.rgb(16, 33, 61));
+        controlHost.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        controlHost.setSingleLine(true);
+        controlHost.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        controlMenu.addView(controlHost, margins(9, 2, 9, 7));
+        controlMenu.addView(controlAction("↻", "刷新", this::refreshCurrentServer));
+        controlMenu.addView(controlAction("◎", "服务器", this::showServerChooser));
+
+        LinearLayout.LayoutParams menuParams = new LinearLayout.LayoutParams(dp(184), LinearLayout.LayoutParams.WRAP_CONTENT);
+        menuParams.setMarginEnd(dp(6));
+        controlDock.addView(controlMenu, menuParams);
+
+        controlOrbButton = new ControlOrbView(this);
+        controlOrbButton.setBackgroundColor(Color.TRANSPARENT);
+        controlOrbButton.setContentDescription("打开全局菜单");
+        controlOrbButton.setOnClickListener((view) -> setControlExpanded(controlMenu.getVisibility() != View.VISIBLE));
+        controlOrbButton.setOnTouchListener(this::handleOrbTouch);
+        controlOrbSurface = new View(this);
+        controlOrbSurface.setBackground(orbBackground(Color.argb(150, 23, 52, 95)));
+        controlOrbButton.addView(controlOrbSurface, new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER));
+        controlStatusDot = new View(this);
+        FrameLayout.LayoutParams dotParams = new FrameLayout.LayoutParams(dp(8), dp(8), Gravity.END | Gravity.BOTTOM);
+        dotParams.setMargins(0, 0, dp(3), dp(3));
+        controlOrbButton.addView(controlStatusDot, dotParams);
+        controlDock.addView(controlOrbButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        refreshControlDock();
     }
 
     private void showStoredAddressOrEditor() {
         String address = preferences.getString(ADDRESS_KEY, "");
-        if (isTrustedWorkspaceAddress(address)) loadWorkspace(address);
-        else showConnectionEditor("");
+        if (isWorkspaceAddress(address)) {
+            loadWorkspace(address);
+        }
+        else {
+            setOrbConnectionState("offline");
+            showConnectionEditor("");
+        }
     }
 
     private void loadWorkspace(String address) {
         String normalized = normalizeAddress(address);
+        setOrbConnectionState("connecting");
         connectionPanel = null;
         showContent(workspaceContainer);
         webView.stopLoading();
@@ -157,7 +237,8 @@ public final class MainActivity extends Activity {
             connectionTimeout = null;
             if (connectionPanel == null) {
                 webView.stopLoading();
-                showConnectionEditor("连接超时，请检查公网地址、端口映射或网络状态后重试。");
+                setOrbConnectionState("offline");
+                showConnectionEditor("连接超时。请确认手机和服务器在同一网络，并检查工作台地址和端口。");
             }
         };
         mainHandler.postDelayed(connectionTimeout, CONNECTION_TIMEOUT_MS);
@@ -173,7 +254,159 @@ public final class MainActivity extends Activity {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ));
+        attachControlOrb(false);
         setContentView(appRoot);
+    }
+
+    private void attachControlOrb(boolean expanded) {
+        if (controlDock == null) return;
+        if (controlDock.getParent() instanceof ViewGroup) {
+            ((ViewGroup) controlDock.getParent()).removeView(controlDock);
+        }
+        setControlExpanded(expanded);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.END | Gravity.CENTER_VERTICAL
+        );
+        params.setMarginEnd(dp(4));
+        appRoot.addView(controlDock, params);
+        controlDock.bringToFront();
+        controlDock.post(this::restoreControlPosition);
+    }
+
+    private void setControlExpanded(boolean expanded) {
+        if (controlMenu == null) return;
+        controlMenu.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        if (controlOrbButton != null && controlOrbSurface != null) {
+            controlOrbButton.setContentDescription(expanded ? "关闭全局菜单" : "打开全局菜单");
+            controlOrbSurface.setBackground(orbBackground(expanded
+                ? Color.argb(185, 46, 107, 255)
+                : Color.argb(150, 23, 52, 95)));
+        }
+        if (expanded) {
+            refreshControlDock();
+            controlDock.post(() -> controlDock.setTranslationY(clampControlTranslation(controlDock.getTranslationY())));
+        } else {
+            controlDock.post(this::restoreControlPosition);
+        }
+    }
+
+    private boolean handleOrbTouch(View view, MotionEvent event) {
+        if (controlMenu.getVisibility() == View.VISIBLE) return false;
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            orbDragStartRawY = event.getRawY();
+            orbDragStartTranslationY = controlDock.getTranslationY();
+            orbMoved = false;
+            return true;
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            float distance = event.getRawY() - orbDragStartRawY;
+            if (Math.abs(distance) > dp(4)) orbMoved = true;
+            if (orbMoved) controlDock.setTranslationY(clampControlTranslation(orbDragStartTranslationY + distance));
+            return true;
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+            if (orbMoved) saveControlPosition();
+            else view.performClick();
+            return true;
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+            restoreControlPosition();
+            return true;
+        }
+        return true;
+    }
+
+    private float clampControlTranslation(float requested) {
+        if (appRoot.getHeight() <= 0 || controlDock.getHeight() <= 0) return requested;
+        float baseTop = (appRoot.getHeight() - controlDock.getHeight()) / 2f;
+        float minimum = dp(10) - baseTop;
+        float maximum = appRoot.getHeight() - dp(10) - controlDock.getHeight() - baseTop;
+        return Math.max(minimum, Math.min(maximum, requested));
+    }
+
+    private void restoreControlPosition() {
+        if (appRoot.getHeight() <= 0 || controlDock.getHeight() <= 0) return;
+        float ratio = Math.max(0f, Math.min(1f, preferences.getFloat(ORB_POSITION_KEY, 0.52f)));
+        float available = Math.max(0f, appRoot.getHeight() - dp(20) - controlDock.getHeight());
+        float desiredTop = dp(10) + available * ratio;
+        float baseTop = (appRoot.getHeight() - controlDock.getHeight()) / 2f;
+        controlDock.setTranslationY(clampControlTranslation(desiredTop - baseTop));
+    }
+
+    private void saveControlPosition() {
+        if (appRoot.getHeight() <= 0 || controlDock.getHeight() <= 0) return;
+        float baseTop = (appRoot.getHeight() - controlDock.getHeight()) / 2f;
+        float actualTop = baseTop + controlDock.getTranslationY();
+        float available = Math.max(1f, appRoot.getHeight() - dp(20) - controlDock.getHeight());
+        float ratio = Math.max(0f, Math.min(1f, (actualTop - dp(10)) / available));
+        preferences.edit().putFloat(ORB_POSITION_KEY, ratio).apply();
+    }
+
+    private void setOrbConnectionState(String state) {
+        orbConnectionState = state;
+        refreshControlDock();
+    }
+
+    private void refreshControlDock() {
+        if (controlStatusDot != null) {
+            int color = "online".equals(orbConnectionState)
+                ? Color.rgb(19, 138, 100)
+                : "connecting".equals(orbConnectionState)
+                    ? Color.rgb(245, 166, 35)
+                    : Color.rgb(189, 60, 74);
+            controlStatusDot.setBackground(ovalBackground(color));
+        }
+        if (controlHost != null) {
+            String address = preferences == null ? "" : preferences.getString(ADDRESS_KEY, "");
+            controlHost.setText(isWorkspaceAddress(address) ? address : "尚未连接服务器");
+        }
+    }
+
+    private TextView controlAction(String icon, String label, Runnable action) {
+        TextView button = text(icon + "    " + label, 13, Color.rgb(36, 59, 91));
+        button.setGravity(Gravity.CENTER_VERTICAL);
+        button.setMinHeight(dp(44));
+        button.setPadding(dp(10), 0, dp(10), 0);
+        button.setBackground(roundedBackground(Color.rgb(246, 249, 253), 10));
+        button.setClickable(true);
+        button.setFocusable(true);
+        button.setOnClickListener((view) -> {
+            setControlExpanded(false);
+            action.run();
+        });
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(2), 0, 0);
+        button.setLayoutParams(params);
+        return button;
+    }
+
+    private GradientDrawable roundedBackground(int color, int radiusDp) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(dp(radiusDp));
+        background.setStroke(dp(1), Color.rgb(203, 216, 232));
+        return background;
+    }
+
+    private GradientDrawable ovalBackground(int color) {
+        GradientDrawable background = new GradientDrawable();
+        background.setShape(GradientDrawable.OVAL);
+        background.setColor(color);
+        background.setStroke(dp(2), Color.WHITE);
+        return background;
+    }
+
+    private GradientDrawable orbBackground(int color) {
+        GradientDrawable background = new GradientDrawable();
+        background.setShape(GradientDrawable.OVAL);
+        background.setColor(color);
+        background.setStroke(dp(1), Color.argb(130, 255, 255, 255));
+        return background;
     }
 
     private void showConnectionEditor(String message) {
@@ -187,8 +420,8 @@ public final class MainActivity extends Activity {
         applyTopSystemInset(panel, panelPadding, panelPadding, panelPadding, panelPadding);
 
         TextView eyebrow = text("工作台连接", 12, Color.rgb(46, 107, 255));
-        TextView title = text("连接 Codex 工作台", 27, Color.rgb(16, 33, 61));
-        TextView hint = text("输入完整的 HTTP 或 HTTPS 地址，支持局域网 IP、公网 IP和域名。公网连接建议使用 HTTPS；HTTP 会明文传输登录和聊天内容。在任意页面从屏幕右侧边缘任意位置连续向左滑两次，可以重新打开这里。", 15, Color.rgb(90, 107, 132));
+        TextView title = text("连接 CodexLAN", 27, Color.rgb(16, 33, 61));
+        TextView hint = text("输入完整的 HTTP 或 HTTPS 地址，支持局域网 IP、公网 IP和域名。公网连接建议使用 HTTPS；HTTP 会明文传输登录和聊天内容。屏幕右侧的悬浮球始终可以打开服务器切换。", 15, Color.rgb(90, 107, 132));
         addressInput = new EditText(this);
         addressInput.setSingleLine(true);
         addressInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
@@ -213,16 +446,16 @@ public final class MainActivity extends Activity {
 
     private void saveAndLoadAddress() {
         String address = addressInput.getText().toString().trim();
-        if (!isTrustedWorkspaceAddress(address)) {
-            errorText.setText("请输入完整的 http:// 或 https:// 地址，例如 http://公网IP:端口 或 https://你的域名。");
+        if (!isWorkspaceAddress(address)) {
+            errorText.setText(R.string.invalid_workspace_address);
             return;
         }
         String normalized = normalizeAddress(address);
-        preferences.edit().putString(ADDRESS_KEY, normalized).apply();
+        saveServerSelection(normalized);
         loadWorkspace(normalized);
     }
 
-    private boolean isTrustedWorkspaceAddress(String raw) {
+    private boolean isWorkspaceAddress(String raw) {
         try {
             Uri uri = Uri.parse(normalizeAddress(raw));
             String host = uri.getHost();
@@ -248,6 +481,239 @@ public final class MainActivity extends Activity {
         return value;
     }
 
+    private ArrayList<String> savedServers() {
+        LinkedHashSet<String> unique = new LinkedHashSet<>();
+        String current = preferences.getString(ADDRESS_KEY, "");
+        if (isWorkspaceAddress(current)) unique.add(normalizeAddress(current));
+        try {
+            JSONArray stored = new JSONArray(preferences.getString(SERVERS_KEY, "[]"));
+            for (int index = 0; index < stored.length() && unique.size() < MAX_SAVED_SERVERS; index++) {
+                String address = normalizeAddress(stored.optString(index, ""));
+                if (isWorkspaceAddress(address)) unique.add(address);
+            }
+        } catch (Exception ignored) {
+            preferences.edit().remove(SERVERS_KEY).apply();
+        }
+        return new ArrayList<>(unique);
+    }
+
+    private void saveServerSelection(String rawAddress) {
+        String address = normalizeAddress(rawAddress);
+        ArrayList<String> servers = savedServers();
+        servers.remove(address);
+        servers.add(0, address);
+        writeSavedServers(servers, address);
+    }
+
+    private void forgetServer(String rawAddress) {
+        String address = normalizeAddress(rawAddress);
+        String current = normalizeAddress(preferences.getString(ADDRESS_KEY, ""));
+        if (address.equals(current)) return;
+        ArrayList<String> servers = savedServers();
+        if (servers.remove(address)) writeSavedServers(servers, null);
+    }
+
+    private void writeSavedServers(ArrayList<String> servers, String current) {
+        JSONArray stored = new JSONArray();
+        for (int index = 0; index < servers.size() && index < MAX_SAVED_SERVERS; index++) {
+            stored.put(servers.get(index));
+        }
+        SharedPreferences.Editor editor = preferences.edit().putString(SERVERS_KEY, stored.toString());
+        if (current != null) editor.putString(ADDRESS_KEY, current);
+        editor.apply();
+        refreshControlDock();
+    }
+
+    private void switchServer(String rawAddress) {
+        String address = normalizeAddress(rawAddress);
+        if (!isWorkspaceAddress(address)) {
+            Toast.makeText(this, "服务器地址无效", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        saveServerSelection(address);
+        setControlExpanded(false);
+        loadWorkspace(address);
+    }
+
+    private void refreshCurrentServer() {
+        String address = preferences.getString(ADDRESS_KEY, "");
+        if (!isWorkspaceAddress(address)) {
+            showConnectionEditor("");
+            return;
+        }
+        hideSoftwareKeyboard();
+        if (connectionPanel == null) {
+            setOrbConnectionState("connecting");
+            webView.reload();
+        } else {
+            loadWorkspace(address);
+        }
+    }
+
+    private void showServerChooser() {
+        ArrayList<String> servers = savedServers();
+        if (servers.isEmpty()) {
+            showConnectionEditor("");
+            return;
+        }
+        String current = normalizeAddress(preferences.getString(ADDRESS_KEY, ""));
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(16), dp(14), dp(16), dp(18));
+        sheet.setBackground(serverSheetBackground());
+
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.VERTICAL);
+        TextView kicker = text("服务器", 11, Color.rgb(46, 107, 255));
+        kicker.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView title = text("切换工作台", 22, Color.rgb(16, 33, 61));
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        heading.addView(kicker);
+        heading.addView(title);
+        header.addView(heading, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        TextView close = text("×", 25, Color.rgb(92, 110, 135));
+        close.setGravity(Gravity.CENTER);
+        close.setContentDescription("关闭服务器列表");
+        close.setBackground(roundedBackground(Color.rgb(242, 246, 251), 11));
+        close.setOnClickListener((view) -> dialog.dismiss());
+        header.addView(close, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        sheet.addView(header, margins(2, 0, 0, 13));
+
+        LinearLayout serverList = new LinearLayout(this);
+        serverList.setOrientation(LinearLayout.VERTICAL);
+        for (String address : servers) {
+            serverList.addView(serverRow(dialog, address, address.equals(current)));
+        }
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        scroll.addView(serverList);
+        int listHeight = Math.min(servers.size() * 68, 326);
+        sheet.addView(scroll, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(listHeight)
+        ));
+
+        TextView addServer = text("＋  添加服务器", 14, Color.WHITE);
+        addServer.setGravity(Gravity.CENTER);
+        addServer.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        addServer.setBackground(roundedBackground(Color.rgb(46, 107, 255), 12));
+        addServer.setOnClickListener((view) -> {
+            dialog.dismiss();
+            showConnectionEditor("");
+        });
+        LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(48)
+        );
+        addParams.setMargins(0, dp(12), 0, 0);
+        sheet.addView(addServer, addParams);
+
+        dialog.setContentView(sheet);
+        dialog.setCanceledOnTouchOutside(true);
+        Window window = dialog.getWindow();
+        if (window != null) window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        dialog.show();
+        window = dialog.getWindow();
+        if (window != null) {
+            window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT);
+            window.setGravity(Gravity.BOTTOM);
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.dimAmount = 0.34f;
+            window.setAttributes(attributes);
+        }
+    }
+
+    private View serverRow(Dialog dialog, String address, boolean current) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(7), dp(10), dp(7));
+        row.setBackground(roundedBackground(
+            current ? Color.rgb(235, 242, 255) : Color.rgb(248, 250, 253),
+            12
+        ));
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setOnClickListener((view) -> {
+            dialog.dismiss();
+            if (!current) switchServer(address);
+        });
+
+        View dot = new View(this);
+        int dotColor = current
+            ? "online".equals(orbConnectionState)
+                ? Color.rgb(19, 138, 100)
+                : "connecting".equals(orbConnectionState)
+                    ? Color.rgb(245, 166, 35)
+                    : Color.rgb(189, 60, 74)
+            : Color.rgb(175, 188, 205);
+        dot.setBackground(ovalBackground(dotColor));
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(10), dp(10));
+        dotParams.setMarginEnd(dp(11));
+        row.addView(dot, dotParams);
+
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        TextView host = text(serverHost(address), 14, Color.rgb(16, 33, 61));
+        host.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView url = text(address, 10, Color.rgb(101, 120, 145));
+        url.setSingleLine(true);
+        url.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        copy.addView(host);
+        copy.addView(url);
+        row.addView(copy, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView trailing = text(current ? "当前" : "×", current ? 10 : 20, current ? Color.rgb(23, 79, 201) : Color.rgb(139, 83, 93));
+        trailing.setGravity(Gravity.CENTER);
+        if (current) {
+            trailing.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            trailing.setBackground(roundedBackground(Color.rgb(218, 231, 255), 8));
+        } else {
+            trailing.setContentDescription("移除服务器 " + serverHost(address));
+            trailing.setBackground(roundedBackground(Color.rgb(253, 243, 245), 9));
+            trailing.setClickable(true);
+            trailing.setOnClickListener((view) -> {
+                forgetServer(address);
+                dialog.dismiss();
+                showServerChooser();
+            });
+        }
+        row.addView(trailing, new LinearLayout.LayoutParams(current ? dp(42) : dp(28), dp(32)));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(62)
+        );
+        params.setMargins(0, 0, 0, dp(6));
+        row.setLayoutParams(params);
+        return row;
+    }
+
+    private String serverHost(String address) {
+        Uri uri = Uri.parse(address);
+        String host = uri.getHost() == null ? address : uri.getHost();
+        return uri.getPort() > 0 ? host + ":" + uri.getPort() : host;
+    }
+
+    private GradientDrawable serverSheetBackground() {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Color.rgb(255, 255, 255));
+        float radius = dp(22);
+        background.setCornerRadii(new float[] { radius, radius, radius, radius, 0, 0, 0, 0 });
+        return background;
+    }
+
+    private void hideSoftwareKeyboard() {
+        InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (keyboard != null && appRoot != null) {
+            keyboard.hideSoftInputFromWindow(appRoot.getWindowToken(), 0);
+        }
+    }
+
     private void cancelConnectionTimeout() {
         if (connectionTimeout == null) return;
         mainHandler.removeCallbacks(connectionTimeout);
@@ -267,7 +733,7 @@ public final class MainActivity extends Activity {
             String cookie = CookieManager.getInstance().getCookie(url);
             if (cookie != null && !cookie.trim().isEmpty()) request.addRequestHeader("Cookie", cookie);
             request.setTitle(fileName);
-            request.setDescription("来自 Codex 工作台");
+            request.setDescription("来自 CodexLAN");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             request.setAllowedOverMetered(true);
             request.setAllowedOverRoaming(false);
@@ -353,16 +819,115 @@ public final class MainActivity extends Activity {
         fileChooserCallback = null;
     }
 
+    private void captureSharedFiles(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        if (!Intent.ACTION_SEND.equals(action) && !Intent.ACTION_SEND_MULTIPLE.equals(action)) return;
+
+        LinkedHashSet<Uri> selected = new LinkedHashSet<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Uri single = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
+            if (single != null) selected.add(single);
+            ArrayList<Uri> multiple = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri.class);
+            if (multiple != null) selected.addAll(multiple);
+        } else {
+            Uri single = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (single != null) selected.add(single);
+            ArrayList<Uri> multiple = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (multiple != null) selected.addAll(multiple);
+        }
+        ClipData clipData = intent.getClipData();
+        if (clipData != null) {
+            for (int index = 0; index < clipData.getItemCount(); index++) {
+                Uri uri = clipData.getItemAt(index).getUri();
+                if (uri != null) selected.add(uri);
+            }
+        }
+
+        pendingSharedUris.clear();
+        for (Uri uri : selected) {
+            if ("content".equalsIgnoreCase(uri.getScheme())) pendingSharedUris.add(uri);
+        }
+        if (pendingSharedUris.isEmpty()) {
+            Toast.makeText(this, "分享内容中没有可读取的文件", Toast.LENGTH_LONG).show();
+            return;
+        }
+        dispatchPendingSharedFiles();
+    }
+
+    private void dispatchPendingSharedFiles() {
+        if (pendingSharedUris.isEmpty() || webView == null || fileChooserCallback != null) return;
+        webView.post(() -> webView.evaluateJavascript(
+            "window.codexReceiveAndroidShare ? window.codexReceiveAndroidShare() : 'not-ready'",
+            null
+        ));
+    }
+
+    private void deliverPendingSharedFiles(ValueCallback<Uri[]> callback) {
+        Uri[] uris = pendingSharedUris.toArray(new Uri[0]);
+        pendingSharedUris.clear();
+        callback.onReceiveValue(uris);
+        Toast.makeText(this, uris.length == 1 ? "已加入分享的文件" : "已加入 " + uris.length + " 个分享文件", Toast.LENGTH_SHORT).show();
+    }
+
+    private void showAttachmentSourceChooser() {
+        new AlertDialog.Builder(this)
+            .setTitle("添加附件")
+            .setItems(new String[] { "照片和截图", "文件" }, (dialog, index) -> {
+                if (index == 0) launchImagePicker();
+                else launchDocumentPicker();
+            })
+            .setOnCancelListener((dialog) -> finishFileSelection(null))
+            .show();
+    }
+
+    private void launchImagePicker() {
+        Intent picker;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            picker = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            picker.setType("image/*");
+            picker.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, Math.min(20, MediaStore.getPickImagesMaxLimit()));
+        } else {
+            picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            picker.addCategory(Intent.CATEGORY_OPENABLE);
+            picker.setType("image/*");
+            picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        startFilePicker(picker, "无法打开系统照片选择器");
+    }
+
+    private void launchDocumentPicker() {
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        picker.setType("*/*");
+        picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startFilePicker(picker, "无法打开系统文件选择器");
+    }
+
+    private void startFilePicker(Intent picker, String failureMessage) {
+        try {
+            startActivityForResult(picker, FILE_CHOOSER_REQUEST);
+        } catch (Exception error) {
+            finishFileSelection(null);
+            Toast.makeText(this, failureMessage, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void finishFileSelection(Uri[] selected) {
+        if (fileChooserCallback == null) return;
+        fileChooserCallback.onReceiveValue(selected);
+        fileChooserCallback = null;
+    }
+
     @Override
     public void onBackPressed() {
         handleBack();
     }
 
     private void handleBack() {
-        firstAddressGestureAt = 0;
         if (connectionPanel != null) {
             String storedAddress = preferences.getString(ADDRESS_KEY, "");
-            if (isTrustedWorkspaceAddress(storedAddress)) {
+            if (isWorkspaceAddress(storedAddress)) {
                 lastExitGestureAt = 0;
                 loadWorkspace(storedAddress);
             } else {
@@ -383,20 +948,6 @@ public final class MainActivity extends Activity {
             return;
         }
         handleExitGesture();
-    }
-
-    private void handleAddressGesture() {
-        long now = SystemClock.elapsedRealtime();
-        if (firstAddressGestureAt > 0 && now - firstAddressGestureAt <= ADDRESS_GESTURE_WINDOW_MS) {
-            firstAddressGestureAt = 0;
-            appRoot.performHapticFeedback(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-                ? HapticFeedbackConstants.CONFIRM
-                : HapticFeedbackConstants.LONG_PRESS);
-            showConnectionEditor("");
-            return;
-        }
-        firstAddressGestureAt = now;
-        appRoot.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
     }
 
     private void handleExitGesture() {
@@ -430,12 +981,15 @@ public final class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    @SuppressWarnings("deprecation")
     private void applyTopSystemInset(View view, int left, int top, int right, int bottom) {
         view.setOnApplyWindowInsetsListener((target, windowInsets) -> {
-            int topInset = initialTopSystemInset();
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            int topInset;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 Insets safeArea = windowInsets.getInsets(WindowInsets.Type.statusBars() | WindowInsets.Type.displayCutout());
-                topInset = Math.max(topInset, safeArea.top);
+                topInset = safeArea.top;
+            } else {
+                topInset = windowInsets.getSystemWindowInsetTop();
             }
             target.setPadding(left, top + topInset, right, bottom);
             return windowInsets;
@@ -443,81 +997,54 @@ public final class MainActivity extends Activity {
         view.requestApplyInsets();
     }
 
-    private int initialTopSystemInset() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return 0;
-        int resourceId = getResources().getIdentifier("status_bar_height", "dimen", "android");
-        return resourceId > 0 ? getResources().getDimensionPixelSize(resourceId) : dp(24);
-    }
-
-    private void updateAddressGestureExclusion() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || appRoot.getWidth() == 0 || appRoot.getHeight() == 0) return;
-        Rect addressGestureArea = new Rect(
-            appRoot.getWidth() - dp(44),
-            0,
-            appRoot.getWidth(),
-            appRoot.getHeight()
-        );
-        appRoot.setSystemGestureExclusionRects(Collections.singletonList(addressGestureArea));
-    }
-
-    private final class AddressGestureLayout extends FrameLayout {
-        private float startX;
-        private float startY;
-        private boolean tracking;
-
-        AddressGestureLayout(Context context) {
-            super(context);
-        }
-
-        @Override
-        public boolean dispatchTouchEvent(MotionEvent event) {
-            observeAddressGesture(event);
-            return super.dispatchTouchEvent(event);
-        }
-
-        private void observeAddressGesture(MotionEvent event) {
-            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                startX = event.getX();
-                startY = event.getY();
-                tracking = startX >= getWidth() - dp(44);
-                return;
-            }
-            if (!tracking) return;
-            if (event.getActionMasked() == MotionEvent.ACTION_MOVE && Math.abs(event.getY() - startY) > dp(48)) {
-                tracking = false;
-                return;
-            }
-            if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                tracking = false;
-                return;
-            }
-            if (event.getActionMasked() != MotionEvent.ACTION_UP) return;
-            tracking = false;
-            float leftDistance = startX - event.getX();
-            float verticalDistance = Math.abs(event.getY() - startY);
-            if (leftDistance < dp(48) || verticalDistance > dp(56)) return;
-            handleAddressGesture();
-        }
-    }
-
     private final class WorkspaceWebViewClient extends WebViewClient {
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
             Uri workspace = Uri.parse(preferences.getString(ADDRESS_KEY, ""));
-            return !isSameWorkspaceOrigin(request.getUrl(), workspace);
+            Uri target = request.getUrl();
+            if (isSameWorkspaceOrigin(target, workspace)) return false;
+            String scheme = target.getScheme();
+            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme) && !"mailto".equalsIgnoreCase(scheme)) {
+                Toast.makeText(MainActivity.this, "无法打开这个链接", Toast.LENGTH_SHORT).show();
+                return true;
+            }
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, target));
+            } catch (ActivityNotFoundException error) {
+                Toast.makeText(MainActivity.this, "没有可打开这个链接的应用", Toast.LENGTH_SHORT).show();
+            }
+            return true;
         }
 
         @Override
         public void onPageFinished(WebView view, String url) {
             cancelConnectionTimeout();
+            Uri current = Uri.parse(preferences.getString(ADDRESS_KEY, ""));
+            if (connectionPanel == null && isSameWorkspaceOrigin(Uri.parse(url), current)) {
+                setOrbConnectionState("online");
+            }
+            dispatchPendingSharedFiles();
         }
 
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
             if (!request.isForMainFrame()) return;
             cancelConnectionTimeout();
+            setOrbConnectionState("offline");
             String description = error == null || error.getDescription() == null ? "无法连接服务器" : error.getDescription().toString();
             runOnUiThread(() -> showConnectionEditor("连接失败：" + description + "。请检查地址后重试。"));
+        }
+    }
+
+    private final class ControlOrbView extends FrameLayout {
+        ControlOrbView(Context context) {
+            super(context);
+        }
+
+        @Override
+        public boolean performClick() {
+            super.performClick();
+            return true;
         }
     }
 
@@ -526,19 +1053,9 @@ public final class MainActivity extends Activity {
         public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
             if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = callback;
-            Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            picker.addCategory(Intent.CATEGORY_OPENABLE);
-            picker.setType("*/*");
-            picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            try {
-                startActivityForResult(picker, FILE_CHOOSER_REQUEST);
-                return true;
-            } catch (Exception error) {
-                fileChooserCallback.onReceiveValue(null);
-                fileChooserCallback = null;
-                Toast.makeText(MainActivity.this, "无法打开系统文件选择器", Toast.LENGTH_LONG).show();
-                return false;
-            }
+            if (!pendingSharedUris.isEmpty()) deliverPendingSharedFiles(callback);
+            else showAttachmentSourceChooser();
+            return true;
         }
     }
 
@@ -546,6 +1063,16 @@ public final class MainActivity extends Activity {
         @JavascriptInterface
         public void openConnectionSettings() {
             runOnUiThread(() -> showConnectionEditor(""));
+        }
+
+        @JavascriptInterface
+        public void readyForSharedFiles() {
+            runOnUiThread(MainActivity.this::dispatchPendingSharedFiles);
+        }
+
+        @JavascriptInterface
+        public void hideKeyboard() {
+            runOnUiThread(MainActivity.this::hideSoftwareKeyboard);
         }
     }
 }

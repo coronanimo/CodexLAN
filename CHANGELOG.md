@@ -1,39 +1,40 @@
 # Changelog
 
-All notable user-facing changes are documented here. The project follows [Semantic Versioning](https://semver.org/) once public tags begin.
+Notable changes to CodexLAN are recorded here. Versions follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
 ### Added
 
-- Isolated HTTP security integration tests for setup, sessions, same-origin and CSRF checks, roles, login throttling, and project path containment.
-- Clipboard image paste in the desktop and mobile composer, with attachment previews and image-only sending.
-- Project-local attachment storage under `.codexlan/attachments`, organized by chat and date.
-- MIT license.
-- English landing README and a separate Simplified Chinese README.
-- Public architecture, deployment, development, troubleshooting, security, contribution, conduct, and roadmap documentation.
-- Windows and Node version matrix for continuous integration.
-- GitHub issue templates.
-- Android and Windows release-engineering plan.
+- Android WebView client with a draggable local control orb, multi-server switching, system file picking, downloads, and Android share-target support.
+- Plan mode, manual context compaction, and interactive Codex questions in the conversation.
+- Clipboard image paste, attachment previews, project-local attachment storage, and image-only messages.
+- Final answers can be copied as original Markdown, separately from the Plan and execution process.
+- Markdown, fenced code, tables, links, and local KaTeX formula rendering in assistant messages.
+- Loopback-only first-administrator setup, member accounts, sessions, password management, CSRF checks, and login throttling.
+- Node and Android CI builds plus isolated HTTP security tests.
 
 ### Changed
 
-- Kept desktop and mobile on one responsive workbench implementation while refining the execution timeline and compact composer.
-- Attachments now remain in browser memory until send, instead of being written into the project root immediately.
-- Moving a queued task into guidance now appears in the information flow immediately and shows an explicit transition state.
-- Cancel controls in dialogs bypass field validation; cancellable dialogs also close with Escape or a backdrop click.
-- Render assistant messages as Markdown, including fenced code blocks, headings, lists, quotes, tables, links, and inline formatting.
-- Render inline and display LaTeX formulas locally with KaTeX in chats and Markdown previews.
-- Removed machine-specific paths from UI examples and test fixtures.
-- Replaced the old family-account wording with member-account wording.
-- The Windows launcher now prints the access address and first-run initialization information directly in its terminal.
-- Changed the Android application ID from `cn.shiwei.codexworkspace` to `com.hushiwei.codexlan`; existing private installs do not upgrade in place.
+- Desktop and mobile now use separate responsive layouts over one shared web application and state model.
+- Command output is streamed incrementally, retains ANSI styling across chunks, and trims old visible output to keep the composer responsive.
+- Consecutive commands appear as one expandable group with aligned timing.
+- Recent conversations are ordered by each user's latest access and shown in a scrollable switcher.
+- Codex threads are associated with projects by their canonical working directory, including conversations created in the official Codex App.
+- Member projects are confined to their managed workspace subtree; administrators may select other absolute directories.
+- Queued tasks remain visible until App Server accepts delivery. Guidance and messages sent to idle chats appear immediately and reconcile with Codex history.
+- The local workbench remains available while Codex is missing, signed out, or reconnecting, and while LAN publishing is unavailable.
+- Runtime state, queue revisions, timing, and thread access metadata now live in the server state instead of browser storage.
+- The Android application ID is now `com.hushiwei.codexlan`; installations using the previous private ID require a fresh install.
 
-### Security
+### Fixed
 
-- Strengthened ignore rules for runtime data, credentials, Android binaries, signing material, SDKs, and build output.
+- Dialogs can be cancelled with their cancel button, Escape, or a backdrop click without triggering form validation.
+- Assistant file references keep their filename while also offering preview and download actions.
+- Command output remains available after reopening a chat, and PowerShell launcher paths no longer obscure command titles.
+- Queue-to-guidance conversion no longer hides the message while the request is in progress.
+- Dynamic terminal colors, composer sizing, usage meters, and KaTeX layout now comply with the application's Content Security Policy.
 
 ## 0.6.11 - Imported production baseline
 
-- Imported the behavior-preserving source baseline used to start the new development repository.
-- Verified 29 Node tests before public-preparation changes.
+- Imported the source baseline used to begin CodexLAN development.

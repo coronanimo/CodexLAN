@@ -6,7 +6,7 @@ import {
   clipboardImageFiles,
   clipboardImageName,
   messageWithAttachments,
-} from "../public/composer-attachments.js";
+} from "../public/composer.js";
 
 test("clipboardImageFiles keeps only clipboard image files", () => {
   const png = { name: "pasted.png", type: "image/png" };
@@ -25,8 +25,8 @@ test("clipboardImageName produces stable architecture-neutral image names", () =
 });
 
 test("messageWithAttachments supports image-only prompts and Windows paths", () => {
-  const attachment = { name: "screen[1].png", path: "F:\\work\\screen.png" };
-  assert.equal(attachmentReference(attachment), "[screen1.png](F:/work/screen.png)");
-  assert.equal(messageWithAttachments("", [attachment]), "[screen1.png](F:/work/screen.png)");
-  assert.equal(messageWithAttachments("看看这个", [attachment]), "看看这个\n[screen1.png](F:/work/screen.png)");
+  const attachment = { name: "screen[1].png", path: "C:\\work\\screen.png" };
+  assert.equal(attachmentReference(attachment), "[screen1.png](C:/work/screen.png)");
+  assert.equal(messageWithAttachments("", [attachment]), "[screen1.png](C:/work/screen.png)");
+  assert.equal(messageWithAttachments("看看这个", [attachment]), "看看这个\n[screen1.png](C:/work/screen.png)");
 });

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Codex LAN Workspace. This project values small, reviewable changes that preserve behavior and make security boundaries easier to understand.
+Thanks for helping improve CodexLAN. This project values small, reviewable changes that preserve behavior and make security boundaries easier to understand.
 
 ## Before opening a change
 
@@ -10,16 +10,17 @@ Thanks for helping improve Codex LAN Workspace. This project values small, revie
 
 ## Development setup
 
-Requirements are Windows 10/11, Node.js 20+, and a signed-in Codex CLI for manual integration testing. The automated checks do not require npm package installation:
+Requirements are Windows 10/11 and Node.js 20+. Install the locked dependencies before running checks. A signed-in Codex CLI is also required for manual integration testing.
 
 ```powershell
+npm ci
 npm run check
 ```
 
-For an isolated manual run:
+To start the development service:
 
 ```powershell
-.\Start-Codex-Web.ps1 -Workspace '.\workspace'
+npm start
 ```
 
 ## Change rules
@@ -27,7 +28,7 @@ For an isolated manual run:
 - Keep file access within the configured workspace and preserve project ownership checks.
 - State-changing routes must keep authentication, authorization, same-origin, and CSRF protections.
 - Preserve reconnect and persistence behavior for active turns, queues, timing, and SSE events.
-- Add focused tests for bug fixes and behavior changes.
+- Add focused tests for bug fixes and behavior changes when the behavior can be automated.
 - Update both READMEs when user-facing setup or risk guidance changes.
 - Update `CHANGELOG.md` under `Unreleased` for user-visible changes.
 - Do not claim Linux, macOS, browser, Android, HTTPS, or release support that was not actually verified.

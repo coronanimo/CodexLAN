@@ -1,29 +1,49 @@
-const ANSI_PATTERN = /\x1b\[([0-9;]*)m/g;
-const CONTROL_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?)/g;
-
 const COLORS = [
   "#24364f", "#b42318", "#18794e", "#8a6100", "#245fc7", "#7b4ea3", "#08788a", "#66758a",
   "#52647c", "#d13c32", "#229765", "#a87300", "#3978df", "#9b63bc", "#1094a5", "#f7f9fc",
 ];
 
 export function parseAnsiOutput(value) {
-  const text = String(value || "");
+  return parseAnsiOutputChunk(value, createAnsiOutputState());
+}
+
+export function createAnsiOutputState() {
+  return { style: defaultStyle(), pending: "", renderedLength: 0, truncated: false };
+}
+
+export function parseAnsiOutputChunk(value, stream) {
+  const text = `${stream.pending}${String(value || "")}`;
   const tokens = [];
-  const state = defaultState();
+  stream.pending = "";
   let cursor = 0;
-  let match;
-  while ((match = ANSI_PATTERN.exec(text))) {
-    appendToken(tokens, text.slice(cursor, match.index).replace(CONTROL_PATTERN, ""), state);
-    applyCodes(state, match[1]);
-    cursor = ANSI_PATTERN.lastIndex;
+  while (cursor < text.length) {
+    const escape = text.indexOf("\x1b", cursor);
+    if (escape < 0) {
+      appendToken(tokens, text.slice(cursor), stream.style);
+      break;
+    }
+    appendToken(tokens, text.slice(cursor, escape), stream.style);
+    const control = readControlSequence(text, escape);
+    if (!control) {
+      stream.pending = text.slice(escape);
+      break;
+    }
+    if (control.kind === "sgr") applyCodes(stream.style, control.parameters);
+    cursor = control.end;
   }
-  appendToken(tokens, text.slice(cursor).replace(CONTROL_PATTERN, ""), state);
   return tokens;
 }
 
 export function renderAnsiOutput(element, value) {
   element.replaceChildren();
-  for (const token of parseAnsiOutput(value)) {
+  const stream = createAnsiOutputState();
+  appendAnsiOutput(element, value, stream);
+  return stream;
+}
+
+export function appendAnsiOutput(element, value, stream, maxLength = Infinity) {
+  for (const token of parseAnsiOutputChunk(value, stream)) {
+    stream.renderedLength += token.text.length;
     if (!hasStyle(token)) {
       element.append(document.createTextNode(token.text));
       continue;
@@ -39,10 +59,55 @@ export function renderAnsiOutput(element, value) {
     span.classList.toggle("ansi-strike", token.strike);
     element.append(span);
   }
+  const excess = stream.renderedLength - maxLength;
+  if (excess > 0) trimRenderedStart(element, stream, excess);
+  return stream;
 }
 
-function defaultState() {
+function defaultStyle() {
   return { foreground: null, background: null, bold: false, dim: false, italic: false, underline: false, strike: false, inverse: false };
+}
+
+function readControlSequence(text, start) {
+  if (start + 1 >= text.length) return null;
+  const kind = text[start + 1];
+  if (kind === "[") {
+    for (let index = start + 2; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      if (code < 0x40 || code > 0x7e) continue;
+      return {
+        kind: text[index] === "m" ? "sgr" : "control",
+        parameters: text.slice(start + 2, index),
+        end: index + 1,
+      };
+    }
+    return null;
+  }
+  if (kind === "]") {
+    for (let index = start + 2; index < text.length; index += 1) {
+      if (text[index] === "\x07") return { kind: "control", end: index + 1 };
+      if (text[index] === "\x1b" && text[index + 1] === "\\") return { kind: "control", end: index + 2 };
+    }
+    return null;
+  }
+  return { kind: "control", end: start + 2 };
+}
+
+function trimRenderedStart(element, stream, amount) {
+  let remaining = amount;
+  while (remaining > 0 && element.firstChild) {
+    const node = element.firstChild;
+    const length = node.textContent?.length || 0;
+    if (length <= remaining) {
+      remaining -= length;
+      node.remove();
+    } else {
+      node.textContent = node.textContent.slice(remaining);
+      remaining = 0;
+    }
+  }
+  stream.renderedLength -= amount - remaining;
+  stream.truncated = true;
 }
 
 function appendToken(tokens, text, state) {
@@ -56,7 +121,7 @@ function applyCodes(state, source) {
   const codes = source === "" ? [0] : source.split(";").map((value) => Number(value || 0));
   for (let index = 0; index < codes.length; index += 1) {
     const code = codes[index];
-    if (code === 0) Object.assign(state, defaultState());
+    if (code === 0) Object.assign(state, defaultStyle());
     else if (code === 1) state.bold = true;
     else if (code === 2) state.dim = true;
     else if (code === 3) state.italic = true;

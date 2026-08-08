@@ -2,21 +2,26 @@
 
 ## Setup
 
-Use Windows 10/11, Node.js 20+, and an installed Codex CLI. No `npm install` is required because there are no npm runtime or development dependencies.
+Development is currently supported on Windows 10 and 11 with Node.js 20 or newer and an installed Codex CLI.
 
 ```powershell
 codex login status
+npm ci
 npm run check
-.\Start-Codex-Web.ps1 -Workspace '.\workspace'
+npm start
 ```
 
-Use disposable application data and workspaces for testing. Never copy real users, sessions, chats, logs, attachments, Codex credentials, or production workspaces into fixtures.
+Use separate `CODEX_WEB_DATA_DIR` and `CODEX_WORKDIR` directories for manual tests. Test data should not contain real accounts, sessions, conversations, credentials, attachments, or project files.
 
-## Architecture and protocol
+## Source layout
 
-See [ARCHITECTURE.md](ARCHITECTURE.md). The service spawns `codex app-server --listen stdio://`, performs the required initialize handshake, and exchanges newline-delimited JSON. This interface is experimental. The implementation is intentionally a thin adapter around the current protocol rather than a promise of stable third-party API compatibility.
+- `server.mjs` starts the HTTP service and assembles the server modules.
+- `server/` contains accounts, projects, conversations, persistence, HTTP helpers, and the App Server client.
+- `public/` contains the shared browser application and its desktop and mobile layouts.
+- `android/` contains the Android WebView client.
+- `test/` contains Node tests; `test-support/` contains the fake App Server used by integration tests.
 
-Binary distribution work is tracked separately in [RELEASES.md](RELEASES.md). A locally successful build is not sufficient evidence for a publishable artifact.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for runtime boundaries and data ownership.
 
 ## Checks
 
@@ -24,30 +29,25 @@ Binary distribution work is tracked separately in [RELEASES.md](RELEASES.md). A 
 npm run check
 ```
 
-The command performs `node --check` on server and browser modules, then runs `node --test`. Add focused pure-function tests under `test/` where possible. The HTTP security suite starts the real Node service on loopback with disposable data/workspace directories and `test-support/fake-app-server.mjs`; it must never use production state. Broader HTTP/API cases, real app-server compatibility, SSE, and Android automation remain explicit gaps.
+This checks the JavaScript entry points and runs the Node test suite. The HTTP tests start a real CodexLAN service on loopback with temporary data, a temporary workspace, and the fake App Server.
 
-For a Codex CLI upgrade, manually check:
-
-1. app-server initialization and model list;
-2. project selection and thread create/list/resume;
-3. turn start, streamed reasoning, commands, output, and diffs;
-4. steering, queued prompts, interruption, and reconnect;
-5. history pagination, elapsed-time restoration, usage, and rate limits;
-6. file upload, preview, project download, and administrator download boundaries.
-
-## Editing rules
-
-- Keep path resolution, ownership, authentication, authorization, same-origin, and CSRF checks at every protected boundary.
-- Do not change the stored data format or app-server mapping merely to reorganize files.
-- Active state must survive SSE reconnect and page navigation through persisted data, not DOM-only state.
-- Steering, interruption, and queue advancement must remain idempotent under retries.
-- When entry assets change, update the query version in `public/index.html` until automated asset versioning exists.
-- Keep the browser application build-free unless a separately reviewed design changes that constraint.
-
-## Runtime directories
-
-`data/`, `logs/`, `workspace/`, `.codex-remote-attachments/`, `generated-schema/`, Android SDKs, Gradle caches, builds, APKs, signing keys, and release archives are not source. Review `git status` before every commit even when `.gitignore` is present.
+Use a real Codex CLI when changing protocol handling. Check initialization, authentication, model listing, thread creation and history, turn execution, steering, queues, interruption, reconnection, command output, file changes, token usage, and account limits.
 
 ## Android
 
-The Android module is a WebView client only. Use Android Studio with JDK 17 and SDK Platform 35. Do not commit `local.properties`, Gradle caches, build output, or signing material. See [android/README.md](../android/README.md).
+Install JDK 17 and Android SDK Platform 35, then run from the repository root:
+
+```powershell
+android\gradlew.bat -p android clean assembleDebug lintDebug
+```
+
+Build details and release-signing variables are in [android/README.md](../android/README.md).
+
+## Project conventions
+
+- Server and browser JavaScript use ECMAScript modules.
+- HTTP routes use Express 5.
+- The browser application has no build step.
+- Changes to stored state include an explicit migration or a clear rejection of unsupported versions.
+- Changes to App Server requests and events include focused tests and a manual compatibility check.
+- Runtime data, build output, SDKs, signing material, downloaded tools, and release archives stay outside source control.

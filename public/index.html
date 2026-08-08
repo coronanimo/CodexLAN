@@ -4,9 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f5f8fc">
-    <title>Codex 工作台</title>
+    <title>CodexLAN</title>
     <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.16.22">
-    <link rel="stylesheet" href="/styles.css?v=0.6.46-math">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/desktop.css" media="(min-width: 761px)">
+    <link rel="stylesheet" href="/mobile.css" media="(max-width: 760px)">
   </head>
   <body>
     <main id="auth-shell" class="auth-shell" hidden>
@@ -14,7 +16,7 @@
         <div class="auth-identity" aria-hidden="true"><span>C</span><i></i><span>你</span></div>
         <div class="auth-heading">
           <span id="auth-kicker">个人工作区</span>
-          <h1 id="auth-title">登录 Codex 工作台</h1>
+          <h1 id="auth-title">登录 CodexLAN</h1>
           <p id="auth-description">进入只属于你的项目与聊天。</p>
         </div>
         <form id="login-form" class="auth-form">
@@ -24,7 +26,6 @@
           <button class="primary-button auth-submit" type="submit">进入我的工作区</button>
         </form>
         <form id="setup-form" class="auth-form" hidden>
-          <label>初始化密钥<input id="setup-token" autocomplete="one-time-code" autocapitalize="none" required></label>
           <div class="auth-field-row">
             <label>用户名<input id="setup-username" autocomplete="username" autocapitalize="none" minlength="2" maxlength="32" required></label>
             <label>显示名称<input id="setup-display-name" autocomplete="name" maxlength="40" required></label>
@@ -32,7 +33,7 @@
           <label>管理员密码<input id="setup-password" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
           <label>确认密码<input id="setup-password-confirm" type="password" autocomplete="new-password" minlength="6" maxlength="128" required></label>
           <p id="setup-error" class="form-error" role="alert"></p>
-          <button class="primary-button auth-submit" type="submit">创建管理员并接管现有聊天</button>
+          <button class="primary-button auth-submit" type="submit">创建管理员</button>
         </form>
         <footer class="auth-footnote"><span class="status-dot"></span><span>账号只保存在这台 Windows 主机上</span></footer>
       </section>
@@ -42,7 +43,7 @@
       <aside id="sidebar" class="sidebar" aria-label="项目和聊天">
         <div class="sidebar-brand">
           <span class="brand-mark">C</span>
-          <div><strong>Codex</strong><span>局域网工作台</span></div>
+          <div><strong>CodexLAN</strong><span>工作台</span></div>
           <button id="close-sidebar" class="icon-button mobile-only" type="button" aria-label="关闭项目面板">×</button>
         </div>
         <section class="sidebar-section projects-section">
@@ -90,18 +91,23 @@
             <span class="context-separator" aria-hidden="true">/</span>
             <div id="recent-thread-wrap" class="recent-thread-wrap">
               <button id="open-recent-threads" class="thread-switcher-button" type="button" aria-label="切换最近聊天" aria-controls="recent-thread-menu" aria-expanded="false" disabled>
-                <strong id="thread-name">尚未打开聊天</strong><span class="thread-switcher-chevron" aria-hidden="true">⌄</span>
+                <strong id="thread-name">尚未打开聊天</strong>
+                <svg class="thread-switcher-icon" aria-hidden="true" viewBox="0 0 16 16">
+                  <circle cx="3" cy="4" r=".7"/><circle cx="3" cy="8" r=".7"/><circle cx="3" cy="12" r=".7"/>
+                  <path d="M6 4h7M6 8h7M6 12h5"/>
+                </svg>
               </button>
               <div id="recent-thread-menu" class="topbar-menu recent-thread-menu" hidden></div>
             </div>
           </div>
           <div class="topbar-actions">
             <button id="run-status" class="run-status-button icon-button" type="button" aria-label="查看运行中的任务" aria-controls="run-strip" aria-expanded="false" hidden><span class="run-status-dot" aria-hidden="true"></span><span id="run-status-label" class="run-status-label">运行中</span></button>
-            <button id="quick-new-thread" class="icon-button quick-new-thread" type="button" aria-label="新建聊天" title="在当前项目新建聊天">＋</button>
+            <button id="quick-new-thread" class="icon-button quick-new-thread" type="button" aria-label="新建聊天" title="在当前项目新建聊天"><span class="quick-new-thread-plus" aria-hidden="true"></span></button>
             <div id="thread-menu-wrap" class="topbar-menu-wrap">
               <button id="open-thread-menu" class="icon-button" type="button" aria-label="聊天操作" aria-controls="thread-menu" aria-expanded="false"><span class="more-dots" aria-hidden="true"></span></button>
               <div id="thread-menu" class="topbar-menu" hidden>
                 <button id="rename-thread" class="quiet-button" type="button" disabled>修改聊天名称</button>
+                <button id="compact-thread" class="quiet-button" type="button" disabled>压缩上下文</button>
                 <button id="delete-thread" class="danger-button" type="button" disabled>删除聊天记录</button>
               </div>
             </div>
@@ -127,6 +133,7 @@
               <label class="compact-select compact-effort" aria-label="当前聊天推理深度"><select id="composer-effort-select"></select></label>
               <label class="compact-select compact-tier" aria-label="当前聊天优先级"><select id="composer-tier-select"></select></label>
             </div>
+            <button id="plan-mode" class="plan-mode-button" type="button" aria-pressed="false" title="切换 Plan 模式；也可输入 /plan" hidden>计划</button>
             <div class="mode-switch" role="group" aria-label="消息模式">
               <button id="mode-guide" type="button"><span aria-hidden="true">↗</span> 引导</button>
               <button id="mode-queue" type="button">排队</button>
@@ -292,6 +299,6 @@
     <template id="message-template"><article class="message"><div class="message-meta"></div><div class="message-body"></div></article></template>
     <template id="queue-item-template"><li class="queue-item"><span class="queue-index"></span><span class="queue-text"></span><div class="queue-actions"><button data-action="guide" type="button" aria-label="转为当前任务的引导" title="转为引导">↗</button><button data-action="edit" type="button" aria-label="编辑排队任务">✎</button><button data-action="up" type="button" aria-label="上移">↑</button><button data-action="down" type="button" aria-label="下移">↓</button><button data-action="remove" type="button" aria-label="移除">×</button></div></li></template>
     <script src="/vendor/katex/katex.min.js?v=0.16.22"></script>
-    <script type="module" src="/app.js?v=0.6.46-math"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

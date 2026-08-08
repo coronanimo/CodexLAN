@@ -1,5 +1,22 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id 'com.android.application'
+}
+
+def appVersion = new JsonSlurper().parse(file('../../package.json')).version
+def releaseKeystorePath = System.getenv('CODEXLAN_ANDROID_KEYSTORE')
+def releaseKeystorePassword = System.getenv('CODEXLAN_ANDROID_STORE_PASSWORD')
+def releaseKeyAlias = System.getenv('CODEXLAN_ANDROID_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('CODEXLAN_ANDROID_KEY_PASSWORD')
+def releaseSigningValues = [releaseKeystorePath, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword]
+def releaseSigningConfigured = releaseSigningValues.every { it != null && !it.isEmpty() }
+if (!releaseSigningConfigured && releaseSigningValues.any { it != null && !it.isEmpty() }) {
+    throw new GradleException('Android release signing requires CODEXLAN_ANDROID_KEYSTORE, CODEXLAN_ANDROID_STORE_PASSWORD, CODEXLAN_ANDROID_KEY_ALIAS, and CODEXLAN_ANDROID_KEY_PASSWORD together.')
+}
+def releaseKeystoreFile = releaseSigningConfigured ? new File(releaseKeystorePath) : null
+if (releaseSigningConfigured && (!releaseKeystoreFile.isAbsolute() || !releaseKeystoreFile.isFile())) {
+    throw new GradleException('CODEXLAN_ANDROID_KEYSTORE must name an existing absolute keystore file.')
 }
 
 android {
@@ -10,14 +27,25 @@ android {
         applicationId 'com.hushiwei.codexlan'
         minSdk 26
         targetSdk 35
-        versionCode 27
-        versionName '0.6.11'
+        versionCode 30
+        versionName appVersion
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile releaseKeystoreFile
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (releaseSigningConfigured) signingConfig signingConfigs.release
         }
     }
 

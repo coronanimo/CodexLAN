@@ -1,98 +1,87 @@
-# Codex LAN Workspace
+# CodexLAN
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A Windows-first, self-hosted web workspace for continuing work with a locally installed Codex CLI from browsers, iPhone, and Android devices on the same trusted network.
+CodexLAN is a self-hosted Windows workspace for using a local Codex CLI from desktop and mobile browsers on the same network. It supports projects, Codex conversations, live execution, queues, attachments, Markdown, and formula rendering.
 
-Codex LAN Workspace is an independent community project. It is not an official OpenAI product and is not supported by OpenAI. It uses the experimental `codex app-server` interface, which may change between Codex CLI releases.
+This is an independent community project built on the experimental `codex app-server` interface.
 
-## Before you run it
+## Features
 
-The service can ask Codex to execute commands and read or modify files. Every web account shares the Windows account, Codex sign-in, machine permissions, usage limits, and configured workspace of the user running the service. Web accounts are convenient access controls, not strong tenant isolation.
+- Continue Codex conversations from PC, iPhone, and Android.
+- View streamed reasoning, commands, output, file changes, usage, and elapsed time.
+- Send guidance during a turn or queue work for later.
+- Paste images, upload files, preview supported files, and download project content.
+- Separate administrator and member accounts with per-account projects and sessions.
+- Use the Android WebView client to switch between saved servers even when a server is offline.
 
-- Use it only with people you trust.
-- Keep the default project-local `workspace/`, or select a narrowly scoped directory.
-- Never expose the built-in plain HTTP listener directly to the internet.
-- Read [SECURITY.md](SECURITY.md) before adding users or remote access.
+## Requirements
 
-## Requirements and compatibility
-
-| Component | Status |
+| Component | Requirement |
 | --- | --- |
-| Host OS | Windows 10/11; other host operating systems are not verified |
-| Node.js | 20 or newer |
-| Codex | Codex CLI installed and signed in; `app-server` compatibility can change |
-| Browser clients | Current desktop and mobile browsers; the current UI is primarily Chinese |
-| iPhone | Safari web app; no iOS package is required |
-| Android | Optional WebView source requires Android 8.0 (API 26) or newer |
+| Host | Windows 10 or 11 |
+| Node.js | 20 or newer for source runs |
+| Codex | Codex CLI installed and signed in |
+| Browser | A current desktop or mobile browser |
+| Android client | Android 8.0 / API 26 or newer |
 
-The Node service and browser UI have no npm runtime dependencies or frontend build step.
+## Start from source
 
-## Quick start
-
-1. Install Node.js and Codex CLI, then sign in:
-
-   ```powershell
-   codex login
-   codex login status
-   ```
-
-2. From this repository, start the supervised service:
-
-   ```powershell
-   .\Start-Codex-Web.ps1
-   ```
-
-3. The terminal prints the LAN address and, on first run, a one-time administrator setup token. Open that address on a device connected to the same trusted network and create the first administrator.
-
-The default port is `8687`. The default writable workspace is the repository-local `workspace/` directory. To use another deliberately selected root:
+Install and sign in to Codex CLI, then run:
 
 ```powershell
-.\Start-Codex-Web.ps1 -Workspace 'D:\Code' -Port 8687
+codex login
+codex login status
+npm ci
+npm start
 ```
 
-If Windows Firewall blocks access, open an elevated PowerShell window and explicitly add a Private-network rule:
+The terminal prints a loopback workbench address and, when available, a private-LAN address. Open the loopback address on the server machine to create the first administrator.
+
+The default LAN port is `8687`. Source runs store application state in `data/` and create projects below `workspace/`. Set a different project root before startup when needed:
 
 ```powershell
-.\Start-Codex-Web.ps1 -OpenFirewall
+$env:CODEX_WORKDIR = 'D:\Code'
+$env:CODEX_WEB_PORT = '8687'
+npm start
 ```
 
-## What is included
+If Windows Firewall blocks other devices on a Private network, add an inbound rule from an elevated PowerShell window:
 
-- Administrator setup, member accounts, password changes, sessions, CSRF checks, and login throttling
-- Projects, Codex threads, steering, interruption, queues, uploads, downloads, and previews
-- Server-Sent Events for live progress, command output, diffs, usage, and reconnect recovery
-- A native Android WebView shell with a planned signed, ABI-independent APK release path
-- Node built-in tests and a Windows CI workflow
+```powershell
+New-NetFirewallRule -DisplayName 'CodexLAN 8687' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8687 -Profile Private
+```
+
+## Clients and packages
+
+- PC and iPhone use the web interface directly. Safari users can add the workbench to the Home Screen from the Share menu.
+- The optional Android WebView client is under [`android/`](android/).
+- Current artifact status and release procedures are in [docs/RELEASES.md](docs/RELEASES.md).
+
+## Security
+
+CodexLAN can execute commands and access files with the permissions of the Windows account running it. Web accounts share that Windows identity, Codex login, and usage limits. Use the service only on a trusted private network with trusted users, and choose the smallest practical project root.
+
+The built-in listener is plain HTTP. Do not expose it directly to the public internet. See [SECURITY.md](SECURITY.md) before configuring remote access or additional users.
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Deployment, HTTPS, backup, and upgrades](docs/DEPLOYMENT.md)
+- [Deployment, backup, and upgrades](docs/DEPLOYMENT.md)
 - [Development](docs/DEVELOPMENT.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [iPhone usage](docs/IPHONE.md)
-- [Android source and build instructions](android/README.md)
-- [Release engineering and Windows packaging plan](docs/RELEASES.md)
-- [Security policy and trust boundaries](SECURITY.md)
+- [Android](android/README.md)
+- [Releases](docs/RELEASES.md)
 - [Contributing](CONTRIBUTING.md)
 
-## Development check
+## Development
+
+Run the complete JavaScript check and test suite with:
 
 ```powershell
 npm run check
 ```
 
-This checks JavaScript syntax and runs the Node test suite. The suite covers browser-side state and formatting, repository release policies, and core HTTP security boundaries through an isolated fake app-server. Broader HTTP/API cases, real app-server compatibility, SSE, and Android automation remain tracked gaps.
+Known work is tracked in [TODO.md](TODO.md). User-facing changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
-## Official Codex references
-
-- [Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands.md?surface=cli)
-- [Codex authentication](https://learn.chatgpt.com/docs/auth.md)
-- [Codex app-server](https://learn.chatgpt.com/docs/app-server.md)
-
-## Development status and license
-
-This repository is the start of an ongoing development process, not a finished public-release candidate. Android signing, Windows portable packaging, installers, integration tests, and release automation remain active workstreams; see [RELEASES.md](docs/RELEASES.md), [CHANGELOG.md](CHANGELOG.md), and [TODO.md](TODO.md).
-
-The project is licensed under the [MIT License](LICENSE). No public GitHub repository or binary release is implied by this working tree.
+CodexLAN is available under the [MIT License](LICENSE).

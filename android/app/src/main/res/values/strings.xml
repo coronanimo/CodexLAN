@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="invalid_workspace_address">请输入完整的 http:// 或 https:// 地址，例如 http://公网IP:端口 或 https://你的域名。</string>
+</resources>

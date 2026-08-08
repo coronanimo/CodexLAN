@@ -1,22 +1,19 @@
-import { downloadableFiles } from "./file-downloads.js?v=0.6.6-code-line-preview";
-import { renderMarkdownDocument } from "./markdown-preview.js?v=0.6.46-math";
-import { formatJsonText, plainInlineMarkdown } from "./text-format.js?v=0.6.44-workbench";
-import { textPreviewKind } from "./file-preview.js?v=0.6.6-text-preview";
-import { projectForLocalFile } from "./file-access.js?v=0.6.6-local-file-preview";
-import { elapsedTiming, formatDuration, formatElapsed, timestampMilliseconds } from "./elapsed-time.js?v=0.6.29-command-timing";
-import { fileChangeUpdateItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, terminalExecutionStatus } from "./execution-events.js?v=0.6.35-active-runtime-wins";
-import { summarizeExecutionTiming } from "./execution-timing.js?v=0.6.6-complete-timing";
-import { parseTimingState, resolveActiveTurnStartedAt, serializeTimingState } from "./timing-persistence.js?v=0.6.6-persistent-timing";
-import { recentThreadEntries } from "./recent-threads.js?v=0.6.6-compact-navigation";
-import { alignItemMetrics, restoreMissingExecutionItems } from "./timing-alignment.js?v=0.6.31-command-snapshots";
-import { accountLimitWindows, contextWindowUsage } from "./usage-indicators.js?v=0.6.7-usage-meters";
-import { newThreadSettings } from "./thread-defaults.js?v=0.6.23-thread-defaults";
-import { renderAnsiOutput } from "./ansi-output.js?v=0.6.36-ansi-output";
-import { diffLineStats, renderFileChanges } from "./diff-output.js?v=0.6.41-diff-kind-stats";
-import { isMobileComposer, shouldSubmitPromptFromKeyboard } from "./composer-input.js?v=0.6.40-ime-enter";
-import { clipboardImageFiles, clipboardImageName, messageWithAttachments } from "./composer-attachments.js?v=0.6.43-clipboard-images";
+import { downloadableFiles, projectForLocalFile, textPreviewKind } from "./file-downloads.js";
+import { renderMarkdownDocument } from "./markdown-preview.js";
+import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
+import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
+import { commandDisplayText, commandOutputTail, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries } from "./workspace.js";
+import { appendAnsiOutput, renderAnsiOutput } from "./ansi-output.js";
+import { diffLineStats, renderFileChanges } from "./diff-output.js";
+import { clipboardImageFiles, clipboardImageName, isMobileComposer, messageWithAttachments, resizeComposerInput } from "./composer.js";
+import { createTurnPlanView, planShortcut, updateTurnPlanView } from "./plan.js";
+import { createWorkbenchLayout } from "./layout.js";
 
 const $ = (selector) => document.querySelector(selector);
+const MAX_RENDERED_COMMAND_OUTPUT = 16_000;
+
+if (window.CodexAndroid) document.documentElement.classList.add("android-shell");
 
 const ui = {
   app: $("#app"),
@@ -29,7 +26,6 @@ const ui = {
   loginPassword: $("#login-password"),
   loginError: $("#login-error"),
   setupForm: $("#setup-form"),
-  setupToken: $("#setup-token"),
   setupUsername: $("#setup-username"),
   setupDisplayName: $("#setup-display-name"),
   setupPassword: $("#setup-password"),
@@ -59,8 +55,10 @@ const ui = {
   threadMenuWrap: $("#thread-menu-wrap"),
   threadMenu: $("#thread-menu"),
   renameThread: $("#rename-thread"),
+  compactThread: $("#compact-thread"),
   deleteThread: $("#delete-thread"),
   conversation: $("#conversation"),
+  conversationStage: $(".conversation-stage"),
   jumpLatest: $("#jump-latest"),
   queuePanel: $("#queue-panel"),
   model: $("#model-select"),
@@ -72,6 +70,7 @@ const ui = {
   composerModel: $("#composer-model-select"),
   composerEffort: $("#composer-effort-select"),
   composerTier: $("#composer-tier-select"),
+  planMode: $("#plan-mode"),
   guide: $("#mode-guide"),
   queue: $("#mode-queue"),
   composer: $("#composer"),
@@ -173,87 +172,98 @@ const state = {
   users: [],
   projects: [],
   models: [],
+  collaborationModes: [],
   accountRateLimits: null,
   threadTokenUsage: new Map(),
   threads: new Map(),
   selectedProjectId: null,
-  selectedThreads: {},
-  currentThread: null,
+  selectedThreadId: null,
+  threadSelectionId: 0,
+  threadSelectionController: null,
+  threadSelectionTargetId: null,
   loadingHistory: false,
-  currentQueue: [],
   queueSnapshots: new Map(),
   queueGuiding: new Set(),
+  compactingThreads: new Set(),
+  userInputRequests: new Map(),
   editingQueueItemId: null,
   mode: "queue",
   runStripOpen: false,
   refreshTimer: null,
-  refreshing: false,
+  workspaceRefreshPromise: null,
   materializingThread: false,
+  submittingMessage: false,
+  submittingThreadIds: new Set(),
   uploadingFiles: false,
-  projectAttachmentStorage: false,
   composerAttachments: [],
   stoppingTurn: false,
   followLatest: true,
   scrollCommandUntil: 0,
   renderingConversation: false,
-  streams: new Map(),
+  eventStream: null,
   messageElements: new Map(),
-  pendingUserMessages: [],
   executionGroups: new Map(),
   executionIdleTimers: new Map(),
   turnMetrics: new Map(),
-  activeTurnStarts: new Map(),
-  timingSaveTimer: null,
   activityTimer: null,
   elapsedTimer: null,
   booted: false,
   resumeTimer: null,
-  resumePromise: null,
-  lastResumeAt: 0,
-  workspaceStarted: false,
   localThreadSequence: 0,
   editingUserId: null,
   accountLimitsTimer: null,
+  serverReachable: false,
+  assetVersion: null,
+  codexReady: false,
+  codexStatusTimer: null,
+  defaultWorkspace: null,
 };
 
-boot().catch((error) => showAuth(false, error.message));
+const layout = createWorkbenchLayout({ ui, state, renderRunStrip, renderRecentThreads });
+const {
+  closeAccountMenu,
+  closeRecentThreads,
+  closeRunStrip,
+  closeThreadMenu,
+  closeTopbarOverlays,
+} = layout;
+const platformEntry = await import(isMobileComposer(navigator) ? "./mobile.js" : "./desktop.js");
+const platform = platformEntry.bindPlatformInteractions({ ui, cancelScrollCommand, closeTopbarOverlays });
+const { closeSidebar } = platform;
+
+boot().catch((error) => {
+  if (!state.user) {
+    showAuth(false, error.message);
+    return;
+  }
+  state.serverReachable = false;
+  setServerStatus(false, "CodexLAN 服务暂时不可用");
+  showError(error);
+});
 
 async function boot() {
   const response = await fetch("/api/auth/session");
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) return showAuth(Boolean(body.setupRequired));
+  if (!response.ok) return showAuth(Boolean(body.setupRequired), body.error || "请登录后继续。");
   await enterWorkspace(body);
 }
 
 async function enterWorkspace(session) {
   state.user = session.user;
   state.csrfToken = session.csrfToken;
-  loadTimingState();
-  loadThreadTokenUsage();
   state.selectedProjectId = localStorage.getItem(userStorageKey("project")) || null;
-  state.selectedThreads = loadSelection();
   ui.authShell.hidden = true;
   ui.app.hidden = false;
   renderAccount();
-  if (state.workspaceStarted) return refreshWorkspace();
-  state.workspaceStarted = true;
-  const status = await api("/api/status");
-  state.projectAttachmentStorage = status.capabilities?.projectAttachmentStorage === true;
-  setServerStatus(status.status === "ready", status.status === "ready" ? "本机 Codex 已连接" : "正在启动本机 Codex");
   ui.connectionAddress.textContent = location.origin;
   ui.globalConnectionAddress.textContent = location.origin;
   ui.refreshInterval.value = localStorage.getItem(userStorageKey("refresh-seconds")) || "0";
-  await Promise.all([loadProjects(), loadModels(), loadAccountRateLimits()]);
-  await refreshAllThreads();
-  if (!currentProject()) state.selectedProjectId = state.projects[0]?.id || null;
-  await selectProject(state.selectedProjectId);
+  await refreshWorkspace({ quiet: true });
   configureAutoRefresh();
   state.booted = true;
 }
 
 function showAuth(setupRequired, message = "") {
-  closeAllStreams();
-  state.booted = false;
   ui.app.hidden = true;
   ui.authShell.hidden = false;
   ui.loginForm.hidden = setupRequired;
@@ -261,11 +271,11 @@ function showAuth(setupRequired, message = "") {
   ui.loginError.textContent = setupRequired ? "" : message;
   ui.setupError.textContent = setupRequired ? message : "";
   ui.authKicker.textContent = setupRequired ? "首次初始化" : "个人工作区";
-  ui.authTitle.textContent = setupRequired ? "创建管理员账号" : "登录 Codex 工作台";
+  ui.authTitle.textContent = setupRequired ? "创建管理员账号" : "登录 CodexLAN";
   ui.authDescription.textContent = setupRequired
-    ? "输入启动窗口中的初始化密钥，现有项目和聊天会归到这个账号。"
+    ? "创建这台主机的管理员账号。首次设置只能在服务器电脑上完成。"
     : "进入只属于你的项目与聊天。";
-  setTimeout(() => (setupRequired ? ui.setupToken : ui.loginUsername).focus(), 0);
+  setTimeout(() => (setupRequired ? ui.setupUsername : ui.loginUsername).focus(), 0);
 }
 
 async function loadProjects() {
@@ -284,6 +294,16 @@ async function loadModels() {
   } catch (error) {
     state.models = [];
     showActivity(`模型列表暂不可用：${error.message}`, true);
+  }
+}
+
+async function loadCollaborationModes() {
+  try {
+    const result = await api("/api/collaboration-modes");
+    state.collaborationModes = result.modes || [];
+  } catch (error) {
+    state.collaborationModes = [];
+    showActivity(`Plan 模式暂不可用：${error.message}`, true);
   }
 }
 
@@ -323,26 +343,18 @@ function renderAccountLimits() {
   }
 }
 
-function loadThreadTokenUsage() {
-  state.threadTokenUsage.clear();
-  const stored = safeJson(localStorage.getItem(userStorageKey("thread-token-usage")));
-  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
-  for (const [threadId, tokenUsage] of Object.entries(stored)) {
-    if (contextWindowUsage(tokenUsage)) state.threadTokenUsage.set(threadId, tokenUsage);
-  }
-}
-
 function rememberThreadTokenUsage(threadId, tokenUsage) {
-  if (!threadId || !contextWindowUsage(tokenUsage)) return;
+  const usage = contextWindowUsage(tokenUsage);
+  if (!threadId || !usage) return;
+  const compact = { last: { totalTokens: usage.usedTokens }, modelContextWindow: usage.contextWindow };
   state.threadTokenUsage.delete(threadId);
-  state.threadTokenUsage.set(threadId, tokenUsage);
+  state.threadTokenUsage.set(threadId, compact);
   while (state.threadTokenUsage.size > 200) state.threadTokenUsage.delete(state.threadTokenUsage.keys().next().value);
-  localStorage.setItem(userStorageKey("thread-token-usage"), JSON.stringify(Object.fromEntries(state.threadTokenUsage)));
-  if (state.currentThread?.id === threadId) renderContextUsage();
+  if (state.selectedThreadId === threadId) renderContextUsage();
 }
 
 function renderContextUsage() {
-  const usage = contextWindowUsage(state.threadTokenUsage.get(state.currentThread?.id));
+  const usage = contextWindowUsage(state.threadTokenUsage.get(state.selectedThreadId));
   ui.contextUsage.hidden = !usage;
   if (!usage) return;
   const percent = Math.round(usage.usedPercent);
@@ -355,37 +367,44 @@ function renderContextUsage() {
 
 async function refreshAllThreads() {
   await Promise.all(state.projects.map((project) => refreshProjectThreads(project.id)));
-  syncEventStreams();
+  ensureEventStream();
   renderRunStrip();
 }
 
 async function refreshProjectThreads(projectId) {
+  const project = state.projects.find((entry) => entry.id === projectId);
+  if (project?.available === false) {
+    state.threads.set(projectId, []);
+    if (projectId === state.selectedProjectId) renderThreads();
+    return [];
+  }
+  const baselineThreads = [...(state.threads.get(projectId) || [])];
   const result = await api(`/api/projects/${encodeURIComponent(projectId)}/threads`);
-  const previousThreads = state.threads.get(projectId) || [];
-  const previousRuntimeById = new Map(previousThreads.map((thread) => [thread.id, thread.runtime]));
-  const localDrafts = previousThreads.filter((thread) => isLocalThreadId(thread.id));
-  const threads = [...localDrafts, ...(result.threads || []).map((thread) => {
-    const previousRuntime = previousRuntimeById.get(thread.id);
-    const normalized = { ...thread, runtime: ensureRuntimeStartedAt(thread.runtime, previousRuntime, thread.id) };
+  const currentThreads = state.threads.get(projectId) || [];
+  const merged = mergeRefreshedThreads(baselineThreads, currentThreads, result.threads || []);
+  const threads = merged.threads.map((thread) => {
+    const normalized = thread;
     const snapshot = state.queueSnapshots.get(thread.id);
     if (!snapshot || snapshot.revision === null || snapshot.revision === undefined || !Number.isInteger(normalized.queueRevision)) return normalized;
-    if (normalized.queueRevision > snapshot.revision || (normalized.queueRevision === snapshot.revision && !snapshot.optimistic)) return normalized;
+    if (normalized.queueRevision >= snapshot.revision) return normalized;
     return { ...normalized, queueCount: snapshot.queue.length, queueRevision: snapshot.revision };
-  })];
+  });
+  for (const threadId of merged.removedThreadIds) forgetClientThread(threadId);
   state.threads.set(projectId, threads);
   if (projectId === state.selectedProjectId) renderThreads();
   renderRunStrip();
   return threads;
 }
 
-async function selectProject(projectId, { keepSidebarOpen = false, preserveFollowLatest = false } = {}) {
+async function selectProject(projectId, { keepSidebarOpen = false, preserveFollowLatest = false, threadId = null } = {}) {
   const project = state.projects.find((entry) => entry.id === projectId);
   if (!project) return;
+  const currentThreadId = state.selectedThreadId;
   const changedProject = state.selectedProjectId !== project.id;
+  if (changedProject) cancelThreadSelection();
   state.selectedProjectId = project.id;
   if (changedProject) {
-    state.currentThread = null;
-    state.currentQueue = [];
+    state.selectedThreadId = null;
     clearComposerAttachments();
   }
   if (!keepSidebarOpen) closeSidebar();
@@ -393,11 +412,36 @@ async function selectProject(projectId, { keepSidebarOpen = false, preserveFollo
   renderProjects();
   renderThreads();
   renderSettings();
+  if (project.available === false) {
+    clearThread();
+    showActivity("项目目录当前不可用；恢复目录后刷新工作台。", true);
+    return;
+  }
   const threads = state.threads.get(project.id) || [];
-  const storedThreadId = state.selectedThreads[project.id];
-  const nextThread = threads.find((thread) => thread.id === storedThreadId) || threads[0];
+  const requestedThreadId = threadId || (!changedProject ? currentThreadId : null);
+  const nextThread = threads.find((thread) => thread.id === requestedThreadId)
+    || recentThreadEntries([project], state.threads, 1)[0]?.thread;
   if (nextThread) await selectThread(nextThread.id, { closeNavigation: !keepSidebarOpen, preserveFollowLatest });
   else await createThread({ focusPrompt: false });
+}
+
+function cancelThreadSelection() {
+  state.threadSelectionController?.abort();
+  state.threadSelectionController = null;
+  state.threadSelectionId += 1;
+  state.threadSelectionTargetId = null;
+  ui.conversationStage.classList.remove("thread-switching");
+  ui.conversationStage.removeAttribute("aria-busy");
+  ui.queuePanel.inert = false;
+}
+
+function showThreadSelection(threadId) {
+  state.threadSelectionTargetId = threadId;
+  ui.conversationStage.classList.add("thread-switching");
+  ui.conversationStage.setAttribute("aria-busy", "true");
+  ui.queuePanel.inert = true;
+  renderThreads();
+  updateComposer();
 }
 
 async function selectThread(threadId, { closeNavigation = true, preserveFollowLatest = false, mergeHistory = false } = {}) {
@@ -407,52 +451,111 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
   if (!preserveFollowLatest) state.followLatest = true;
   if (closeNavigation) closeSidebar();
   if (isLocalThreadId(threadId) && listedThread) {
-    state.currentThread = listedThread;
-    state.currentQueue = [];
-    state.selectedThreads[project.id] = threadId;
-    saveSelection();
+    cancelThreadSelection();
+    state.selectedThreadId = listedThread.id;
     renderThreads();
     renderCurrentThread();
     ui.prompt.focus();
     return;
   }
-  const result = await api(`/api/threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(project.id)}`);
+  const hasCachedHistory = hasCurrentThreadHistory(listedThread);
+  if (threadId === state.selectedThreadId && hasCachedHistory && !mergeHistory) {
+    ui.prompt.focus();
+    return;
+  }
+  cancelThreadSelection();
+  const controller = new AbortController();
+  const selectionId = ++state.threadSelectionId;
+  state.threadSelectionController = controller;
+  if (listedThread) {
+    updateThreadInState(project.id, { ...listedThread, accessedAt: new Date().toISOString() });
+    if (hasCachedHistory && !mergeHistory) {
+      state.selectedThreadId = threadId;
+      ensureEventStream();
+      renderThreads();
+      renderCurrentThread();
+    } else if (state.selectedThreadId !== threadId) {
+      showThreadSelection(threadId);
+    }
+  }
+  if (hasCachedHistory && !mergeHistory) {
+    try {
+      const refreshRuntime = isActiveThreadRuntime(listedThread?.runtime)
+        ? refreshProjectThreads(project.id)
+        : Promise.resolve(null);
+      const [result] = await Promise.all([
+        api(`/api/threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(project.id)}&history=none`, { signal: controller.signal }),
+        refreshRuntime,
+      ]);
+      if (selectionId === state.threadSelectionId && result.accessedAt) {
+        updateThreadInState(project.id, { ...findThread(project.id, threadId), accessedAt: result.accessedAt });
+      }
+      if (selectionId === state.threadSelectionId && state.selectedThreadId === threadId && isActiveThreadRuntime(listedThread?.runtime)) {
+        renderCurrentThread();
+      }
+    } catch (error) {
+      if (error?.name !== "AbortError") throw error;
+    } finally {
+      if (state.threadSelectionController === controller) state.threadSelectionController = null;
+    }
+    if (selectionId === state.threadSelectionId) ui.prompt.focus();
+    return;
+  }
+  let result;
+  try {
+    result = await api(`/api/threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(project.id)}`, { signal: controller.signal });
+  } catch (error) {
+    if (selectionId === state.threadSelectionId) {
+      state.threadSelectionTargetId = null;
+      ui.conversationStage.classList.remove("thread-switching");
+      ui.conversationStage.removeAttribute("aria-busy");
+      ui.queuePanel.inert = false;
+      renderThreads();
+      updateComposer();
+    }
+    if (error?.name === "AbortError") return;
+    throw error;
+  } finally {
+    if (state.threadSelectionController === controller) state.threadSelectionController = null;
+  }
+  if (selectionId !== state.threadSelectionId) return;
   ingestTurnMetrics(result.metrics);
   if (result.tokenUsage) rememberThreadTokenUsage(threadId, result.tokenUsage);
-  const previous = state.currentThread?.id === threadId ? state.currentThread : null;
+  const selected = currentThread();
+  const previous = selected?.id === threadId ? selected : null;
   const turns = mergeHistory && previous
     ? mergeTurnPages(previous.turns || [], result.thread.turns || [])
     : result.thread.turns || [];
   const history = mergeHistory && previous?.history
     ? { ...result.history, hasMore: previous.history.hasMore, before: previous.history.before }
     : result.history;
-  state.currentThread = {
+  updateThreadInState(project.id, {
     ...result.thread,
     turns,
     history,
-    syncedUpdatedAt: listedThread?.updatedAt ?? result.thread.updatedAt,
-    runtime: ensureRuntimeStartedAt(result.runtime || result.thread.runtime, listedThread?.runtime, threadId),
-  };
-  updateThreadInState(project.id, state.currentThread);
-  if (!applyQueueSnapshot(threadId, result.queue, result.queueRevision)) {
-    state.currentQueue = state.queueSnapshots.get(threadId)?.queue || [];
-  }
-  state.selectedThreads[project.id] = threadId;
-  saveSelection();
-  openEventStream(threadId);
-  syncEventStreams();
+    syncedUpdatedAt: result.thread.updatedAt ?? listedThread?.updatedAt,
+    historyLive: false,
+    runtime: result.runtime || result.thread.runtime,
+  });
+  state.selectedThreadId = threadId;
+  state.threadSelectionTargetId = null;
+  ui.conversationStage.classList.remove("thread-switching");
+  ui.conversationStage.removeAttribute("aria-busy");
+  ui.queuePanel.inert = false;
+  applyQueueSnapshot(threadId, result.queue, result.queueRevision);
+  ensureEventStream();
   renderThreads();
   renderCurrentThread();
 }
 
 function clearThread() {
-  state.currentThread = null;
-  state.currentQueue = [];
+  state.selectedThreadId = null;
   ui.threadName.textContent = "尚未打开聊天";
   ui.openRecentThreads.disabled = true;
   closeRecentThreads();
   ui.openThreadMenu.disabled = true;
   ui.renameThread.disabled = true;
+  ui.compactThread.disabled = true;
   ui.deleteThread.disabled = true;
   ui.stop.disabled = true;
   renderConversation([]);
@@ -467,30 +570,17 @@ function currentProject() {
   return state.projects.find((project) => project.id === state.selectedProjectId) || null;
 }
 
+function currentThread() {
+  return findThread(state.selectedProjectId, state.selectedThreadId);
+}
+
+function currentQueue() {
+  const threadId = state.selectedThreadId;
+  return threadId ? state.queueSnapshots.get(threadId)?.queue || [] : [];
+}
+
 function currentRuntime() {
-  return state.currentThread?.runtime || { activeTurnId: null, status: "idle" };
-}
-
-function runtimeIsActive(runtime) {
-  const status = typeof runtime?.status === "string" ? runtime.status : runtime?.status?.type;
-  return Boolean(runtime?.activeTurnId) || ["active", "running", "inProgress"].includes(status);
-}
-
-function ensureRuntimeStartedAt(runtime, previousRuntime, threadId) {
-  if (!runtimeIsActive(runtime)) {
-    forgetActiveTurnStart(threadId);
-    return runtime;
-  }
-  const turnId = runtime?.activeTurnId || previousRuntime?.activeTurnId || null;
-  const startedAt = resolveActiveTurnStartedAt({
-    runtime,
-    previousRuntime,
-    metric: turnId ? state.turnMetrics.get(turnId) : null,
-    saved: threadId ? state.activeTurnStarts.get(threadId) : null,
-  });
-  rememberActiveTurnStart(threadId, turnId, startedAt);
-  if (turnId) mergeTurnMetric(turnId, { startedAt });
-  return { ...runtime, ...(turnId ? { activeTurnId: turnId } : {}), startedAt };
+  return currentThread()?.runtime || { activeTurnId: null, status: "idle" };
 }
 
 function setElapsedDisplay(element, prefix, timing = {}) {
@@ -532,9 +622,9 @@ function refreshElapsedDisplays() {
 function syncElapsedTimer() {
   const visibleExecutionRunning = [...state.executionGroups.values()]
     .some((group) => [...group.items.values()].some((entry) => executionPresentation(entry.item).tone === "running"));
-  const active = runtimeIsActive(currentRuntime())
+  const active = isActiveThreadRuntime(currentRuntime())
     || visibleExecutionRunning
-    || state.projects.some((project) => (state.threads.get(project.id) || []).some((thread) => runtimeIsActive(thread.runtime)));
+    || state.projects.some((project) => (state.threads.get(project.id) || []).some((thread) => isActiveThreadRuntime(thread.runtime)));
   if (active && !state.elapsedTimer) state.elapsedTimer = setInterval(refreshElapsedDisplays, 1000);
   if (!active && state.elapsedTimer) {
     clearInterval(state.elapsedTimer);
@@ -558,7 +648,7 @@ function mergeTurnMetric(turnId, metric = {}) {
   };
   state.turnMetrics.delete(turnId);
   state.turnMetrics.set(turnId, merged);
-  scheduleTimingStateSave();
+  while (state.turnMetrics.size > 160) state.turnMetrics.delete(state.turnMetrics.keys().next().value);
   return merged;
 }
 
@@ -584,9 +674,8 @@ function turnWithMetrics(turn) {
     if (metric[key] !== null && metric[key] !== undefined) timed[key] = metric[key];
   }
   const items = restoreMissingExecutionItems(turn.items || [], metric.items);
-  const alignedMetrics = alignItemMetrics(items, metric.items);
   timed.items = items.map((item) => {
-    const itemMetric = alignedMetrics.get(item.id);
+    const itemMetric = metric.items?.[item.id];
     return itemMetric ? mergeHistoricalExecutionItem(item, itemMetric, turn.status) : item;
   });
   return timed;
@@ -599,17 +688,18 @@ function renderProjects() {
     button.type = "button";
     button.className = "project-item";
     if (project.id === state.selectedProjectId) button.classList.add("active");
+    if (project.available === false) button.classList.add("unavailable");
     const name = document.createElement("strong");
     name.textContent = project.name;
     const path = document.createElement("small");
-    path.textContent = project.path;
+    path.textContent = project.available === false ? `目录不可用 · ${project.path}` : project.path;
     button.append(name, path);
     button.addEventListener("click", () => selectProject(project.id, { keepSidebarOpen: true }).catch(showError));
     ui.projectList.append(button);
   }
   const projectName = currentProject()?.name || "尚未选择";
   ui.desktopProjectName.textContent = projectName;
-  const canCreateThread = Boolean(currentProject());
+  const canCreateThread = Boolean(currentProject() && currentProject().available !== false);
   ui.newThread.disabled = !canCreateThread;
   ui.quickNewThread.disabled = !canCreateThread;
   renderRecentThreads();
@@ -619,6 +709,13 @@ function renderThreads() {
   ui.threadList.replaceChildren();
   const project = currentProject();
   if (!project) return;
+  if (project.available === false) {
+    const unavailable = document.createElement("p");
+    unavailable.className = "sidebar-empty error";
+    unavailable.textContent = "项目目录当前不可用";
+    ui.threadList.append(unavailable);
+    return;
+  }
   const threads = state.threads.get(project.id) || [];
   if (!threads.length) {
     const empty = document.createElement("p");
@@ -632,13 +729,15 @@ function renderThreads() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "thread-item";
-    if (thread.id === state.currentThread?.id) button.classList.add("active");
-    if (runtimeIsActive(thread.runtime)) button.classList.add("running");
+    if (thread.id === state.selectedThreadId) button.classList.add("active");
+    if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
+    if (isActiveThreadRuntime(thread.runtime)) button.classList.add("running");
     const title = document.createElement("strong");
     title.textContent = thread.name || "未命名聊天";
     const details = document.createElement("small");
     const queueCount = thread.queueCount || 0;
-    if (runtimeIsActive(thread.runtime)) setElapsedDisplay(details, "执行中", thread.runtime);
+    if (thread.id === state.threadSelectionTargetId) details.textContent = "打开中…";
+    else if (isActiveThreadRuntime(thread.runtime)) setElapsedDisplay(details, "执行中", thread.runtime);
     else details.textContent = queueCount ? `队列 ${queueCount}` : "空闲";
     button.append(title, details);
     button.addEventListener("click", () => selectThread(thread.id).catch(showError));
@@ -648,15 +747,17 @@ function renderThreads() {
 }
 
 function renderRecentThreads() {
-  const entries = recentThreadEntries(state.projects, state.threads, 6);
-  ui.openRecentThreads.disabled = !state.currentThread || entries.length === 0;
+  const entries = recentThreadEntries(state.projects, state.threads, 30);
+  ui.openRecentThreads.disabled = !currentThread() || entries.length === 0;
   const signature = JSON.stringify(entries.map(({ project, thread }) => [
     project.id,
     project.name,
     thread.id,
     thread.name,
-    runtimeIsActive(thread.runtime),
-    thread.id === state.currentThread?.id,
+    thread.accessedAt,
+    isActiveThreadRuntime(thread.runtime),
+    thread.id === state.selectedThreadId,
+    thread.id === state.threadSelectionTargetId,
   ]));
   if (ui.recentThreadMenu.dataset.signature === signature) return;
   const scrollTop = ui.recentThreadMenu.scrollTop;
@@ -666,19 +767,18 @@ function renderRecentThreads() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "recent-thread-item";
-    if (thread.id === state.currentThread?.id) button.classList.add("active");
-    if (runtimeIsActive(thread.runtime)) button.classList.add("running");
+    if (thread.id === state.selectedThreadId) button.classList.add("active");
+    if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
+    if (isActiveThreadRuntime(thread.runtime)) button.classList.add("running");
     const title = document.createElement("strong");
     title.textContent = thread.name || "未命名聊天";
     const projectName = document.createElement("small");
-    projectName.textContent = project.name;
+    projectName.textContent = thread.id === state.threadSelectionTargetId ? `${project.name} · 打开中…` : project.name;
     button.append(title, projectName);
     button.addEventListener("click", async () => {
       closeRecentThreads();
-      if (project.id === state.selectedProjectId && thread.id === state.currentThread?.id) return;
-      state.selectedThreads[project.id] = thread.id;
-      saveSelection();
-      await selectProject(project.id);
+      if (project.id === state.selectedProjectId && thread.id === state.selectedThreadId) return;
+      await selectProject(project.id, { threadId: thread.id });
     });
     ui.recentThreadMenu.append(button);
   }
@@ -690,7 +790,7 @@ function renderRunStrip() {
   const running = [];
   for (const project of state.projects) {
     for (const thread of state.threads.get(project.id) || []) {
-      if (runtimeIsActive(thread.runtime) || thread.queueCount) running.push({ project, thread });
+      if (isActiveThreadRuntime(thread.runtime) || thread.queueCount) running.push({ project, thread });
     }
   }
   if (!running.length) {
@@ -701,7 +801,7 @@ function renderRunStrip() {
     syncElapsedTimer();
     return;
   }
-  const activeCount = running.filter(({ thread }) => runtimeIsActive(thread.runtime)).length;
+  const activeCount = running.filter(({ thread }) => isActiveThreadRuntime(thread.runtime)).length;
   const queuedCount = running.reduce((total, { thread }) => total + (thread.queueCount || 0), 0);
   ui.runStatus.hidden = false;
   ui.runStatus.classList.toggle("queue-only", activeCount === 0);
@@ -715,21 +815,20 @@ function renderRunStrip() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "run-card";
-    if (thread.id === state.currentThread?.id) button.classList.add("active");
+    if (thread.id === state.selectedThreadId) button.classList.add("active");
     const dot = document.createElement("span");
-    dot.className = `run-card-dot${runtimeIsActive(thread.runtime) ? "" : " queue"}`;
+    dot.className = `run-card-dot${isActiveThreadRuntime(thread.runtime) ? "" : " queue"}`;
     const words = document.createElement("div");
     const title = document.createElement("strong");
     title.textContent = `${project.name} · ${thread.name || "未命名聊天"}`;
     const detail = document.createElement("small");
-    if (runtimeIsActive(thread.runtime)) setElapsedDisplay(detail, "正在执行", thread.runtime);
+    if (isActiveThreadRuntime(thread.runtime)) setElapsedDisplay(detail, "正在执行", thread.runtime);
     else detail.textContent = `等待队列 ${thread.queueCount}`;
     words.append(title, detail);
     button.append(dot, words);
     button.addEventListener("click", async () => {
       closeRunStrip();
-      await selectProject(project.id);
-      await selectThread(thread.id);
+      await selectProject(project.id, { threadId: thread.id });
     });
     ui.runStrip.append(button);
   }
@@ -737,7 +836,7 @@ function renderRunStrip() {
 }
 
 function renderSettings() {
-  const thread = state.currentThread;
+  const thread = currentThread();
   const settings = thread?.settings || {};
   const selectedModel = selectedModelForThread(thread);
   fillOptions(ui.model, state.models, (model) => model.displayName || model.id, selectedModel?.id, "当前模型不可用");
@@ -751,6 +850,13 @@ function renderSettings() {
   fillTierOptions(ui.tier, tiers, selectedTier);
   fillCompactTierOptions(ui.composerTier, tiers, selectedTier);
   ui.summary.value = ["auto", "concise", "detailed", "none"].includes(settings.summary) ? settings.summary : "detailed";
+  const planAvailable = state.collaborationModes.some((entry) => entry.mode === "plan");
+  const planActive = settings.collaborationMode === "plan";
+  ui.planMode.hidden = !planAvailable;
+  ui.planMode.classList.toggle("active", planActive);
+  ui.planMode.setAttribute("aria-pressed", String(planActive));
+  ui.planMode.textContent = planActive ? "计划中" : "计划";
+  ui.planMode.title = planActive ? "退出 Plan 模式" : "进入 Plan 模式；也可输入 /plan";
   ui.tierField.hidden = !selectedModel;
   const disabled = !thread || !state.models.length;
   ui.model.disabled = disabled;
@@ -760,6 +866,7 @@ function renderSettings() {
   ui.tier.disabled = disabled || !tiers.length;
   ui.composerTier.disabled = disabled || !tiers.length;
   ui.summary.disabled = !thread;
+  ui.planMode.disabled = !thread || isActiveThreadRuntime(currentRuntime());
   ui.configThreadName.textContent = thread ? `当前聊天：${thread.name || "未命名聊天"}` : "请先选择聊天。";
   const selectedTierEntry = tiers.find((tier) => tier.id === selectedTier);
   ui.tierDescription.textContent = selectedTierEntry
@@ -834,22 +941,34 @@ function serviceTierLabel(tier) {
   return "Service";
 }
 
-function renderCurrentThread() {
-  const thread = state.currentThread;
+function renderCurrentThread({ messages = true } = {}) {
+  const thread = currentThread();
   if (!thread) return clearThread();
   ui.threadName.textContent = thread.name || "未命名聊天";
   ui.openRecentThreads.disabled = false;
   renderRecentThreads();
-  ui.openThreadMenu.disabled = false;
-  ui.renameThread.disabled = false;
-  ui.deleteThread.disabled = runtimeIsActive(currentRuntime());
+  renderThreadActions();
   ui.stop.disabled = !currentRuntime().activeTurnId;
-  renderConversation(thread.turns || []);
+  if (messages) renderConversation(thread.turns || []);
   renderQueue();
   updateComposer();
   renderSettings();
   renderContextUsage();
   syncElapsedTimer();
+}
+
+function renderThreadActions() {
+  const thread = currentThread();
+  const local = thread && isLocalThreadId(thread.id);
+  const active = isActiveThreadRuntime(currentRuntime());
+  const compacting = thread && state.compactingThreads.has(thread.id);
+  const submitting = state.submittingMessage || (thread && state.submittingThreadIds.has(thread.id));
+  const switching = Boolean(state.threadSelectionTargetId);
+  ui.openThreadMenu.disabled = !thread || switching || submitting;
+  ui.renameThread.disabled = !thread || switching || submitting;
+  ui.compactThread.disabled = !thread || local || active || compacting || submitting || !state.codexReady || switching;
+  ui.compactThread.textContent = compacting ? "正在压缩上下文…" : "压缩上下文";
+  ui.deleteThread.disabled = !thread || active || compacting || submitting || switching;
 }
 
 function renderConversation(turns) {
@@ -859,9 +978,8 @@ function renderConversation(turns) {
   state.renderingConversation = true;
   ui.conversation.replaceChildren();
   state.messageElements.clear();
-  if (state.currentThread) state.pendingUserMessages = state.pendingUserMessages.filter((entry) => entry.threadId !== state.currentThread.id);
   state.executionGroups.clear();
-  if (state.currentThread?.history?.hasMore) {
+  if (currentThread()?.history?.hasMore) {
     const loadOlder = document.createElement("button");
     loadOlder.className = "history-loader";
     loadOlder.type = "button";
@@ -874,14 +992,22 @@ function renderConversation(turns) {
     let turn = reconcileStaleExecutionTurn(turnWithMetrics(rawTurn), currentRuntime());
     const liveMetrics = liveMetricsByTurn.get(turn.id);
     if (liveMetrics) turn = { ...turn, items: restoreMissingExecutionItems(turn.items || [], liveMetrics) };
+    appendConversationDate(turn.id, turnTimestamp(turn));
     const items = turn.items || [];
+    let userMessageSeen = false;
     for (const item of items) {
       if (isExecutionItem(item)) {
         upsertExecutionItem(turn.id, item, { turnStatus: turn.status, timing: turn });
       } else {
-        renderHistoryItem(item, { turnId: turn.id });
+        const guide = item.type === "userMessage" && userMessageSeen;
+        renderHistoryItem(item, { turnId: turn.id, guide });
+        if (item.type === "userMessage") userMessageSeen = true;
       }
     }
+    renderTurnPlan(turn.id, state.turnMetrics.get(turn.id)?.plan, turn.status);
+  }
+  for (const request of state.userInputRequests.values()) {
+    if (request.threadId === state.selectedThreadId) renderUserInputRequest(request);
   }
   if (!ui.conversation.childElementCount) renderEmptyConversation();
   const activeTurnId = currentRuntime().activeTurnId;
@@ -892,6 +1018,172 @@ function renderConversation(turns) {
     ui.conversation.scrollTop = Math.min(previousScrollTop, Math.max(0, ui.conversation.scrollHeight - ui.conversation.clientHeight));
     updateJumpLatest();
   });
+}
+
+function renderUserInputRequest(request) {
+  if (!request?.requestId || request.threadId !== state.selectedThreadId) return;
+  removeUserInputCard(request.requestId);
+  ui.conversation.querySelector(".empty-state")?.remove();
+  const form = document.createElement("form");
+  form.className = "user-input-card";
+  form.dataset.requestId = request.requestId;
+  const heading = document.createElement("div");
+  heading.className = "user-input-heading";
+  const title = document.createElement("strong");
+  title.textContent = "需要你的回答";
+  const note = document.createElement("span");
+  note.textContent = "回答后 Codex 会继续当前任务";
+  heading.append(title, note);
+  const controls = [];
+  form.append(heading);
+  for (const [index, question] of request.questions.entries()) {
+    const field = document.createElement("fieldset");
+    field.className = "user-input-question";
+    const legend = document.createElement("legend");
+    const header = document.createElement("span");
+    header.textContent = question.header;
+    const prompt = document.createElement("strong");
+    prompt.textContent = question.question;
+    legend.append(header, prompt);
+    field.append(legend);
+    const name = `user-input-${request.requestId}-${index}`;
+    if (question.options.length) {
+      for (const option of question.options) field.append(userInputOption(name, option.label, option.description));
+      let otherText = null;
+      if (question.isOther) {
+        const other = userInputOption(name, "", "", true);
+        other.querySelector("strong").textContent = "其他";
+        otherText = document.createElement("input");
+        otherText.className = "user-input-other";
+        otherText.type = question.isSecret ? "password" : "text";
+        otherText.placeholder = "输入你的回答";
+        otherText.autocomplete = "off";
+        otherText.disabled = true;
+        other.append(otherText);
+        field.append(other);
+      }
+      const radios = [...field.querySelectorAll('input[type="radio"]')];
+      for (const radio of radios) {
+        radio.required = true;
+        radio.addEventListener("change", () => {
+          if (!otherText) return;
+          const selectedOther = radio.checked && radio.dataset.other === "true";
+          if (selectedOther) {
+            otherText.disabled = false;
+            otherText.required = true;
+            otherText.focus();
+          } else if (radio.checked) {
+            otherText.required = false;
+            otherText.disabled = true;
+          }
+        });
+      }
+      controls.push({ question, field, otherText });
+    } else {
+      const input = document.createElement("input");
+      input.className = "user-input-text";
+      input.type = question.isSecret ? "password" : "text";
+      input.autocomplete = "off";
+      input.required = true;
+      field.append(input);
+      controls.push({ question, input });
+    }
+    form.append(field);
+  }
+  const footer = document.createElement("div");
+  footer.className = "user-input-footer";
+  const error = document.createElement("p");
+  error.className = "form-error";
+  const submit = document.createElement("button");
+  submit.className = "primary-button";
+  submit.type = "submit";
+  submit.textContent = "提交回答";
+  footer.append(error, submit);
+  form.append(footer);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitUserInputRequest(request, form, controls, error, submit);
+  });
+  ui.conversation.append(form);
+  placeTurnContent(request.turnId, { root: form });
+  followNewContent();
+}
+
+function userInputOption(name, label, description, other = false) {
+  const option = document.createElement("label");
+  option.className = "user-input-option";
+  const input = document.createElement("input");
+  input.type = "radio";
+  input.name = name;
+  input.value = label;
+  if (other) input.dataset.other = "true";
+  const copy = document.createElement("span");
+  const title = document.createElement("strong");
+  title.textContent = label;
+  const detail = document.createElement("small");
+  detail.textContent = description;
+  copy.append(title, detail);
+  option.append(input, copy);
+  return option;
+}
+
+async function submitUserInputRequest(request, form, controls, error, submit) {
+  const project = currentProject();
+  if (!project || request.threadId !== state.selectedThreadId) return;
+  const answers = {};
+  for (const control of controls) {
+    let answer;
+    if (control.input) {
+      answer = control.input.value.trim();
+    } else {
+      const selected = control.field.querySelector('input[type="radio"]:checked');
+      answer = selected?.dataset.other === "true" ? control.otherText?.value.trim() : selected?.value.trim();
+    }
+    if (!answer) {
+      error.textContent = `请回答“${control.question.header}”。`;
+      return;
+    }
+    answers[control.question.id] = { answers: [answer] };
+  }
+  error.textContent = "";
+  submit.textContent = "正在提交…";
+  for (const element of form.elements) element.disabled = true;
+  try {
+    await api(`/api/threads/${encodeURIComponent(request.threadId)}/user-input/${encodeURIComponent(request.requestId)}`, {
+      method: "POST",
+      body: { projectId: project.id, answers },
+    });
+    state.userInputRequests.delete(request.requestId);
+    form.remove();
+    scheduleTurnActivity(request.turnId, 0);
+  } catch (submitError) {
+    for (const element of form.elements) element.disabled = false;
+    submit.textContent = "提交回答";
+    error.textContent = submitError.message;
+  }
+}
+
+function removeUserInputCard(requestId) {
+  for (const card of ui.conversation.querySelectorAll(".user-input-card")) {
+    if (card.dataset.requestId === requestId) card.remove();
+  }
+}
+
+function removeUserInputRequest(requestId) {
+  state.userInputRequests.delete(String(requestId));
+  removeUserInputCard(String(requestId));
+}
+
+function syncUserInputRequests(threadId, requests) {
+  for (const [requestId, request] of state.userInputRequests) {
+    if (request.threadId === threadId) state.userInputRequests.delete(requestId);
+  }
+  for (const request of requests || []) state.userInputRequests.set(String(request.requestId), request);
+  if (state.selectedThreadId !== threadId) return;
+  for (const card of ui.conversation.querySelectorAll(".user-input-card")) card.remove();
+  for (const request of state.userInputRequests.values()) {
+    if (request.threadId === threadId) renderUserInputRequest(request);
+  }
 }
 
 function captureRenderedExecutionItems() {
@@ -927,7 +1219,7 @@ function mergeTurnPages(existing, incoming) {
 
 async function loadOlderTurns() {
   const project = currentProject();
-  const thread = state.currentThread;
+  const thread = currentThread();
   const before = thread?.history?.before;
   if (!project || !thread || !before || state.loadingHistory) return;
   state.loadingHistory = true;
@@ -936,16 +1228,16 @@ async function loadOlderTurns() {
   const previousTop = ui.conversation.scrollTop;
   try {
     const result = await api(`/api/threads/${encodeURIComponent(thread.id)}?projectId=${encodeURIComponent(project.id)}&before=${encodeURIComponent(before)}`);
-    if (state.currentThread?.id !== thread.id) return;
+    if (state.selectedThreadId !== thread.id) return;
     ingestTurnMetrics(result.metrics);
-    const turns = [...(result.thread.turns || []), ...(state.currentThread.turns || [])];
-    state.currentThread = {
-      ...state.currentThread,
+    const selected = currentThread();
+    const turns = [...(result.thread.turns || []), ...(selected.turns || [])];
+    updateThreadInState(project.id, {
+      ...selected,
       turns,
       history: result.history,
-      runtime: result.runtime || state.currentThread.runtime,
-    };
-    updateThreadInState(project.id, state.currentThread);
+      runtime: result.runtime || selected.runtime,
+    });
     state.followLatest = false;
     state.loadingHistory = false;
     renderConversation(turns);
@@ -956,20 +1248,23 @@ async function loadOlderTurns() {
   } finally {
     if (state.loadingHistory) {
       state.loadingHistory = false;
-      if (state.currentThread?.id === thread.id) renderConversation(state.currentThread.turns || []);
+      if (state.selectedThreadId === thread.id) renderConversation(currentThread()?.turns || []);
     }
   }
 }
 
-function renderHistoryItem(item, { turnId = null } = {}) {
+function renderHistoryItem(item, { turnId = null, guide = false } = {}) {
   if (item.type === "userMessage") {
-    const message = addMessage(item.id, "你", userMessageText(item), "user");
-    placeTurnContent(turnId, message, { beforeExecution: true });
+    const message = addMessage(item.id, guide ? "引导" : "你", userMessageText(item), guide ? "guide" : "user", messageTimestamp(item, turnId));
+    if (turnId) message.root.dataset.turnId = turnId;
+    if (item.clientPending) message.root.dataset.clientPending = "true";
+    else message.root.removeAttribute("data-client-pending");
+    placeTurnContent(turnId, message, { beforeExecution: !guide });
     return message;
-  } else if (item.type === "agentMessage") {
-    const message = item.phase === "commentary"
+  } else if (item.type === "agentMessage" || item.type === "plan") {
+    const message = item.type === "agentMessage" && item.phase === "commentary"
       ? addProgressMessage(item.id, item.text || "")
-      : addMessage(item.id, "Codex", item.text || "", "assistant");
+      : addMessage(item.id, "Codex", item.text || "", "assistant", messageTimestamp(item, turnId));
     placeTurnContent(turnId, message);
     return message;
   }
@@ -986,11 +1281,11 @@ function placeTurnContent(turnId, message, { beforeExecution = false } = {}) {
     }
     return;
   }
+  group.activeCommandBatch = null;
   if (beforeExecution) {
     const entries = [...group.items.values()];
     const firstExecution = entries.map((entry) => entry.root).find((root) => root.parentNode === group.list);
-    const hasSubstantiveExecution = entries.length > 0;
-    if (firstExecution && !hasSubstantiveExecution) firstExecution.before(message.root);
+    if (firstExecution) firstExecution.before(message.root);
     else group.list.append(message.root);
     return;
   }
@@ -1001,16 +1296,54 @@ function userMessageText(item) {
   return (item.content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
 }
 
-function isExecutionItem(item) {
-  if (!item || item.type === "userMessage") return false;
-  if (item.type === "agentMessage") return false;
-  return true;
+function turnTimestamp(turn) {
+  return timestampMilliseconds(turn?.startedAt)
+    || (turn?.items || []).map((item) => messageTimestamp(item, turn?.id)).find(Boolean)
+    || timestampMilliseconds(turn?.completedAt);
 }
 
-function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing } = {}) {
+function messageTimestamp(item, turnId) {
+  const turnMetric = state.turnMetrics.get(turnId) || {};
+  const itemMetric = turnMetric.items?.[item?.id] || {};
+  const storedTurn = currentThread()?.turns?.find((turn) => turn.id === turnId) || {};
+  const storedItem = storedTurn.items?.find((entry) => entry.id === item?.id) || {};
+  const message = { ...storedItem, ...item, ...itemMetric };
+  const turn = { ...storedTurn, ...turnMetric };
+  if (message.type === "userMessage") {
+    return timestampMilliseconds(message.createdAt)
+      || timestampMilliseconds(message.startedAt)
+      || timestampMilliseconds(message.completedAt)
+      || timestampMilliseconds(turn.startedAt);
+  }
+  return timestampMilliseconds(message.completedAt)
+    || timestampMilliseconds(message.createdAt)
+    || timestampMilliseconds(message.startedAt)
+    || timestampMilliseconds(turn.completedAt)
+    || timestampMilliseconds(turn.startedAt);
+}
+
+function appendConversationDate(turnId, timestamp) {
+  const key = conversationDateKey(timestamp);
+  if (!key || ui.conversation.querySelector(`.conversation-date[data-date-key="${key}"]`)) return;
+  const separator = document.createElement("div");
+  separator.className = "conversation-date";
+  separator.dataset.dateKey = key;
+  if (turnId) separator.dataset.turnId = turnId;
+  separator.setAttribute("role", "separator");
+  const time = document.createElement("time");
+  time.dateTime = key;
+  time.textContent = formatConversationDate(timestamp);
+  time.title = formatMessageDateTime(timestamp);
+  separator.setAttribute("aria-label", time.title);
+  separator.append(time);
+  ui.conversation.append(separator);
+}
+
+function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, outputDelta = null } = {}) {
   if (!turnId || !item?.id) return;
   const group = ensureExecutionGroup(turnId, turnStatus, timing);
   let entry = group.items.get(item.id);
+  const existingEntry = Boolean(entry);
   if (!entry) {
     const root = document.createElement("details");
     root.className = "execution-entry";
@@ -1023,12 +1356,23 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing }
     summary.append(kind, title, status);
     const body = document.createElement("pre");
     root.append(summary, body);
-    group.list.append(root);
-    entry = { root, kind, title, status, body, item: {}, autoOpened: false };
+    let commandBatch = null;
+    if (item.type === "commandExecution") {
+      commandBatch = ensureCommandBatch(group);
+      commandBatch.list.append(root);
+    } else {
+      group.activeCommandBatch = null;
+      group.list.append(root);
+    }
+    entry = { root, kind, title, status, body, item: {}, autoOpened: false, commandBatch, pendingBody: null };
+    if (commandBatch) commandBatch.items.add(entry);
     summary.addEventListener("click", (event) => {
       if (entry.item.type !== "fileChange") return;
       event.preventDefault();
       openFileChangePreview(entry.item);
+    });
+    root.addEventListener("toggle", () => {
+      if (root.open) renderDeferredExecutionBody(entry);
     });
     group.items.set(item.id, entry);
   }
@@ -1039,13 +1383,8 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing }
       entry.item[key] = previousItem[key];
     }
   }
-  let presentation = executionPresentation(entry.item);
-  if (presentation.tone === "running" && !timestampMilliseconds(entry.item.startedAt)) {
-    entry.item.startedAt = Date.now();
-  } else if (presentation.tone !== "running" && timestampMilliseconds(entry.item.startedAt) && !timestampMilliseconds(entry.item.completedAt) && entry.item.durationMs == null) {
-    entry.item.completedAt = Date.now();
-  }
-  presentation = executionPresentation(entry.item);
+  const incrementalOutput = existingEntry && entry.item.type === "commandExecution" && typeof outputDelta === "string";
+  let presentation = executionPresentation(entry.item, { includeBody: !incrementalOutput });
   if (entry.item.startedAt != null || entry.item.completedAt != null || entry.item.durationMs != null) {
     mergeItemMetric(turnId, item.id, {
       type: entry.item.type,
@@ -1060,15 +1399,37 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing }
   setElapsedDisplay(entry.status, "", entry.item);
   entry.status.title = presentation.status;
   entry.status.setAttribute("aria-label", `${presentation.status}用时`);
-  renderAnsiOutput(entry.body, presentation.body || "");
+  const renderBodyNow = entry.root.open || (entry.item.type === "reasoning" && presentation.tone === "running");
+  if (!renderBodyNow) {
+    entry.pendingBody = incrementalOutput
+      ? limitExecutionDetail(executionItemText(entry.item), MAX_RENDERED_COMMAND_OUTPUT, true)
+      : presentation.body || "";
+    entry.body.replaceChildren();
+    entry.ansiStream = null;
+  } else if (incrementalOutput) {
+    if (!entry.ansiStream) {
+      entry.ansiStream = renderAnsiOutput(entry.body, limitExecutionDetail(executionItemText(entry.item), MAX_RENDERED_COMMAND_OUTPUT, true));
+      entry.pendingBody = null;
+    } else {
+      const separator = previousItem.aggregatedOutput ? "" : "\n\n";
+      entry.ansiStream = appendAnsiOutput(entry.body, `${separator}${outputDelta}`, entry.ansiStream, MAX_RENDERED_COMMAND_OUTPUT);
+    }
+    entry.body.classList.toggle("live-output-truncated", entry.ansiStream.truncated);
+  } else {
+    entry.ansiStream = renderAnsiOutput(entry.body, presentation.body || "");
+    entry.pendingBody = null;
+    entry.body.classList.remove("live-output-truncated");
+  }
   const isFileChange = entry.item.type === "fileChange";
-  entry.body.hidden = isFileChange || !presentation.body;
-  entry.root.classList.toggle("empty", !isFileChange && !presentation.body);
+  const hasBody = incrementalOutput ? entry.ansiStream.renderedLength > 0 : Boolean(presentation.body);
+  entry.body.hidden = isFileChange || !hasBody;
+  entry.root.classList.toggle("empty", !isFileChange && !hasBody);
   entry.root.classList.toggle("diff-preview-entry", isFileChange);
   entry.root.classList.toggle("failed", presentation.tone === "failed");
   entry.root.classList.toggle("running", presentation.tone === "running");
   entry.root.classList.toggle("stopped", presentation.tone === "stopped");
   entry.root.classList.toggle("complete", presentation.tone === "complete");
+  if (entry.commandBatch) updateCommandBatch(entry.commandBatch);
   if (entry.item.type === "reasoning" && presentation.body && presentation.tone === "running") {
     for (const other of group.items.values()) {
       if (other !== entry && other.autoOpened) {
@@ -1085,6 +1446,68 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing }
   updateExecutionGroup(group, turnStatus);
   if (!state.renderingConversation) syncElapsedTimer();
   followNewContent();
+}
+
+function renderDeferredExecutionBody(entry) {
+  if (entry.pendingBody === null) return;
+  entry.ansiStream = renderAnsiOutput(entry.body, entry.pendingBody);
+  entry.pendingBody = null;
+  entry.body.classList.remove("live-output-truncated");
+}
+
+function ensureCommandBatch(group) {
+  if (group.activeCommandBatch) return group.activeCommandBatch;
+  const root = document.createElement("details");
+  root.className = "command-batch";
+  const summary = document.createElement("summary");
+  const kind = document.createElement("strong");
+  kind.className = "command-batch-kind";
+  kind.textContent = "命令";
+  const title = document.createElement("span");
+  title.className = "command-batch-title";
+  const status = document.createElement("span");
+  status.className = "command-batch-status";
+  const caret = document.createElement("span");
+  caret.className = "command-batch-caret";
+  summary.append(kind, title, caret, status);
+  const list = document.createElement("div");
+  list.className = "command-batch-list";
+  root.append(summary, list);
+  group.list.append(root);
+  const batch = { root, title, status, list, items: new Set() };
+  group.commandBatches.add(batch);
+  group.activeCommandBatch = batch;
+  return batch;
+}
+
+function updateCommandBatch(batch) {
+  const entries = [...batch.items];
+  if (!entries.length) return;
+  const presentations = entries.map((entry) => executionPresentation(entry.item, { includeBody: false }));
+  const runningIndex = presentations.findLastIndex((presentation) => presentation.tone === "running");
+  const currentIndex = runningIndex >= 0 ? runningIndex : entries.length - 1;
+  const running = runningIndex >= 0;
+  batch.title.textContent = entries.length === 1
+    ? presentations[0].title
+    : running
+      ? `连续命令（${entries.length} 个） · ${presentations[currentIndex].title}`
+      : `连续命令（${entries.length} 个）`;
+  const batchStartedAt = entries.map((entry) => timestampMilliseconds(entry.item.startedAt)).filter(Boolean).sort((a, b) => a - b)[0] || null;
+  const startedAt = running ? timestampMilliseconds(entries[currentIndex].item.startedAt) || batchStartedAt : batchStartedAt;
+  const completedAt = running ? null : entries
+    .map((entry) => timestampMilliseconds(entry.item.completedAt)
+      || (timestampMilliseconds(entry.item.startedAt) && Number.isFinite(Number(entry.item.durationMs))
+        ? timestampMilliseconds(entry.item.startedAt) + Math.max(0, Number(entry.item.durationMs))
+        : null))
+    .filter(Boolean)
+    .sort((a, b) => b - a)[0] || null;
+  setElapsedDisplay(batch.status, running ? "执行中" : "", {
+    startedAt,
+    completedAt,
+    status: running ? "running" : "completed",
+  });
+  batch.root.classList.toggle("running", running);
+  batch.root.classList.toggle("complete", !running);
 }
 
 function ensureExecutionGroup(turnId, turnStatus, timing) {
@@ -1110,7 +1533,6 @@ function ensureExecutionGroup(turnId, turnStatus, timing) {
   status.className = "execution-group-status";
   const caret = document.createElement("span");
   caret.className = "execution-caret";
-  caret.textContent = "⌄";
   summary.append(marker, label, count, status, caret);
   const list = document.createElement("div");
   list.className = "execution-list";
@@ -1125,8 +1547,8 @@ function ensureExecutionGroup(turnId, turnStatus, timing) {
   total.append(totalLabel, totalValue);
   const timingFields = {};
   for (const [key, label, title] of [
-    ["local", "本地", "本地命令与文件处理耗时"],
-    ["model", "模型 ≈", "总耗时扣除可识别本地与外部调用后的估算值"],
+    ["command", "命令", "已记录的终端命令耗时"],
+    ["codex", "Codex ≈", "总耗时扣除已记录命令耗时后的估算值"],
   ]) {
     const field = document.createElement("span");
     field.className = `execution-timing-field ${key}`;
@@ -1137,16 +1559,37 @@ function ensureExecutionGroup(turnId, turnStatus, timing) {
     const detail = document.createElement("small");
     field.append(name, value, detail);
     timingSummary.append(field);
-    timingFields[key] = { name, value, detail };
+    timingFields[key] = { root: field, name, value, detail };
   }
+  const copyProcess = document.createElement("button");
+  copyProcess.className = "copy-text-button icon-copy-button execution-copy-button";
+  copyProcess.type = "button";
+  copyProcess.textContent = "复制过程";
+  copyProcess.title = "复制过程";
+  copyProcess.setAttribute("aria-label", "复制执行过程的 Markdown 原文");
+  copyProcess.addEventListener("click", () => copyWithFeedback(copyProcess, processMarkdownForGroup(group)));
+  timingSummary.append(copyProcess);
   timingSummary.prepend(total);
   root.append(summary, list, timingSummary);
   ui.conversation.append(root);
-  group = { turnId, root, count, status, list, items: new Map(), turnStatus, timingSummary, totalValue, timingFields };
+  group = { turnId, root, count, status, list, items: new Map(), commandBatches: new Set(), activeCommandBatch: null, plan: null, turnStatus, timingSummary, totalValue, timingFields, copyProcess };
   mergeExecutionTiming(group, timing);
   state.executionGroups.set(turnId, group);
   updateExecutionGroup(group, turnStatus);
   return group;
+}
+
+function renderTurnPlan(turnId, plan, turnStatus = "inProgress") {
+  if (!turnId || !plan) return;
+  const group = ensureExecutionGroup(turnId, turnStatus);
+  group.activeCommandBatch = null;
+  if (!group.plan) {
+    group.plan = createTurnPlanView(plan);
+    group.list.append(group.plan.root);
+  } else {
+    updateTurnPlanView(group.plan, plan);
+  }
+  followNewContent();
 }
 
 function mergeExecutionTiming(group, timing) {
@@ -1172,8 +1615,8 @@ function updateExecutionGroup(group, turnStatus) {
   const count = group.items.size;
   group.count.textContent = `· ${count} 项`;
   const runtime = currentRuntime();
-  const runtimeMatchesTurn = runtimeIsActive(runtime) && runtime.activeTurnId === group.turnId;
-  const running = runtimeMatchesTurn || ["active", "running", "inProgress"].includes(group.turnStatus);
+  const runtimeMatchesTurn = isActiveThreadRuntime(runtime) && runtime.activeTurnId === group.turnId;
+  const running = runtimeMatchesTurn || isActiveThreadStatus(group.turnStatus);
   const failed = ["failed", "error"].includes(group.turnStatus);
   const stopped = ["interrupted", "cancelled"].includes(group.turnStatus);
   const label = running ? "进行中" : failed ? "失败" : stopped ? "已停止" : "结束";
@@ -1194,17 +1637,23 @@ function updateExecutionTimingSummary(group, running) {
   }
   const summary = summarizeExecutionTiming(group, [...group.items.values()].map((entry) => entry.item));
   if (!summary) {
-    group.timingSummary.hidden = true;
+    group.totalValue.parentElement.hidden = true;
+    group.timingFields.command.root.hidden = true;
+    group.timingFields.codex.root.hidden = true;
+    group.timingSummary.hidden = false;
     return;
   }
+  group.totalValue.parentElement.hidden = false;
+  group.timingFields.command.root.hidden = false;
+  group.timingFields.codex.root.hidden = false;
   group.totalValue.textContent = formatDuration(summary.totalMs);
-  group.timingFields.local.value.textContent = summary.localUnknownCount
-    ? summary.localMs > 0 ? `≥ ${formatDuration(summary.localMs)}` : "未记录"
-    : formatDuration(summary.localMs);
-  group.timingFields.local.detail.textContent = `${summary.localCount} 项`;
-  group.timingFields.model.value.textContent = summary.modelMs === null ? "未记录" : formatDuration(summary.modelMs);
-  group.timingFields.model.detail.textContent = summary.modelMs === null ? "数据不全" : "推算";
-  group.timingFields.model.name.textContent = summary.modelMs === null ? "模型" : "模型 ≈";
+  group.timingFields.command.value.textContent = summary.commandUnknownCount
+    ? summary.commandMs > 0 ? `≥ ${formatDuration(summary.commandMs)}` : "未记录"
+    : formatDuration(summary.commandMs);
+  group.timingFields.command.detail.textContent = `${summary.commandCount} 项`;
+  group.timingFields.codex.value.textContent = summary.codexMs === null ? "未记录" : formatDuration(summary.codexMs);
+  group.timingFields.codex.detail.textContent = summary.codexMs === null ? "命令数据不全" : "推算";
+  group.timingFields.codex.name.textContent = summary.codexMs === null ? "Codex" : "Codex ≈";
   group.timingSummary.hidden = false;
 }
 
@@ -1212,7 +1661,6 @@ function completeExecutionGroup(turnId, turnStatus, timing) {
   const group = state.executionGroups.get(turnId);
   if (!group) return;
   mergeExecutionTiming(group, timing);
-  if (!group.durationMs && group.startedAt && !group.completedAt) group.completedAt = Date.now();
   mergeTurnMetric(turnId, {
     startedAt: group.startedAt,
     completedAt: group.completedAt,
@@ -1220,10 +1668,12 @@ function completeExecutionGroup(turnId, turnStatus, timing) {
   });
   const itemStatus = turnStatus === "failed" ? "failed" : ["interrupted", "cancelled"].includes(turnStatus) ? "interrupted" : "completed";
   for (const entry of group.items.values()) {
+    const completedAt = timestampMilliseconds(entry.item.completedAt)
+      || (entry.item.durationMs === null || entry.item.durationMs === undefined ? group.completedAt : null);
     entry.item = {
       ...entry.item,
       status: itemStatus,
-      ...(entry.item.durationMs == null && !entry.item.completedAt ? { completedAt: Date.now() } : {}),
+      ...(completedAt ? { completedAt } : {}),
     };
     mergeItemMetric(turnId, entry.item.id, {
       type: entry.item.type,
@@ -1244,6 +1694,7 @@ function completeExecutionGroup(turnId, turnStatus, timing) {
       entry.root.open = false;
       entry.autoOpened = false;
     }
+    if (entry.commandBatch) updateCommandBatch(entry.commandBatch);
   }
   updateExecutionGroup(group, turnStatus || "completed");
   syncElapsedTimer();
@@ -1256,6 +1707,16 @@ function removeExecutionItem(turnId, itemId) {
   if (!group || !entry) return;
   entry.root.remove();
   group.items.delete(itemId);
+  if (entry.commandBatch) {
+    entry.commandBatch.items.delete(entry);
+    if (!entry.commandBatch.items.size) {
+      entry.commandBatch.root.remove();
+      group.commandBatches.delete(entry.commandBatch);
+      if (group.activeCommandBatch === entry.commandBatch) group.activeCommandBatch = null;
+    } else {
+      updateCommandBatch(entry.commandBatch);
+    }
+  }
   if (group.items.size || group.list.childElementCount) {
     updateExecutionGroup(group, "inProgress");
   } else {
@@ -1286,8 +1747,9 @@ function showTurnActivity(turnId) {
     executionStatus(entry.item).tone === "running"
   ));
   if (currentRuntime().activeTurnId !== turnId || hasRunningItem || state.messageElements.has(turnActivityId(turnId))) return;
-  const message = addProgressMessage(turnActivityId(turnId), "处理中，等待状态更新");
-  message.root.classList.add("running");
+  const message = addProgressMessage(turnActivityId(turnId), "Codex 处理中");
+  message.root.classList.add("running", "waiting");
+  setElapsedDisplay(message.body, "Codex 处理中", currentRuntime());
   placeTurnContent(turnId, message);
 }
 
@@ -1301,18 +1763,20 @@ function scheduleTurnActivity(turnId, delay = 180) {
   state.executionIdleTimers.set(turnId, timer);
 }
 
-function executionPresentation(item) {
+function executionPresentation(item, { includeBody = true } = {}) {
   const status = executionStatus(item);
-  const body = item.type === "fileChange" ? "" : limitExecutionDetail(executionBody(item));
+  const body = !includeBody || item.type === "fileChange" ? "" : limitExecutionDetail(executionItemText(item), MAX_RENDERED_COMMAND_OUTPUT, item.type === "commandExecution");
   if (item.type === "agentMessage") return { kind: "进度", title: compactText(item.text || "Codex 正在处理"), status: status.label, tone: status.tone, body };
-  if (item.type === "plan") return { kind: "计划", title: compactText(item.text || "更新执行计划"), status: status.label, tone: status.tone, body };
   if (item.type === "reasoning") {
     const summary = uniqueTextParts(item.summary || []);
     return { kind: "思考", title: compactText(plainInlineMarkdown(summary[summary.length - 1]) || "整理思路"), status: status.label, tone: status.tone, body };
   }
-  if (item.type === "commandExecution") return { kind: "命令", title: compactText(item.command || "执行终端命令"), status: status.label, tone: status.tone, body };
+  if (item.type === "commandExecution") return { kind: "命令", title: compactText(commandDisplayText(item.command) || "执行终端命令"), status: status.label, tone: status.tone, body };
   if (item.type === "fileChange") return { kind: "文件", title: fileChangeTitle(item, status.tone), status: status.label, tone: status.tone, body };
   if (item.type === "mcpToolCall") return { kind: "工具", title: compactText([item.server, item.tool].filter(Boolean).join(" / ") || "调用工具"), status: status.label, tone: status.tone, body };
+  if (item.type === "dynamicToolCall" && /request_?user_?input/i.test(item.tool || "")) {
+    return { kind: "提问", title: status.tone === "running" ? "等待你的回答" : "已收到回答", status: status.label, tone: status.tone, body: "" };
+  }
   if (item.type === "dynamicToolCall") return { kind: "工具", title: compactText([item.namespace, item.tool].filter(Boolean).join(" / ") || "调用工具"), status: status.label, tone: status.tone, body };
   if (item.type === "collabAgentToolCall") return { kind: "协作", title: compactText(item.tool || "代理协作"), status: status.label, tone: status.tone, body };
   if (item.type === "subAgentActivity") return { kind: "子任务", title: compactText(item.agentPath || item.kind || "代理活动"), status: status.label, tone: status.tone, body };
@@ -1356,26 +1820,11 @@ function renderExecutionTitle(element, text, item) {
 
 function executionStatus(item) {
   const value = String(item.status || "").toLowerCase();
-  if (["inprogress", "running", "started", "pending"].includes(value)) return { label: "进行中", tone: "running" };
+  if (isActiveThreadStatus(value)) return { label: "进行中", tone: "running" };
   if (["interrupted", "cancelled"].includes(value)) return { label: "已停止", tone: "stopped" };
   if (["failed", "error", "declined"].includes(value) || item.error || Number(item.exitCode) > 0) return { label: "失败", tone: "failed" };
   if (item.exitCode === 0) return { label: "结束", tone: "complete" };
   return { label: "结束", tone: "complete" };
-}
-
-function executionBody(item) {
-  if (item.type === "agentMessage" || item.type === "plan") return item.text || "";
-  if (item.type === "reasoning") return uniqueTextParts([...(item.summary || []), ...(item.content || [])]).join("\n\n");
-  if (item.type === "commandExecution") return [item.cwd && `目录：${item.cwd}`, item.command, item.aggregatedOutput, item.exitCode !== null && item.exitCode !== undefined && `退出码：${item.exitCode}`].filter(Boolean).join("\n\n");
-  if (item.type === "fileChange") return (item.changes || []).map((change) => [change.path, change.diff].filter(Boolean).join("\n")).join("\n\n");
-  if (item.type === "mcpToolCall") return [item.arguments && `参数\n${safeStringify(item.arguments)}`, item.result && `结果\n${safeStringify(item.result)}`, item.error && `错误\n${safeStringify(item.error)}`].filter(Boolean).join("\n\n");
-  if (item.type === "dynamicToolCall") return [item.arguments && `参数\n${safeStringify(item.arguments)}`, item.contentItems && `结果\n${safeStringify(item.contentItems)}`].filter(Boolean).join("\n\n");
-  if (item.type === "collabAgentToolCall") return [item.prompt, item.receiverThreadIds?.length && `目标：${item.receiverThreadIds.join(", ")}`, item.agentsStates && safeStringify(item.agentsStates)].filter(Boolean).join("\n\n");
-  if (item.type === "subAgentActivity") return [item.kind, item.agentPath, item.agentThreadId].filter(Boolean).join("\n");
-  if (item.type === "webSearch") return [item.query, item.action && safeStringify(item.action)].filter(Boolean).join("\n\n");
-  if (item.type === "imageView") return item.path || "";
-  if (item.type === "sleep") return `等待时长：${item.durationMs || 0} ms`;
-  return "";
 }
 
 function uniqueTextParts(parts) {
@@ -1392,17 +1841,84 @@ function compactText(value, limit = 92) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-function limitExecutionDetail(value, limit = 16000) {
+function limitExecutionDetail(value, limit = 16000, keepEnd = false) {
   const text = String(value || "").trim();
-  return text.length > limit ? `${text.slice(0, limit)}\n\n…内容过长，已截断显示` : text;
+  if (text.length <= limit) return text;
+  return keepEnd
+    ? `…前面的内容已截断显示\n\n${text.slice(-limit)}`
+    : `${text.slice(0, limit)}\n\n…后面的内容已截断显示`;
 }
 
-function safeStringify(value) {
-  try {
-    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
+function processMarkdownForGroup(group) {
+  if (!group?.turnId) return "";
+  const storedTurn = (currentThread()?.turns || []).find((turn) => turn.id === group.turnId);
+  const liveItems = new Map([...group.items.values()].map((entry) => [entry.item.id, entry.item]));
+  const items = [];
+  for (const item of storedTurn?.items || []) {
+    const live = item.id ? liveItems.get(item.id) : null;
+    items.push(live ? { ...item, ...live } : item);
+    if (item.id) liveItems.delete(item.id);
   }
+  items.push(...liveItems.values());
+  return turnProcessMarkdown({
+    plan: state.turnMetrics.get(group.turnId)?.plan,
+    items,
+  });
+}
+
+async function copyWithFeedback(button, value) {
+  const text = String(value || "");
+  if (!text) {
+    showActivity("没有可复制的内容。", true);
+    return;
+  }
+  const original = button.textContent;
+  const originalTitle = button.title;
+  const originalLabel = button.getAttribute("aria-label");
+  clearTimeout(button.copyFeedbackTimer);
+  try {
+    await writeClipboardText(text);
+    button.textContent = "已复制";
+    button.title = "已复制";
+    button.setAttribute("aria-label", "已复制");
+    button.classList.add("copied");
+    button.copyFeedbackTimer = setTimeout(() => {
+      button.textContent = original;
+      button.title = originalTitle;
+      if (originalLabel) button.setAttribute("aria-label", originalLabel);
+      else button.removeAttribute("aria-label");
+      button.classList.remove("copied");
+    }, 1400);
+  } catch (error) {
+    button.textContent = original;
+    button.title = originalTitle;
+    if (originalLabel) button.setAttribute("aria-label", originalLabel);
+    else button.removeAttribute("aria-label");
+    button.classList.remove("copied");
+    showActivity(`复制失败：${error.message}`, true);
+  }
+}
+
+async function writeClipboardText(text) {
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const source = document.createElement("textarea");
+  source.className = "clipboard-source";
+  source.value = text;
+  source.readOnly = true;
+  document.body.append(source);
+  let copied = false;
+  try {
+    source.focus({ preventScroll: true });
+    source.select();
+    source.setSelectionRange(0, source.value.length);
+    copied = document.execCommand("copy");
+  } finally {
+    source.remove();
+  }
+  if (!copied) throw new Error("浏览器拒绝访问剪贴板");
 }
 
 function renderEmptyConversation() {
@@ -1419,10 +1935,11 @@ function renderEmptyConversation() {
   ui.conversation.append(empty);
 }
 
-function addMessage(id, label, text, kind) {
+function addMessage(id, label, text, kind, timestamp = null) {
   if (state.messageElements.has(id)) {
     const entry = state.messageElements.get(id);
     if (text !== undefined) renderMessageContent(entry, text);
+    setMessageTimestamp(entry, timestamp);
     return entry;
   }
   ui.conversation.querySelector(".empty-state")?.remove();
@@ -1430,12 +1947,42 @@ function addMessage(id, label, text, kind) {
   root.classList.add(kind);
   const meta = root.querySelector(".message-meta");
   const body = root.querySelector(".message-body");
-  meta.textContent = label;
+  const name = document.createElement("span");
+  name.textContent = label;
+  const time = document.createElement("time");
+  time.className = "message-time";
+  time.hidden = true;
+  meta.replaceChildren(name, time);
   ui.conversation.append(root);
-  const entry = { root, body, kind, files: null };
+  const entry = { root, body, kind, time, files: null, rawText: "", actions: null, copyButton: null };
+  if (kind === "assistant") {
+    const actions = document.createElement("div");
+    actions.className = "message-actions";
+    const copyButton = document.createElement("button");
+    copyButton.className = "copy-text-button icon-copy-button";
+    copyButton.type = "button";
+    copyButton.textContent = "复制原文";
+    copyButton.title = "复制原文";
+    copyButton.setAttribute("aria-label", "复制最终回答的 Markdown 原文");
+    copyButton.addEventListener("click", () => copyWithFeedback(copyButton, entry.rawText));
+    actions.append(copyButton);
+    root.append(actions);
+    entry.actions = actions;
+    entry.copyButton = copyButton;
+  }
+  setMessageTimestamp(entry, timestamp);
   renderMessageContent(entry, text);
   state.messageElements.set(id, entry);
   return entry;
+}
+
+function setMessageTimestamp(entry, timestamp) {
+  const milliseconds = timestampMilliseconds(timestamp);
+  if (!entry?.time || !milliseconds) return;
+  entry.time.dateTime = new Date(milliseconds).toISOString();
+  entry.time.textContent = formatMessageTime(milliseconds);
+  entry.time.title = formatMessageDateTime(milliseconds);
+  entry.time.hidden = false;
 }
 
 function addProgressMessage(id, text) {
@@ -1467,43 +2014,51 @@ function removeRenderedMessage(id) {
   state.messageElements.delete(id);
 }
 
-function addPendingUserMessage(threadId, text) {
-  const pending = { id: `pending-user-${Date.now()}-${Math.random().toString(16).slice(2)}`, threadId, text };
-  state.pendingUserMessages.push(pending);
-  addMessage(pending.id, "你 · 引导", text, "user");
-  if (state.followLatest) scrollToLatest();
-  return pending;
-}
-
-function removePendingUserMessage(pending) {
-  state.pendingUserMessages = state.pendingUserMessages.filter((entry) => entry !== pending);
-  const message = state.messageElements.get(pending.id);
-  message?.root.remove();
-  state.messageElements.delete(pending.id);
-}
-
-function renderLiveUserMessage(threadId, item, turnId = null) {
+function renderLiveUserMessage(item, turnId = null, guide = null) {
   const text = userMessageText(item);
-  const pending = state.pendingUserMessages.find((entry) => entry.threadId === threadId && entry.text === text);
-  if (!pending) {
-    renderHistoryItem(item, { turnId });
-    return;
+  const matching = [...state.messageElements].find(([, entry]) => (
+    entry.root.matches?.(".message.user, .message.guide")
+      && entry.root.dataset.turnId === turnId
+      && entry.rawText === text
+      && (item.clientPending
+        ? entry.root.dataset.clientPending !== "true"
+        : entry.root.dataset.clientPending === "true")
+  ));
+  if (matching) {
+    const [matchingId, entry] = matching;
+    setMessageTimestamp(entry, messageTimestamp(item, turnId));
+    const thread = currentThread();
+    const turn = thread?.turns?.find((candidate) => candidate.id === turnId);
+    if (matchingId === item.id) {
+      const stored = turn?.items?.find((candidate) => candidate.id === item.id);
+      if (stored) delete stored.clientPending;
+      entry.root.removeAttribute("data-client-pending");
+      renderMessageContent(entry, text);
+      return entry;
+    }
+    if (turn) turn.items = turn.items.filter((candidate) => candidate.id !== (item.clientPending ? item.id : matchingId));
+    if (item.clientPending) return entry;
+    removeRenderedMessage(matchingId);
   }
-  const message = state.messageElements.get(pending.id);
-  state.pendingUserMessages = state.pendingUserMessages.filter((entry) => entry !== pending);
-  state.messageElements.delete(pending.id);
-  if (!message) {
-    renderHistoryItem(item, { turnId });
-    return;
-  }
-  message.root.querySelector(".message-meta").textContent = "你 · 引导";
-  renderMessageContent(message, text);
-  state.messageElements.set(item.id, message);
-  placeTurnContent(turnId, message, { beforeExecution: true });
+  const isGuide = guide ?? Boolean(turnId && [...ui.conversation.querySelectorAll(".message.user, .message.guide")]
+    .some((message) => message.dataset.turnId === turnId));
+  return renderHistoryItem(item, { turnId, guide: isGuide });
+}
+
+function acceptGuideMessage(threadId, turnId, item) {
+  const projectId = findProjectForThread(threadId);
+  if (!projectId || !turnId || !item?.id) return;
+  const stored = rememberThreadItem(projectId, threadId, turnId, {
+    ...item,
+    createdAt: timestampMilliseconds(item.createdAt) || Date.now(),
+  });
+  if (stored && state.selectedThreadId === threadId) renderLiveUserMessage(stored, turnId, true);
 }
 
 function renderMessageContent(entry, value) {
   const text = String(value || "");
+  entry.rawText = text;
+  if (entry.actions) entry.actions.hidden = !text;
   if (entry.kind !== "assistant") {
     entry.body.textContent = text;
     entry.body.hidden = false;
@@ -1522,6 +2077,7 @@ function renderMessageContent(entry, value) {
   entry.files?.remove();
   entry.files = null;
   if (!presentation.files.length || !currentProject()) {
+    if (entry.actions) entry.root.append(entry.actions);
     followNewContent();
     return;
   }
@@ -1531,6 +2087,7 @@ function renderMessageContent(entry, value) {
   for (const file of presentation.files) list.append(downloadCard(file));
   entry.root.append(list);
   entry.files = list;
+  if (entry.actions) entry.root.append(entry.actions);
   followNewContent();
 }
 
@@ -1677,16 +2234,18 @@ async function fileResponseError(response) {
 
 function renderQueue() {
   ui.queuePanel.replaceChildren();
-  if (!state.currentThread || !state.currentQueue.length) {
+  const queue = currentQueue();
+  if (!currentThread() || !queue.length) {
     ui.queuePanel.hidden = true;
     return;
   }
   ui.queuePanel.hidden = false;
-  const heading = document.createElement("header");
-  heading.textContent = `等待队列 · ${state.currentQueue.length}`;
   const list = document.createElement("ol");
   list.className = "queue-list";
-  for (const [index, item] of state.currentQueue.entries()) {
+  const runtime = currentRuntime();
+  const runtimeActive = isActiveThreadRuntime(runtime);
+  const runtimeIdentityPending = runtimeActive && !runtime.activeTurnId;
+  for (const [index, item] of queue.entries()) {
     const row = ui.queueItemTemplate.content.firstElementChild.cloneNode(true);
     row.querySelector(".queue-index").textContent = String(index + 1);
     row.querySelector(".queue-text").textContent = item.text;
@@ -1696,11 +2255,12 @@ function renderQueue() {
     if (guiding) row.setAttribute("aria-busy", "true");
     row.querySelector(".queue-index").textContent = guiding ? "↗" : String(index + 1);
     if (guiding) row.querySelector(".queue-text").dataset.status = "正在转入信息流";
-    guideButton.disabled = !currentRuntime().activeTurnId || guiding;
+    guideButton.disabled = !runtime.activeTurnId || guiding;
     guideButton.textContent = guiding ? "…" : "↗";
+    guideButton.title = runtimeIdentityPending ? "正在同步当前执行标识" : runtime.activeTurnId ? "转入当前信息流" : "当前没有运行中的任务";
     row.querySelector('[data-action="edit"]').disabled = guiding;
     row.querySelector('[data-action="up"]').disabled = guiding || index === 0;
-    row.querySelector('[data-action="down"]').disabled = guiding || index === state.currentQueue.length - 1;
+    row.querySelector('[data-action="down"]').disabled = guiding || index === queue.length - 1;
     row.querySelector('[data-action="remove"]').disabled = guiding;
     row.querySelector('[data-action="guide"]').addEventListener("click", () => guideQueueItem(item.id));
     row.querySelector('[data-action="edit"]').addEventListener("click", () => openQueueEdit(item));
@@ -1709,55 +2269,73 @@ function renderQueue() {
     row.querySelector('[data-action="remove"]').addEventListener("click", () => removeQueue(item.id));
     list.append(row);
   }
-  ui.queuePanel.append(heading, list);
+  ui.queuePanel.append(list);
 }
 
 function updateComposer() {
-  const hasThread = Boolean(state.currentThread);
-  const active = Boolean(currentRuntime().activeTurnId);
+  const hasThread = Boolean(currentThread());
+  const switching = Boolean(state.threadSelectionTargetId);
+  const runtime = currentRuntime();
+  const active = isActiveThreadRuntime(runtime);
+  const activeTurnReady = Boolean(runtime.activeTurnId);
   const hasInput = Boolean(ui.prompt.value.trim() || state.composerAttachments.length);
-  const showStop = active && !hasInput && !state.materializingThread;
-  const guideAvailable = hasThread && active;
-  if (state.mode === "guide" && !guideAvailable) state.mode = "queue";
+  const projectAvailable = currentProject()?.available !== false;
+  const showStop = activeTurnReady && !hasInput && !state.materializingThread;
+  const guideAvailable = hasThread && activeTurnReady;
+  if (state.mode === "guide" && !active) state.mode = "queue";
   ui.guide.classList.toggle("active", state.mode === "guide");
   ui.guide.classList.toggle("guide-active", state.mode === "guide");
   ui.queue.classList.toggle("active", state.mode === "queue");
-  ui.guide.disabled = !guideAvailable;
-  ui.prompt.disabled = !currentProject();
-  ui.uploadFiles.disabled = !currentProject() || state.uploadingFiles || !state.projectAttachmentStorage;
-  ui.uploadFiles.title = state.projectAttachmentStorage
-    ? "添加文件或图片；也可直接粘贴剪贴板图片"
-    : "当前服务版本暂不支持附件";
+  ui.guide.disabled = !state.codexReady || !guideAvailable || switching;
+  ui.queue.disabled = !state.codexReady || switching;
+  ui.planMode.disabled = !state.codexReady || !hasThread || active || switching;
+  renderThreadActions();
+  ui.guide.title = active && !activeTurnReady ? "正在同步当前执行标识" : guideAvailable ? "向当前任务追加引导" : "当前没有运行中的任务";
+  ui.prompt.disabled = !state.codexReady || !currentProject() || !projectAvailable || switching;
+  ui.uploadFiles.disabled = !state.codexReady || !currentProject() || !projectAvailable || state.uploadingFiles || switching;
+  ui.uploadFiles.title = "添加文件或图片；也可直接粘贴剪贴板图片";
   ui.stop.hidden = !showStop;
-  ui.stop.disabled = !showStop || state.stoppingTurn;
+  ui.stop.disabled = !showStop || state.stoppingTurn || switching;
   ui.stop.querySelector("span").textContent = state.stoppingTurn ? "…" : "■";
   ui.send.hidden = showStop;
-  ui.send.disabled = !currentProject() || state.materializingThread || state.uploadingFiles || !hasInput;
+  ui.send.disabled = !state.codexReady || !currentProject() || !projectAvailable || state.materializingThread || state.submittingMessage || state.uploadingFiles || switching || !hasInput;
   if (state.materializingThread) {
     ui.send.querySelector("span").textContent = "↑";
     ui.send.setAttribute("aria-label", "正在创建聊天");
     ui.send.title = "正在创建聊天";
     ui.send.classList.remove("guide");
+  } else if (state.submittingMessage) {
+    ui.send.querySelector("span").textContent = state.mode === "guide" ? "↗" : "↑";
+    ui.send.setAttribute("aria-label", "正在发送");
+    ui.send.title = "正在发送";
+    ui.send.classList.toggle("guide", state.mode === "guide");
   } else if (state.mode === "guide") {
-    ui.prompt.placeholder = "补充目标、限制或修正方向…";
+    ui.prompt.placeholder = activeTurnReady ? "补充目标、限制或修正方向…" : "正在同步当前执行，请稍候…";
     ui.send.querySelector("span").textContent = "↗";
     ui.send.setAttribute("aria-label", "发送引导");
     ui.send.title = "发送引导";
     ui.send.classList.add("guide");
   } else {
-    ui.prompt.placeholder = "输入要交给 Codex 的任务…";
+    ui.prompt.placeholder = state.codexReady ? "输入要交给 Codex 的任务…" : "连接 Codex 后可以开始对话";
     ui.send.querySelector("span").textContent = "↑";
     const sendLabel = active ? "加入队列" : "发送";
     ui.send.setAttribute("aria-label", sendLabel);
     ui.send.title = sendLabel;
     ui.send.classList.remove("guide");
   }
+  if (currentProject()) window.CodexAndroid?.readyForSharedFiles?.();
 }
 
 function chooseUploadFiles() {
   if (!currentProject() || state.uploadingFiles) return;
   ui.uploadFileInput.click();
 }
+
+window.codexReceiveAndroidShare = () => {
+  if (!currentProject() || state.uploadingFiles) return "not-ready";
+  ui.uploadFileInput.click();
+  return "picker-opened";
+};
 
 async function uploadSelectedFiles() {
   const files = [...(ui.uploadFileInput.files || [])];
@@ -1767,10 +2345,6 @@ async function uploadSelectedFiles() {
 
 function addComposerFiles(files) {
   const project = currentProject();
-  if (!state.projectAttachmentStorage) {
-    showActivity("当前服务版本暂不支持附件；文字仍可正常发送。", true);
-    return;
-  }
   if (!project || !files.length || state.uploadingFiles) return;
   for (const file of files) {
     state.composerAttachments.push({
@@ -1790,7 +2364,6 @@ function addComposerFiles(files) {
 async function pasteClipboardImages(event) {
   const images = clipboardImageFiles(event.clipboardData);
   if (!images.length) return;
-  if (!state.projectAttachmentStorage) return;
   event.preventDefault();
   const timestamp = Date.now();
   const files = images.map((image, index) => new File([image], clipboardImageName(image.type, timestamp, index), {
@@ -1800,10 +2373,9 @@ async function pasteClipboardImages(event) {
   addComposerFiles(files);
 }
 
-async function uploadComposerAttachments(project, thread) {
-  const pending = state.composerAttachments.filter((attachment) => !attachment.uploaded);
+async function uploadComposerAttachments(project, thread, attachments = state.composerAttachments) {
+  const pending = attachments.filter((attachment) => !attachment.uploaded);
   if (!pending.length) return;
-  if (!state.projectAttachmentStorage) throw new Error("当前服务版本暂不支持附件；请移除附件后发送文字。");
   state.uploadingFiles = true;
   updateComposer();
   try {
@@ -1895,11 +2467,13 @@ async function deleteUploadedAttachment(attachment) {
 
 async function createThread({ focusPrompt = true } = {}) {
   const project = currentProject();
-  if (!project) return null;
-  if (state.currentThread?.runtime?.projectId === project.id && currentThreadIsEmpty()) {
+  if (!project || project.available === false) return null;
+  cancelThreadSelection();
+  const selected = currentThread();
+  if (isLocalThreadId(selected?.id) && selected.runtime?.projectId === project.id && currentThreadIsEmpty()) {
     closeSidebar();
     if (focusPrompt) ui.prompt.focus();
-    return state.currentThread;
+    return selected;
   }
   const existingDraft = (state.threads.get(project.id) || []).find((thread) => isLocalThreadId(thread.id));
   const thread = existingDraft || {
@@ -1909,7 +2483,7 @@ async function createThread({ focusPrompt = true } = {}) {
     turns: [],
     settings: newThreadSettings({
       projectSettings: project.settings,
-      currentThread: state.currentThread,
+      currentThread: selected,
       projectId: project.id,
       models: state.models,
     }),
@@ -1919,20 +2493,18 @@ async function createThread({ focusPrompt = true } = {}) {
     queueRevision: 0,
     createdAt: Math.floor(Date.now() / 1000),
     updatedAt: Math.floor(Date.now() / 1000),
+    accessedAt: new Date().toISOString(),
   };
   updateThreadInState(project.id, thread);
-  state.currentThread = thread;
-  state.currentQueue = [];
+  state.selectedThreadId = thread.id;
   state.followLatest = true;
-  state.selectedThreads[project.id] = thread.id;
-  saveSelection();
   closeSidebar();
   renderThreads();
   renderCurrentThread();
   if (!state.models.length) {
     const draftId = thread.id;
     void loadModels().then(() => {
-      if (state.currentThread?.id === draftId) renderSettings();
+      if (state.selectedThreadId === draftId) renderSettings();
     });
   }
   if (focusPrompt) ui.prompt.focus();
@@ -1940,11 +2512,11 @@ async function createThread({ focusPrompt = true } = {}) {
 }
 
 function currentThreadIsEmpty() {
-  const thread = state.currentThread;
+  const thread = currentThread();
   if (!thread) return false;
   return (thread.turns || []).length === 0
-    && !runtimeIsActive(thread.runtime)
-    && state.currentQueue.length === 0
+    && !isActiveThreadRuntime(thread.runtime)
+    && currentQueue().length === 0
     && !thread.queueCount;
 }
 
@@ -1957,16 +2529,19 @@ function nextLocalThreadId() {
   return `local-${Date.now().toString(36)}-${state.localThreadSequence.toString(36)}`;
 }
 
-async function materializeCurrentThread() {
-  const project = currentProject();
-  const draft = state.currentThread;
+async function materializeThread(project, draft, firstMessage = "") {
   if (!project || !draft || !isLocalThreadId(draft.id)) return draft;
   state.materializingThread = true;
   updateComposer();
   try {
     const result = await api("/api/threads", {
       method: "POST",
-      body: { projectId: project.id, settings: draft.settings || {}, ...(draft.name ? { name: draft.name } : {}) },
+      body: {
+        projectId: project.id,
+        settings: draft.settings || {},
+        ...(draft.name ? { name: draft.name } : {}),
+        ...(firstMessage ? { firstMessage } : {}),
+      },
     });
     const thread = {
       ...result.thread,
@@ -1980,14 +2555,12 @@ async function materializeCurrentThread() {
     else threads[index] = thread;
     state.threads.set(project.id, threads);
     state.queueSnapshots.delete(draft.id);
-    state.currentThread = thread;
-    state.selectedThreads[project.id] = thread.id;
-    saveSelection();
+    const stillSelected = state.selectedProjectId === project.id && state.selectedThreadId === draft.id;
+    if (stillSelected) state.selectedThreadId = thread.id;
     applyQueueSnapshot(thread.id, result.queue || [], result.queueRevision ?? 0);
-    openEventStream(thread.id);
-    syncEventStreams();
+    ensureEventStream();
     renderThreads();
-    renderCurrentThread();
+    if (stillSelected) renderCurrentThread({ messages: false });
     return thread;
   } finally {
     state.materializingThread = false;
@@ -1998,27 +2571,52 @@ async function materializeCurrentThread() {
 async function submitPrompt(event) {
   event.preventDefault();
   const hasContent = Boolean(ui.prompt.value.trim() || state.composerAttachments.length);
-  if (!hasContent || !currentProject() || state.materializingThread || state.uploadingFiles) return;
+  if (!hasContent || !currentProject() || state.materializingThread || state.submittingMessage || state.uploadingFiles) return;
+  state.submittingMessage = true;
+  updateComposer();
   scrollToLatest(false);
+  let submittedThreadId = null;
   try {
-    if (!state.currentThread) await createThread();
-    if (isLocalThreadId(state.currentThread?.id)) await materializeCurrentThread();
-    const project = currentProject();
-    const thread = state.currentThread;
-    await uploadComposerAttachments(project, thread);
-    const text = messageWithAttachments(ui.prompt.value, state.composerAttachments.map((attachment) => attachment.uploaded).filter(Boolean));
-    if (state.mode === "guide") {
-      const latest = await refreshThreadSnapshot(thread, project);
-      const activeTurnId = latest?.runtime.activeTurnId;
-      if (!activeTurnId) throw new Error("当前没有可引导的执行任务。");
-      const pending = addPendingUserMessage(thread.id, text);
-      try {
-        await api(`/api/threads/${encodeURIComponent(thread.id)}/steer`, { method: "POST", body: { projectId: project.id, expectedTurnId: activeTurnId, text } });
-        showActivity("引导已插入当前任务。", false);
-      } catch (error) {
-        removePendingUserMessage(pending);
-        throw error;
+    let project = currentProject();
+    let thread = currentThread() || await createThread();
+    if (!project || !thread) return;
+    const sourceThreadId = thread.id;
+    const sourcePrompt = ui.prompt.value;
+    const attachments = [...state.composerAttachments];
+    const mode = state.mode;
+    const activeTurnId = thread.runtime?.activeTurnId || null;
+    let prompt = sourcePrompt;
+    const shortcut = planShortcut(sourcePrompt);
+    if (shortcut && !attachments.length) {
+      const planActive = thread.settings?.collaborationMode === "plan";
+      const targetMode = shortcut.prompt ? "plan" : planActive ? "default" : "plan";
+      const changed = await saveSettings({ collaborationMode: targetMode }, { quiet: true });
+      if (!changed) return;
+      prompt = shortcut.prompt;
+      if (!prompt) {
+        if (state.selectedProjectId === project.id && state.selectedThreadId === sourceThreadId && ui.prompt.value === sourcePrompt) {
+          ui.prompt.value = "";
+          resizePrompt();
+        }
+        showActivity(targetMode === "plan" ? "已进入 Plan 模式。" : "已退出 Plan 模式。", false);
+        return;
       }
+    }
+    if (isLocalThreadId(thread.id)) {
+      const firstMessage = [prompt.trim(), ...attachments.map((attachment) => attachment.name)].filter(Boolean).join("\n");
+      thread = await materializeThread(project, thread, firstMessage);
+    }
+    submittedThreadId = thread.id;
+    state.submittingThreadIds.add(thread.id);
+    ensureEventStream();
+    await waitForEventStream();
+    await uploadComposerAttachments(project, thread, attachments);
+    const text = messageWithAttachments(prompt, attachments.map((attachment) => attachment.uploaded).filter(Boolean));
+    if (mode === "guide") {
+      if (!activeTurnId) throw new Error("当前没有可引导的执行任务。");
+      const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/steer`, { method: "POST", body: { projectId: project.id, expectedTurnId: activeTurnId, text } });
+      acceptGuideMessage(thread.id, result.turnId, result.item);
+      showActivity("引导已插入当前任务。", false);
     } else {
       const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue`, { method: "POST", body: { projectId: project.id, text } });
       applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
@@ -2027,25 +2625,32 @@ async function submitPrompt(event) {
       renderRunStrip();
       showActivity("任务已进入队列。", false);
     }
-    ui.prompt.value = "";
-    clearComposerAttachments({ deleteUploaded: false });
+    const sentAttachments = new Set(attachments);
+    state.composerAttachments = state.composerAttachments.filter((attachment) => !sentAttachments.has(attachment));
+    for (const attachment of attachments) if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    renderComposerAttachments();
+    if (state.selectedProjectId === project.id && state.selectedThreadId === thread.id && ui.prompt.value === sourcePrompt) {
+      ui.prompt.value = "";
+    }
     resizePrompt();
-    updateComposer();
   } catch (error) {
     showError(error);
+  } finally {
+    if (submittedThreadId) state.submittingThreadIds.delete(submittedThreadId);
+    state.submittingMessage = false;
+    ensureEventStream();
+    updateComposer();
   }
 }
 
 async function stopCurrentTurn() {
   const project = currentProject();
-  const thread = state.currentThread;
+  const thread = currentThread();
   if (!project || !thread || state.stoppingTurn) return;
   state.stoppingTurn = true;
   updateComposer();
   try {
-    const latest = await refreshThreadSnapshot(thread, project);
-    if (!latest) return;
-    const activeTurnId = latest.runtime.activeTurnId;
+    const activeTurnId = thread.runtime?.activeTurnId;
     if (!activeTurnId) {
       showActivity("当前任务已经结束。", false);
       return;
@@ -2060,23 +2665,34 @@ async function stopCurrentTurn() {
     showError(error);
   } finally {
     state.stoppingTurn = false;
-    if (state.currentThread?.id === thread.id) updateComposer();
+    if (state.selectedThreadId === thread.id) updateComposer();
   }
 }
 
-async function refreshThreadSnapshot(thread, project) {
-  const latest = await api(`/api/threads/${encodeURIComponent(thread.id)}?projectId=${encodeURIComponent(project.id)}`, { timeoutMs: 8000 });
-  if (state.currentThread?.id !== thread.id) return null;
-  const runtime = ensureRuntimeStartedAt(latest.runtime || { activeTurnId: null, status: "idle" }, state.currentThread.runtime, thread.id);
-  state.currentThread = { ...state.currentThread, runtime };
-  updateThreadInState(project.id, state.currentThread);
-  applyQueueSnapshot(thread.id, latest.queue, latest.queueRevision);
-  return { ...latest, runtime };
+async function compactCurrentThread() {
+  const project = currentProject();
+  const thread = currentThread();
+  if (!project || !thread || isLocalThreadId(thread.id) || isActiveThreadRuntime(currentRuntime()) || state.compactingThreads.has(thread.id)) return;
+  closeThreadMenu();
+  state.compactingThreads.add(thread.id);
+  renderThreadActions();
+  showActivity("正在压缩当前聊天的上下文…", false);
+  try {
+    await api(`/api/threads/${encodeURIComponent(thread.id)}/compact`, {
+      method: "POST",
+      body: { projectId: project.id },
+    });
+  } catch (error) {
+    state.compactingThreads.delete(thread.id);
+    renderThreadActions();
+    showError(error);
+  }
 }
 
 function openThreadDialog() {
-  if (!state.currentThread || !currentProject()) return;
-  ui.threadNameInput.value = state.currentThread.name || "";
+  const thread = currentThread();
+  if (!thread || !currentProject()) return;
+  ui.threadNameInput.value = thread.name || "";
   ui.threadFormError.textContent = "";
   ui.threadDialog.showModal();
   setTimeout(() => ui.threadNameInput.focus(), 0);
@@ -2088,44 +2704,46 @@ async function saveThreadName(event) {
     ui.threadDialog.close();
     return;
   }
-  if (!state.currentThread || !currentProject()) return;
+  const project = currentProject();
+  const thread = currentThread();
+  if (!thread || !project) return;
   const name = ui.threadNameInput.value.trim();
   if (!name) {
     ui.threadFormError.textContent = "聊天名称不能为空。";
     return;
   }
-  if (name === state.currentThread.name) {
+  if (name === thread.name) {
     ui.threadFormError.textContent = "名称没有变化，请输入新的聊天名称。";
     return;
   }
-  if (isLocalThreadId(state.currentThread.id)) {
-    const updated = { ...state.currentThread, name };
-    state.currentThread = updated;
-    updateThreadInState(currentProject().id, updated);
+  if (isLocalThreadId(thread.id)) {
+    updateThreadInState(project.id, { id: thread.id, name });
     ui.threadDialog.close();
     renderCurrentThread();
     renderThreads();
     return;
   }
+  const submit = ui.threadForm.querySelector('button[value="default"]');
+  submit.disabled = true;
   try {
-    await api(`/api/threads/${encodeURIComponent(state.currentThread.id)}`, { method: "PATCH", body: { name } });
-    const updated = { ...state.currentThread, name };
-    state.currentThread = updated;
-    updateThreadInState(currentProject().id, updated);
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}`, { method: "PATCH", body: { projectId: project.id, name } });
+    updateThreadInState(project.id, { id: thread.id, name: result.name });
     ui.threadDialog.close();
-    renderCurrentThread();
+    if (state.selectedProjectId === project.id && state.selectedThreadId === thread.id) renderCurrentThread();
     renderThreads();
     renderRunStrip();
   } catch (error) {
     ui.threadFormError.textContent = error.message;
+  } finally {
+    submit.disabled = false;
   }
 }
 
 async function deleteCurrentThread() {
   const project = currentProject();
-  const thread = state.currentThread;
+  const thread = currentThread();
   if (!project || !thread) return;
-  if (currentRuntime().activeTurnId) {
+  if (isActiveThreadRuntime(currentRuntime())) {
     showActivity("聊天仍在执行中，请先停止任务再删除。", true);
     return;
   }
@@ -2139,9 +2757,7 @@ async function deleteCurrentThread() {
   if (isLocalThreadId(thread.id)) {
     const threads = (state.threads.get(project.id) || []).filter((entry) => entry.id !== thread.id);
     state.threads.set(project.id, threads);
-    state.queueSnapshots.delete(thread.id);
-    delete state.selectedThreads[project.id];
-    saveSelection();
+    forgetClientThread(thread.id);
     clearThread();
     renderThreads();
     if (threads[0]) await selectThread(threads[0].id);
@@ -2151,11 +2767,7 @@ async function deleteCurrentThread() {
   }
   try {
     await api(`/api/threads/${encodeURIComponent(thread.id)}?projectId=${encodeURIComponent(project.id)}`, { method: "DELETE" });
-    state.streams.get(thread.id)?.close();
-    state.streams.delete(thread.id);
-    state.queueSnapshots.delete(thread.id);
-    delete state.selectedThreads[project.id];
-    saveSelection();
+    forgetClientThread(thread.id);
     if (ui.threadDialog.open) ui.threadDialog.close();
     clearThread();
     const threads = await refreshProjectThreads(project.id);
@@ -2168,10 +2780,12 @@ async function deleteCurrentThread() {
 }
 
 async function changeQueue(itemId, direction) {
-  if (!state.currentThread) return;
+  const project = currentProject();
+  const thread = currentThread();
+  if (!thread || !project) return;
   try {
-    const result = await api(`/api/threads/${encodeURIComponent(state.currentThread.id)}/queue/${encodeURIComponent(itemId)}`, { method: "PATCH", body: { direction } });
-    applyQueueSnapshot(state.currentThread.id, result.queue, result.queueRevision);
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue/${encodeURIComponent(itemId)}`, { method: "PATCH", body: { projectId: project.id, direction } });
+    applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
     renderQueue();
   } catch (error) {
     showError(error);
@@ -2180,40 +2794,38 @@ async function changeQueue(itemId, direction) {
 
 async function guideQueueItem(itemId) {
   const project = currentProject();
-  const thread = state.currentThread;
+  const thread = currentThread();
   if (!project || !thread || state.queueGuiding.has(itemId)) return;
-  const item = state.currentQueue.find((entry) => entry.id === itemId);
+  const item = currentQueue().find((entry) => entry.id === itemId);
   const activeTurnId = currentRuntime().activeTurnId;
   if (!item || !activeTurnId) {
     showActivity(item ? "当前任务已经结束，排队任务将按顺序执行。" : "该任务已经离开等待队列。", false);
     return;
   }
   state.queueGuiding.add(itemId);
-  const pending = addPendingUserMessage(thread.id, item.text);
   renderQueue();
   showActivity("正在把排队任务转入当前信息流…", false);
   try {
-    await api(`/api/threads/${encodeURIComponent(thread.id)}/steer`, {
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue/${encodeURIComponent(item.id)}/steer`, {
       method: "POST",
-      body: { projectId: project.id, expectedTurnId: activeTurnId, text: item.text },
-      timeoutMs: 8000,
+      body: { projectId: project.id, expectedTurnId: activeTurnId },
+      timeoutMs: 65000,
     });
-    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE", timeoutMs: 8000 });
     applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
+    acceptGuideMessage(thread.id, result.turnId, result.item);
     renderThreads();
     renderRunStrip();
     showActivity("排队任务已转入当前信息流。", false);
   } catch (error) {
-    removePendingUserMessage(pending);
     showError(error);
   } finally {
     state.queueGuiding.delete(itemId);
-    if (state.currentThread?.id === thread.id) renderQueue();
+    if (state.selectedThreadId === thread.id) renderQueue();
   }
 }
 
 function openQueueEdit(item) {
-  if (!state.currentThread || !item) return;
+  if (!currentThread() || !item) return;
   state.editingQueueItemId = item.id;
   ui.queueEditInput.value = item.text || "";
   ui.queueEditError.textContent = "";
@@ -2231,7 +2843,7 @@ async function saveQueueEdit(event) {
     ui.queueEditDialog.close();
     return;
   }
-  const thread = state.currentThread;
+  const thread = currentThread();
   const itemId = state.editingQueueItemId;
   const text = ui.queueEditInput.value.trim();
   if (!thread || !itemId) return;
@@ -2239,13 +2851,15 @@ async function saveQueueEdit(event) {
     ui.queueEditError.textContent = "任务内容不能为空。";
     return;
   }
-  const existing = state.currentQueue.find((item) => item.id === itemId);
+  const existing = currentQueue().find((item) => item.id === itemId);
   if (existing?.text === text) {
     ui.queueEditError.textContent = "内容没有变化。";
     return;
   }
   try {
-    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue/${encodeURIComponent(itemId)}`, { method: "PATCH", body: { text } });
+    const project = currentProject();
+    if (!project) return;
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue/${encodeURIComponent(itemId)}`, { method: "PATCH", body: { projectId: project.id, text } });
     applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
     state.editingQueueItemId = null;
     ui.queueEditDialog.close();
@@ -2259,10 +2873,12 @@ async function saveQueueEdit(event) {
 }
 
 async function removeQueue(itemId) {
-  if (!state.currentThread) return;
+  const project = currentProject();
+  const thread = currentThread();
+  if (!thread || !project) return;
   try {
-    const result = await api(`/api/threads/${encodeURIComponent(state.currentThread.id)}/queue/${encodeURIComponent(itemId)}`, { method: "DELETE" });
-    applyQueueSnapshot(state.currentThread.id, result.queue, result.queueRevision);
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue/${encodeURIComponent(itemId)}?projectId=${encodeURIComponent(project.id)}`, { method: "DELETE" });
+    applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
     renderQueue();
     renderThreads();
     renderRunStrip();
@@ -2271,41 +2887,53 @@ async function removeQueue(itemId) {
   }
 }
 
-function openEventStream(threadId) {
-  if (isLocalThreadId(threadId) || state.streams.has(threadId)) return;
-  const stream = new EventSource(`/api/events?thread=${encodeURIComponent(threadId)}`);
+function openEventStream() {
+  const existing = state.eventStream;
+  if (existing && existing.readyState !== EventSource.CLOSED) return existing;
+  state.eventStream = null;
+  const stream = new EventSource("/api/events");
   let interrupted = false;
   stream.addEventListener("open", () => {
-    setServerStatus(true, "本机 Codex 已连接");
-    if (interrupted) scheduleResume();
+    if (interrupted && state.selectedThreadId && !isLocalThreadId(state.selectedThreadId)) {
+      reconcileInterruptedThread(state.selectedThreadId).catch(showError);
+    }
     interrupted = false;
   });
   stream.addEventListener("error", () => {
     interrupted = true;
-    setServerStatus(false, "连接正在重试");
   });
   stream.addEventListener("server", (event) => {
     const data = safeJson(event.data);
-    setServerStatus(data?.status === "ready", data?.status === "ready" ? "本机 Codex 已连接" : "本机 Codex 未连接");
+    applyCodexStatus(data);
+    if (data?.status === "ready") scheduleResume(0);
   });
-  stream.addEventListener("codex", (event) => handleCodexEvent(threadId, safeJson(event.data)));
-  state.streams.set(threadId, stream);
+  stream.addEventListener("codex", (event) => {
+    const data = safeJson(event.data);
+    const threadId = data?.params?.threadId;
+    if (threadId) handleCodexEvent(threadId, data);
+  });
+  state.eventStream = stream;
+  return stream;
 }
 
-function syncEventStreams() {
-  const desired = new Set();
-  if (state.currentThread?.id && !isLocalThreadId(state.currentThread.id)) desired.add(state.currentThread.id);
-  for (const threads of state.threads.values()) {
-    for (const thread of threads) {
-      if (runtimeIsActive(thread.runtime) || thread.queueCount > 0) desired.add(thread.id);
-    }
-  }
-  for (const threadId of desired) openEventStream(threadId);
-  for (const [threadId, stream] of state.streams) {
-    if (desired.has(threadId)) continue;
-    stream.close();
-    state.streams.delete(threadId);
-  }
+function waitForEventStream() {
+  const stream = openEventStream();
+  if (stream.readyState === EventSource.OPEN) return Promise.resolve();
+  return new Promise((resolveReady, rejectReady) => {
+    const finish = (callback, value) => {
+      stream.removeEventListener("open", handleOpen);
+      stream.removeEventListener("error", handleError);
+      callback(value);
+    };
+    const handleOpen = () => finish(resolveReady);
+    const handleError = () => finish(rejectReady, new Error("实时连接未建立，任务没有发送。"));
+    stream.addEventListener("open", handleOpen);
+    stream.addEventListener("error", handleError);
+  });
+}
+
+function ensureEventStream() {
+  if (state.user) openEventStream();
 }
 
 function handleCodexEvent(threadId, event) {
@@ -2313,56 +2941,105 @@ function handleCodexEvent(threadId, event) {
   const params = event.params || {};
   const projectId = findProjectForThread(threadId);
   if (!projectId) return;
-  const thread = findThread(projectId, threadId);
+  let thread = findThread(projectId, threadId);
   if (!thread) return;
+  if ((event.method === "workspace/state" && (isActiveThreadRuntime(params.runtime) || params.activeItems?.length))
+    || event.method === "turn/started"
+    || event.method === "turn/completed"
+    || event.method === "turn/plan/updated"
+    || event.method.startsWith("item/")) {
+    thread = updateThreadInState(projectId, { id: threadId, historyLive: true });
+  }
+  if (event.method === "item/tool/requestUserInput") {
+    const request = { ...params, requestId: String(params.requestId) };
+    state.userInputRequests.set(request.requestId, request);
+    if (state.selectedThreadId === threadId) renderUserInputRequest(request);
+    clearTurnActivity(params.turnId);
+    return;
+  }
+  if (event.method === "serverRequest/resolved") {
+    removeUserInputRequest(params.requestId);
+    if (state.selectedThreadId === threadId && currentRuntime().activeTurnId === params.turnId) scheduleTurnActivity(params.turnId);
+    return;
+  }
+  if (event.method === "item/commandExecution/outputDelta") {
+    if (params.turnId) clearTurnActivity(params.turnId);
+    const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[params.itemId] || {};
+    mergeItemMetric(params.turnId, params.itemId, {
+      type: "commandExecution",
+      status: "inProgress",
+      startedAt: timestampMilliseconds(previousMetric.startedAt) || timestampMilliseconds(params.startedAtMs),
+    });
+    if (params.turnId && params.itemId) {
+      const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
+        || currentExecutionItem(params.turnId, params.itemId) || {
+        id: params.itemId,
+        type: "commandExecution",
+        aggregatedOutput: "",
+        status: "inProgress",
+      };
+      const delta = typeof params.delta === "string" ? params.delta : String(params.delta || "");
+      const output = commandOutputTail(params.replaceOutput ? "" : current.aggregatedOutput, delta);
+      const item = rememberThreadItem(projectId, threadId, params.turnId, {
+        ...current,
+        aggregatedOutput: output.text,
+        outputTruncated: current.outputTruncated || output.truncated || params.replaceOutput,
+        status: "inProgress",
+      });
+      if (state.selectedThreadId === threadId) {
+        upsertExecutionItem(params.turnId, item, { outputDelta: params.replaceOutput ? null : delta });
+      }
+    }
+    return;
+  }
   if (event.method === "thread/tokenUsage/updated") {
     rememberThreadTokenUsage(threadId, params.tokenUsage);
     scheduleAccountRateLimitsRefresh();
     return;
   }
   if (event.method === "workspace/state") {
-    const runtime = ensureRuntimeStartedAt(params.runtime || thread.runtime, thread.runtime, threadId);
+    const runtime = params.runtime || thread.runtime;
     updateThreadInState(projectId, { ...thread, runtime });
     const changed = applyQueueSnapshot(threadId, params.queue, params.queueRevision);
-    if (state.currentThread?.id === threadId) {
-      state.currentThread = findThread(projectId, threadId);
+    syncUserInputRequests(threadId, params.userInputRequests);
+    for (const item of params.activeItems || []) {
+      const turnId = item.turnId || runtime.activeTurnId;
+      if (!turnId || !item.id) continue;
+      mergeItemMetric(turnId, item.id, item);
+      const stored = rememberThreadItem(projectId, threadId, turnId, { ...item, status: item.status || "inProgress" });
+      if (state.selectedThreadId === threadId) upsertExecutionItem(turnId, stored);
+    }
+    if (state.selectedThreadId === threadId) {
       if (changed) renderQueue();
-      for (const item of params.activeItems || []) {
-        const turnId = item.turnId || runtime.activeTurnId;
-        if (!turnId || !item.id) continue;
-        mergeItemMetric(turnId, item.id, item);
-        upsertExecutionItem(turnId, { ...item, status: item.status || "inProgress" });
-      }
+      if (runtime?.activeTurnId && params.activePlan) renderTurnPlan(runtime.activeTurnId, params.activePlan);
       updateComposer();
-      ui.deleteThread.disabled = runtimeIsActive(runtime);
+      renderThreadActions();
     }
     renderThreads();
     renderRunStrip();
     return;
   }
   if (event.method === "turn/started") {
-    const startedAt = timestampMilliseconds(params.turn?.startedAt) || Date.now();
+    const startedAt = timestampMilliseconds(params.turn?.startedAt);
     mergeTurnMetric(params.turn?.id, { startedAt });
-    rememberActiveTurnStart(threadId, params.turn?.id, startedAt);
-    const runtime = { ...thread.runtime, activeTurnId: params.turn?.id, status: "running", startedAt };
+    const runtime = params.runtime;
+    rememberThreadTurn(projectId, threadId, params.turn?.id, { ...params.turn, status: params.turn?.status || "inProgress" });
     updateThreadInState(projectId, { ...thread, runtime });
-    if (state.currentThread?.id === threadId) {
-      state.currentThread = findThread(projectId, threadId);
-      consumeQueueHead(threadId);
+    if (state.selectedThreadId === threadId) {
+      appendConversationDate(params.turn?.id, startedAt);
       updateComposer();
       renderQueue();
     }
     renderThreads();
     renderRunStrip();
-    if (state.currentThread?.id === threadId) scheduleTurnActivity(params.turn?.id, 0);
+    if (state.selectedThreadId === threadId) scheduleTurnActivity(params.turn?.id, 0);
     return;
   }
   if (event.method === "thread/name/updated") {
     const name = typeof params.name === "string" ? params.name.trim() : "";
     if (!name) return;
     updateThreadInState(projectId, { ...thread, name });
-    if (state.currentThread?.id === threadId) {
-      state.currentThread = findThread(projectId, threadId);
+    if (state.selectedThreadId === threadId) {
       ui.threadName.textContent = name;
       ui.configThreadName.textContent = `当前聊天：${name}`;
     }
@@ -2371,42 +3048,39 @@ function handleCodexEvent(threadId, event) {
     return;
   }
   if (event.method === "thread/status/changed") {
-    const active = runtimeIsActive({ status: params.status });
+    const runtime = params.runtime;
+    const active = isActiveThreadRuntime(runtime);
     const activeTurnId = thread.runtime?.activeTurnId;
-    const runtime = ensureRuntimeStartedAt(
-      { ...thread.runtime, status: params.status, ...(active ? {} : { activeTurnId: null, startedAt: null }) },
-      thread.runtime,
-      threadId,
-    );
     updateThreadInState(projectId, {
       ...thread,
       runtime,
     });
-    if (state.currentThread?.id === threadId) {
-      state.currentThread = findThread(projectId, threadId);
-      if (!active && activeTurnId) completeExecutionGroup(activeTurnId, "interrupted", { completedAt: Date.now() });
+    if (state.selectedThreadId === threadId) {
+      if (!active && activeTurnId) completeExecutionGroup(activeTurnId, "interrupted", { completedAt: params.changedAtMs });
       updateComposer();
-      ui.deleteThread.disabled = active;
+      renderThreadActions();
     }
     renderThreads();
     renderRunStrip();
     return;
   }
   if (event.method === "turn/completed") {
-    const completedAt = timestampMilliseconds(params.turn?.completedAt) || Date.now();
+    const completedAt = timestampMilliseconds(params.turn?.completedAt);
     mergeTurnMetric(params.turn?.id, {
       startedAt: params.turn?.startedAt,
       completedAt,
       durationMs: params.turn?.durationMs,
     });
-    forgetActiveTurnStart(threadId, params.turn?.id);
-    updateThreadInState(projectId, { ...thread, runtime: { ...thread.runtime, activeTurnId: null, status: "idle", startedAt: null } });
-    if (state.currentThread?.id === threadId) {
-      state.currentThread = findThread(projectId, threadId);
+    rememberThreadTurn(projectId, threadId, params.turn?.id, {
+      ...params.turn,
+      status: params.turn?.status || "completed",
+    });
+    updateThreadInState(projectId, { ...thread, runtime: params.runtime });
+    if (state.selectedThreadId === threadId) {
+      state.compactingThreads.delete(threadId);
       clearTurnActivity(params.turn?.id, { removeEmpty: true });
       completeExecutionGroup(params.turn?.id, params.turn?.status || "completed", params.turn);
       updateComposer();
-      ui.deleteThread.disabled = false;
     }
     reconcileCompletedThread(projectId, threadId).catch(showError);
     renderRunStrip();
@@ -2414,7 +3088,7 @@ function handleCodexEvent(threadId, event) {
   }
   if (event.method === "queue/updated") {
     const changed = applyQueueSnapshot(threadId, params.queue, params.queueRevision);
-    if (changed && state.currentThread?.id === threadId) renderQueue();
+    if (changed && state.selectedThreadId === threadId) renderQueue();
     if (changed) {
       renderThreads();
       renderRunStrip();
@@ -2422,77 +3096,109 @@ function handleCodexEvent(threadId, event) {
     return;
   }
   if (event.method === "queue/error") {
-    if (state.currentThread?.id === threadId) showActivity(params.message || "队列任务启动失败。", true);
+    if (state.selectedThreadId === threadId) showActivity(params.message || "队列任务启动失败。", true);
+    return;
+  }
+  if (event.method === "turn/plan/updated") {
+    clearTurnActivity(params.turnId);
+    mergeTurnMetric(params.turnId, { plan: { plan: params.plan, explanation: params.explanation } });
+    if (state.selectedThreadId === threadId) renderTurnPlan(params.turnId, { plan: params.plan, explanation: params.explanation });
     return;
   }
   if (event.method.startsWith("item/") && params.turnId) clearTurnActivity(params.turnId);
   if (event.method === "item/started") {
     const item = params.item || {};
+    if (item.type === "contextCompaction") {
+      state.compactingThreads.add(threadId);
+      if (state.selectedThreadId === threadId) renderThreadActions();
+    }
     const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[item.id] || {};
     mergeItemMetric(params.turnId, item.id, {
       type: item.type,
       status: item.status || "inProgress",
-      startedAt: timestampMilliseconds(params.startedAtMs) || timestampMilliseconds(item.startedAt) || timestampMilliseconds(previousMetric.startedAt) || Date.now(),
+      startedAt: timestampMilliseconds(params.startedAtMs) || timestampMilliseconds(item.startedAt) || timestampMilliseconds(previousMetric.startedAt),
+    });
+    rememberThreadItem(projectId, threadId, params.turnId, {
+      ...item,
+      status: item.status || "inProgress",
+      startedAt: timestampMilliseconds(params.startedAtMs) || timestampMilliseconds(item.startedAt),
     });
   } else if (event.method === "item/completed") {
     const item = params.item || {};
+    if (item.type === "contextCompaction") {
+      state.compactingThreads.delete(threadId);
+      renderThreadActions();
+    }
     const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[item.id] || {};
     mergeItemMetric(params.turnId, item.id, {
       type: item.type,
       status: terminalExecutionStatus(item.status),
       startedAt: timestampMilliseconds(item.startedAt) || timestampMilliseconds(previousMetric.startedAt),
-      completedAt: timestampMilliseconds(params.completedAtMs) || timestampMilliseconds(item.completedAt) || Date.now(),
+      completedAt: timestampMilliseconds(params.completedAtMs) || timestampMilliseconds(item.completedAt),
       durationMs: item.durationMs,
+    });
+    rememberThreadItem(projectId, threadId, params.turnId, {
+      ...item,
+      status: terminalExecutionStatus(item.status),
+      completedAt: timestampMilliseconds(params.completedAtMs) || timestampMilliseconds(item.completedAt),
     });
   } else if (event.method === "item/fileChange/patchUpdated") {
     const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[params.itemId] || {};
     mergeItemMetric(params.turnId, params.itemId, {
       type: "fileChange",
       status: "inProgress",
-      startedAt: timestampMilliseconds(previousMetric.startedAt) || Date.now(),
-    });
-  } else if (event.method === "item/commandExecution/outputDelta") {
-    const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[params.itemId] || {};
-    mergeItemMetric(params.turnId, params.itemId, {
-      type: "commandExecution",
-      status: "inProgress",
-      startedAt: timestampMilliseconds(previousMetric.startedAt) || Date.now(),
+      startedAt: timestampMilliseconds(previousMetric.startedAt) || timestampMilliseconds(params.startedAtMs),
     });
   }
-  if (state.currentThread?.id !== threadId) return;
   if (event.method === "item/agentMessage/delta") {
-    const current = state.messageElements.get(params.itemId);
-    const message = addProgressMessage(params.itemId, `${current?.text || ""}${params.delta || ""}`);
+    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
+      || { id: params.itemId, type: "agentMessage", phase: "commentary", text: "", status: "inProgress" };
+    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, text: `${current.text || ""}${params.delta || ""}` });
+    if (state.selectedThreadId !== threadId) return;
+    const message = addProgressMessage(params.itemId, item.text);
     placeTurnContent(params.turnId, message);
-  } else if (event.method === "item/commandExecution/outputDelta") {
-    const current = currentExecutionItem(params.turnId, params.itemId) || { id: params.itemId, type: "commandExecution", aggregatedOutput: "", status: "inProgress" };
-    upsertExecutionItem(params.turnId, { ...current, aggregatedOutput: `${current.aggregatedOutput || ""}${params.delta || ""}`, status: "inProgress" });
   } else if (event.method === "item/reasoning/summaryTextDelta") {
-    const current = currentExecutionItem(params.turnId, params.itemId) || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
+    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
+      || currentExecutionItem(params.turnId, params.itemId)
+      || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
     const summary = [...(current.summary || [])];
     summary[params.summaryIndex || 0] = `${summary[params.summaryIndex || 0] || ""}${params.delta || ""}`;
-    upsertExecutionItem(params.turnId, { ...current, summary, status: "inProgress" });
+    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, summary, status: "inProgress" });
+    if (state.selectedThreadId !== threadId) return;
+    upsertExecutionItem(params.turnId, item);
   } else if (event.method === "item/reasoning/summaryPartAdded") {
-    const current = currentExecutionItem(params.turnId, params.itemId) || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
+    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
+      || currentExecutionItem(params.turnId, params.itemId)
+      || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
     const summary = [...(current.summary || [])];
     if (summary[params.summaryIndex] === undefined) summary[params.summaryIndex] = "";
-    upsertExecutionItem(params.turnId, { ...current, summary, status: "inProgress" });
+    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, summary, status: "inProgress" });
+    if (state.selectedThreadId !== threadId) return;
+    upsertExecutionItem(params.turnId, item);
   } else if (event.method === "item/reasoning/textDelta") {
-    const current = currentExecutionItem(params.turnId, params.itemId) || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
+    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
+      || currentExecutionItem(params.turnId, params.itemId)
+      || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
     const content = [...(current.content || [])];
     content[params.contentIndex || 0] = `${content[params.contentIndex || 0] || ""}${params.delta || ""}`;
-    upsertExecutionItem(params.turnId, { ...current, content, status: "inProgress" });
+    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, content, status: "inProgress" });
+    if (state.selectedThreadId !== threadId) return;
+    upsertExecutionItem(params.turnId, item);
   } else if (event.method === "item/fileChange/patchUpdated") {
-    const current = currentExecutionItem(params.turnId, params.itemId);
+    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
+      || currentExecutionItem(params.turnId, params.itemId);
     const item = fileChangeUpdateItem(current, params);
     mergeItemMetric(params.turnId, params.itemId, item);
+    rememberThreadItem(projectId, threadId, params.turnId, item);
+    if (state.selectedThreadId !== threadId) return;
     upsertExecutionItem(params.turnId, item);
   } else if (event.method === "item/completed") {
     const item = params.item || {};
     const timing = state.turnMetrics.get(params.turnId)?.items?.[item.id] || {};
+    if (state.selectedThreadId !== threadId) return;
     if (item.type === "userMessage") {
-      renderLiveUserMessage(threadId, item, params.turnId);
-    } else if (item.type === "agentMessage" && item.phase !== "commentary") {
+      renderLiveUserMessage(item, params.turnId);
+    } else if ((item.type === "agentMessage" && item.phase !== "commentary") || item.type === "plan") {
       removeExecutionItem(params.turnId, item.id);
       removeRenderedMessage(item.id);
       renderHistoryItem(item, { turnId: params.turnId });
@@ -2503,11 +3209,13 @@ function handleCodexEvent(threadId, event) {
     }
   } else if (event.method === "item/started") {
     const timing = state.turnMetrics.get(params.turnId)?.items?.[params.item?.id] || {};
-    if (params.item?.type === "userMessage") renderLiveUserMessage(threadId, params.item, params.turnId);
-    else if (params.item?.type !== "agentMessage") upsertExecutionItem(params.turnId, { ...params.item, ...timing, status: params.item?.status || "inProgress" });
+    if (state.selectedThreadId !== threadId) return;
+    if (params.item?.type === "userMessage") renderLiveUserMessage(params.item, params.turnId);
+    else if (isExecutionItem(params.item)) upsertExecutionItem(params.turnId, { ...params.item, ...timing, status: params.item?.status || "inProgress" });
   } else if (event.method === "error") {
-    showActivity(params.message || "Codex 返回错误。", true);
+    if (state.selectedThreadId === threadId) showActivity(params.message || "Codex 返回错误。", true);
   }
+  if (state.selectedThreadId !== threadId) return;
   const completedFinalMessage = event.method === "item/completed"
     && params.item?.type === "agentMessage"
     && params.item?.phase !== "commentary";
@@ -2518,8 +3226,17 @@ function handleCodexEvent(threadId, event) {
 
 async function reconcileCompletedThread(projectId, threadId) {
   await refreshProjectThreads(projectId);
-  if (state.currentThread?.id === threadId) {
+  ensureEventStream();
+}
+
+async function reconcileInterruptedThread(threadId) {
+  const projectId = findProjectForThread(threadId);
+  if (!projectId) return;
+  await refreshProjectThreads(projectId);
+  if (state.selectedThreadId === threadId) {
     await selectThread(threadId, { closeNavigation: false, preserveFollowLatest: true, mergeHistory: true });
+  } else {
+    updateThreadInState(projectId, { id: threadId, historyLive: false, syncedUpdatedAt: null });
   }
 }
 
@@ -2537,9 +3254,50 @@ function findThread(projectId, threadId) {
 function updateThreadInState(projectId, updated) {
   const threads = state.threads.get(projectId) || [];
   const index = threads.findIndex((thread) => thread.id === updated.id);
-  if (index === -1) threads.unshift(updated);
-  else threads[index] = { ...threads[index], ...updated };
+  const stored = index === -1 ? updated : { ...threads[index], ...updated };
+  if (index === -1) threads.unshift(stored);
+  else threads[index] = stored;
   state.threads.set(projectId, threads);
+  return stored;
+}
+
+function rememberThreadTurn(projectId, threadId, turnId, patch = {}) {
+  if (!turnId) return null;
+  const thread = findThread(projectId, threadId);
+  if (!thread) return null;
+  if (!Array.isArray(thread.turns)) thread.turns = [];
+  let turn = thread.turns.find((entry) => entry.id === turnId);
+  if (!turn) {
+    turn = { id: turnId, status: "inProgress", items: [] };
+    thread.turns.push(turn);
+  }
+  const existingItems = Array.isArray(turn.items) ? turn.items : [];
+  const { items: incomingItems, ...fields } = patch;
+  Object.assign(turn, fields);
+  turn.items = Array.isArray(incomingItems)
+    ? mergeTurnItems(existingItems, incomingItems)
+    : existingItems;
+  return turn;
+}
+
+function rememberThreadItem(projectId, threadId, turnId, item) {
+  if (!item?.id) return null;
+  const turn = rememberThreadTurn(projectId, threadId, turnId);
+  if (!turn) return null;
+  let stored = turn.items.find((entry) => entry.id === item.id);
+  if (!stored) {
+    stored = { ...item };
+    turn.items.push(stored);
+  } else {
+    Object.assign(stored, item);
+  }
+  return stored;
+}
+
+function rememberedThreadItem(projectId, threadId, turnId, itemId) {
+  return findThread(projectId, threadId)?.turns
+    ?.find((turn) => turn.id === turnId)?.items
+    ?.find((item) => item.id === itemId) || null;
 }
 
 function applyQueueSnapshot(threadId, queue, queueRevision) {
@@ -2547,40 +3305,22 @@ function applyQueueSnapshot(threadId, queue, queueRevision) {
   const previous = state.queueSnapshots.get(threadId);
   if (revision !== null && previous?.revision !== null && previous?.revision !== undefined) {
     if (revision < previous.revision) return false;
-    if (revision === previous.revision && previous.optimistic) return false;
   }
   const next = Array.isArray(queue) ? queue : [];
-  state.queueSnapshots.set(threadId, { queue: next, revision, optimistic: false });
-  if (state.currentThread?.id === threadId && state.editingQueueItemId && !next.some((item) => item.id === state.editingQueueItemId)) {
+  state.queueSnapshots.set(threadId, { queue: next, revision });
+  if (state.selectedThreadId === threadId && state.editingQueueItemId && !next.some((item) => item.id === state.editingQueueItemId)) {
     state.editingQueueItemId = null;
     if (ui.queueEditDialog.open) ui.queueEditDialog.close();
   }
   const projectId = findProjectForThread(threadId);
   const thread = projectId && findThread(projectId, threadId);
   if (thread) updateThreadInState(projectId, { ...thread, queueCount: next.length, ...(revision === null ? {} : { queueRevision: revision }) });
-  if (state.currentThread?.id === threadId) state.currentQueue = next;
   return true;
 }
 
-function consumeQueueHead(threadId) {
-  if (state.currentThread?.id !== threadId || state.currentQueue.length === 0) return false;
-  const previous = state.queueSnapshots.get(threadId);
-  const next = state.currentQueue.slice(1);
-  state.currentQueue = next;
-  state.queueSnapshots.set(threadId, {
-    queue: next,
-    revision: previous?.revision ?? null,
-    optimistic: previous?.revision !== null && previous?.revision !== undefined,
-  });
-  const projectId = findProjectForThread(threadId);
-  const thread = projectId && findThread(projectId, threadId);
-  if (thread) updateThreadInState(projectId, { ...thread, queueCount: next.length });
-  return true;
-}
-
-async function saveSettings(overrides = {}) {
+async function saveSettings(overrides = {}, { quiet = false } = {}) {
   const project = currentProject();
-  const thread = state.currentThread;
+  const thread = currentThread();
   if (!project || !thread) return;
   const modelId = Object.hasOwn(overrides, "model") ? overrides.model : ui.model.value;
   const model = state.models.find((entry) => entry.id === modelId);
@@ -2595,88 +3335,101 @@ async function saveSettings(overrides = {}) {
     effort: effort || null,
     serviceTier: serviceTier || null,
     summary: (Object.hasOwn(overrides, "summary") ? overrides.summary : ui.summary.value) || "detailed",
+    collaborationMode: Object.hasOwn(overrides, "collaborationMode")
+      ? overrides.collaborationMode
+      : thread.settings?.collaborationMode || "default",
   };
   if (isLocalThreadId(thread.id)) {
-    state.currentThread = { ...thread, settings };
-    updateThreadInState(project.id, state.currentThread);
+    updateThreadInState(project.id, { ...thread, settings });
     renderSettings();
-    showActivity("配置将在首次发送时生效。", false);
-    return;
+    if (!quiet) showActivity("配置将在首次发送时生效。", false);
+    return true;
   }
   try {
-    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}`, { method: "PATCH", body: { settings } });
-    state.currentThread = { ...thread, settings: result.settings || {} };
-    updateThreadInState(project.id, state.currentThread);
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}`, { method: "PATCH", body: { projectId: project.id, settings } });
+    updateThreadInState(project.id, { ...thread, settings: result.settings || {} });
     renderSettings();
-    showActivity("已保存到当前聊天；其他聊天不受影响。", false);
+    if (!quiet) showActivity("已保存到当前聊天；其他聊天不受影响。", false);
+    return true;
   } catch (error) {
     showError(error);
     renderSettings();
+    return false;
   }
 }
 
 async function refreshWorkspace({ quiet = false } = {}) {
-  if (state.refreshing) return;
-  state.refreshing = true;
   ui.refreshWorkspace.disabled = true;
-  const rememberedProjectId = state.selectedProjectId;
-  const rememberedThreadId = state.currentThread?.id;
-  const previousThread = state.currentThread;
+  let refresh = state.workspaceRefreshPromise;
+  if (!refresh) {
+    const rememberedProjectId = state.selectedProjectId;
+    const rememberedThreadId = state.selectedThreadId;
+    const previousThread = currentThread();
+    const selectionId = state.threadSelectionId;
+    refresh = (async () => {
+      const status = await api("/api/status");
+      if (!acceptAssetVersion(status)) return;
+      state.defaultWorkspace = status.defaultWorkspace || null;
+      applyCodexStatus(status);
+      await loadProjects();
+      if (state.codexReady) {
+        await Promise.all([loadModels(), loadCollaborationModes(), loadAccountRateLimits(), refreshAllThreads()]);
+      }
+      const projectId = state.projects.some((project) => project.id === rememberedProjectId) ? rememberedProjectId : state.projects[0]?.id;
+      if (projectId && selectionId === state.threadSelectionId) {
+        await restoreSelectionAfterRefresh(projectId, rememberedThreadId, previousThread);
+      } else {
+        renderProjects();
+        renderThreads();
+        if (!projectId) clearThread();
+      }
+      if (ui.projectManagerDialog.open) renderProjectManager();
+    })();
+    state.workspaceRefreshPromise = refresh;
+  }
   try {
-    const status = await api("/api/status");
-    setServerStatus(status.status === "ready", status.status === "ready" ? "本机 Codex 已连接" : "本机 Codex 未连接");
-    await Promise.all([loadProjects(), loadModels(), loadAccountRateLimits()]);
-    await refreshAllThreads();
-    const projectId = state.projects.some((project) => project.id === rememberedProjectId) ? rememberedProjectId : state.projects[0]?.id;
-    if (projectId) {
-      await restoreSelectionAfterRefresh(projectId, rememberedThreadId, previousThread);
-    } else {
-      clearThread();
-    }
-    if (ui.projectManagerDialog.open) renderProjectManager();
+    await refresh;
     if (!quiet) showActivity("工作台已刷新。", false);
   } catch (error) {
     if (!quiet) showError(error);
+    else throw error;
   } finally {
-    state.refreshing = false;
-    ui.refreshWorkspace.disabled = false;
+    if (state.workspaceRefreshPromise === refresh) {
+      state.workspaceRefreshPromise = null;
+      ui.refreshWorkspace.disabled = false;
+    }
   }
 }
 
-async function restoreSelectionAfterRefresh(projectId, rememberedThreadId, previousThread, { forceReload = false } = {}) {
+async function restoreSelectionAfterRefresh(projectId, rememberedThreadId, previousThread) {
   state.selectedProjectId = projectId;
   localStorage.setItem(userStorageKey("project"), projectId);
   const threads = state.threads.get(projectId) || [];
-  const target = threads.find((thread) => thread.id === rememberedThreadId) || threads[0];
+  const project = state.projects.find((entry) => entry.id === projectId);
+  const target = threads.find((thread) => thread.id === rememberedThreadId)
+    || recentThreadEntries(project ? [project] : [], state.threads, 1)[0]?.thread;
   renderProjects();
-  renderThreads();
   if (!target) {
+    renderThreads();
     clearThread();
     return createThread({ focusPrompt: false });
   }
-  state.selectedThreads[projectId] = target.id;
-  saveSelection();
-  if (forceReload && !isLocalThreadId(target.id)) {
+  if (!isLocalThreadId(target.id)) {
+    if (previousThread?.id === target.id && target.history) {
+      state.selectedThreadId = target.id;
+      renderThreads();
+      ensureEventStream();
+      renderCurrentThread({ messages: false });
+      return;
+    }
     return selectThread(target.id, {
       closeNavigation: false,
       preserveFollowLatest: true,
-      mergeHistory: previousThread?.id === target.id,
+      mergeHistory: false,
     });
   }
-  if (previousThread?.id !== target.id) {
-    return selectThread(target.id, { closeNavigation: false, preserveFollowLatest: true });
-  }
-  const historyChanged = Boolean(target.updatedAt && previousThread.syncedUpdatedAt && target.updatedAt !== previousThread.syncedUpdatedAt);
-  if (historyChanged) {
-    return selectThread(target.id, { closeNavigation: false, preserveFollowLatest: true, mergeHistory: true });
-  }
-  state.currentThread = {
-    ...previousThread,
-    ...target,
-    turns: previousThread.turns || [],
-    history: previousThread.history,
-    syncedUpdatedAt: target.updatedAt ?? previousThread.syncedUpdatedAt,
-  };
+  state.selectedThreadId = target.id;
+  renderThreads();
   renderCurrentThread();
 }
 
@@ -2685,7 +3438,9 @@ function configureAutoRefresh() {
   const seconds = Number(ui.refreshInterval.value);
   localStorage.setItem(userStorageKey("refresh-seconds"), String(seconds));
   if (Number.isFinite(seconds) && seconds > 0) {
-    state.refreshTimer = setInterval(() => refreshWorkspace({ quiet: true }), seconds * 1000);
+    state.refreshTimer = setInterval(() => {
+      refreshWorkspace({ quiet: true }).catch(showError);
+    }, seconds * 1000);
   }
 }
 
@@ -2694,32 +3449,69 @@ function scheduleResume(delay = 120) {
   clearTimeout(state.resumeTimer);
   state.resumeTimer = setTimeout(() => {
     state.resumeTimer = null;
-    resumeAfterInterruption().catch(() => setServerStatus(false, "连接正在重试"));
+    resumeWorkspace().catch(showError);
   }, delay);
 }
 
-async function resumeAfterInterruption() {
-  if (state.resumePromise) return state.resumePromise;
-  if (Date.now() - state.lastResumeAt < 800) return;
-  state.lastResumeAt = Date.now();
-  state.resumePromise = (async () => {
-    const status = await api("/api/status");
-    setServerStatus(status.status === "ready", status.status === "ready" ? "本机 Codex 已连接" : "本机 Codex 未连接");
-    await Promise.all([refreshAllThreads(), loadAccountRateLimits()]);
-    closeAllStreams();
-    syncEventStreams();
-    const projectId = state.selectedProjectId;
-    const threadId = state.currentThread?.id || state.selectedThreads[projectId];
-    const previousThread = state.currentThread;
-    if (projectId) {
-      await restoreSelectionAfterRefresh(projectId, threadId, previousThread, { forceReload: true });
-    }
-  })();
-  try {
-    await state.resumePromise;
-  } finally {
-    state.resumePromise = null;
+async function resumeWorkspace() {
+  const wasReady = state.codexReady;
+  const status = await api("/api/status");
+  if (!acceptAssetVersion(status)) return;
+  state.serverReachable = true;
+  applyCodexStatus(status);
+  if (status.status !== "ready") return;
+  if (!wasReady || !state.projects.length) {
+    await refreshWorkspace({ quiet: true });
+    return;
   }
+  if (state.selectedProjectId) {
+    const selectedThreadId = state.selectedThreadId;
+    const before = currentThread()?.runtime;
+    await refreshProjectThreads(state.selectedProjectId);
+    const after = currentThread()?.runtime;
+    const runtimeChanged = selectedThreadId === state.selectedThreadId && (
+      (before?.activeTurnId || null) !== (after?.activeTurnId || null)
+      || String(before?.status || "idle") !== String(after?.status || "idle")
+      || (timestampMilliseconds(before?.startedAt) || null) !== (timestampMilliseconds(after?.startedAt) || null)
+    );
+    if (selectedThreadId === state.selectedThreadId
+      && (runtimeChanged || renderedExecutionNeedsReconciliation(after))
+      && currentThread()) renderCurrentThread();
+  }
+  ensureEventStream();
+}
+
+function renderedExecutionNeedsReconciliation(runtime) {
+  const activeActivityId = runtime?.activeTurnId ? turnActivityId(runtime.activeTurnId) : null;
+  for (const [id, entry] of state.messageElements) {
+    if (entry.kind === "progress" && entry.root.classList.contains("waiting") && id !== activeActivityId) return true;
+  }
+  for (const group of state.executionGroups.values()) {
+    const current = isActiveThreadRuntime(runtime) && runtime.activeTurnId === group.turnId;
+    if (current) continue;
+    if (isActiveThreadStatus(group.turnStatus)) return true;
+    for (const entry of group.items.values()) {
+      if (isActiveThreadStatus(entry.item?.status)) return true;
+    }
+  }
+  return false;
+}
+
+function acceptAssetVersion(status) {
+  const version = status?.assetVersion;
+  if (!version) return true;
+  if (!state.assetVersion) {
+    state.assetVersion = version;
+    return true;
+  }
+  if (version === state.assetVersion) return true;
+  const hasDraft = Boolean(ui.prompt.value || state.composerAttachments.length || state.submittingMessage || state.uploadingFiles);
+  if (hasDraft) {
+    showActivity("工作台已更新；发送或清空当前输入后刷新页面。", true);
+    return false;
+  }
+  location.reload();
+  return false;
 }
 
 function openGlobalSettings() {
@@ -2744,11 +3536,11 @@ function renderProjectManager() {
     const name = document.createElement("strong");
     name.textContent = project.name;
     const path = document.createElement("code");
-    path.textContent = project.path;
+    path.textContent = project.available === false ? `目录不可用 · ${project.path}` : project.path;
     detail.append(name, path);
     const actions = document.createElement("div");
     actions.className = "project-manager-actions";
-    const open = projectAction("打开", async () => {
+    const open = projectAction(project.available === false ? "查看" : "打开", async () => {
       ui.projectManagerDialog.close();
       await selectProject(project.id);
     });
@@ -2761,8 +3553,14 @@ function renderProjectManager() {
       openProjectDialog(project);
     });
     const remove = projectAction("删除", () => deleteProjectRecord(project.id));
-    remove.disabled = state.projects.length === 1;
-    if (remove.disabled) remove.title = "至少保留一个项目。";
+    rename.disabled = state.submittingMessage;
+    edit.disabled = state.submittingMessage;
+    remove.disabled = state.submittingMessage || state.projects.length === 1;
+    if (state.submittingMessage) {
+      rename.title = edit.title = remove.title = "当前消息提交完成后可以修改项目。";
+    } else if (remove.disabled) {
+      remove.title = "至少保留一个项目。";
+    }
     actions.append(open, rename, edit, remove);
     row.append(detail, actions);
     ui.projectManagerList.append(row);
@@ -2797,6 +3595,10 @@ async function saveProjectRename(event) {
     ui.projectManagerDialog.showModal();
     return;
   }
+  if (state.submittingMessage) {
+    ui.projectRenameError.textContent = "当前消息提交完成后可以修改项目。";
+    return;
+  }
   const project = state.projects.find((entry) => entry.id === ui.projectRenameForm.dataset.projectId);
   if (!project) {
     ui.projectRenameError.textContent = "项目不存在或已删除。";
@@ -2819,7 +3621,7 @@ async function saveProjectRename(event) {
     renderProjects();
     renderProjectManager();
     renderSettings();
-    if (state.currentThread) renderCurrentThread();
+    if (currentThread()) renderCurrentThread();
     ui.projectManagerDialog.showModal();
     showActivity(`项目已改名为“${name}”。`, false);
   } catch (error) {
@@ -2832,7 +3634,14 @@ function openProjectDialog(project = null) {
   ui.projectKicker.textContent = project ? "项目设置" : "新项目";
   ui.projectDialogTitle.textContent = project ? "编辑项目" : "新建项目";
   ui.projectName.value = project?.name || "";
-  ui.projectPath.value = project?.path || `工作区根目录\\${state.user?.username || "账号"}\\（按项目名称自动创建）`;
+  const admin = state.user?.role === "admin";
+  ui.projectPath.readOnly = !admin;
+  ui.projectPath.setAttribute("aria-readonly", String(!admin));
+  ui.projectPath.required = false;
+  ui.projectPath.placeholder = admin ? "留空则在个人目录创建，或输入任意绝对目录" : "";
+  ui.projectPath.value = project?.path || (admin
+    ? ""
+    : `${state.defaultWorkspace || "工作区根目录"}\\${state.user?.username || "账号"}\\（按项目名称自动创建）`);
   ui.projectError.textContent = "";
   ui.deleteProject.hidden = !project;
   ui.projectDialog.showModal();
@@ -2845,9 +3654,16 @@ async function saveProject(event) {
     ui.projectDialog.close();
     return;
   }
+  if (state.submittingMessage) {
+    ui.projectError.textContent = "当前消息提交完成后可以修改项目。";
+    return;
+  }
   ui.projectError.textContent = "";
   const projectId = ui.projectForm.dataset.projectId;
-  const body = { name: ui.projectName.value.trim() };
+  const body = {
+    name: ui.projectName.value.trim(),
+    ...(state.user?.role === "admin" ? { path: ui.projectPath.value.trim() } : {}),
+  };
   try {
     const result = await api(projectId ? `/api/projects/${encodeURIComponent(projectId)}` : "/api/projects", { method: projectId ? "PATCH" : "POST", body });
     ui.projectDialog.close();
@@ -2868,6 +3684,10 @@ async function deleteCurrentProject() {
 async function deleteProjectRecord(projectId, closeEditor = false) {
   const project = state.projects.find((entry) => entry.id === projectId);
   if (!project) return;
+  if (state.submittingMessage) {
+    showActivity("当前消息提交完成后可以删除项目。", true);
+    return;
+  }
   const confirmed = await confirmAction({
     kicker: "删除项目记录",
     title: project.name,
@@ -2878,6 +3698,7 @@ async function deleteProjectRecord(projectId, closeEditor = false) {
   try {
     await api(`/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" });
     if (closeEditor) ui.projectDialog.close();
+    for (const thread of state.threads.get(project.id) || []) forgetClientThread(thread.id);
     state.threads.delete(project.id);
     if (state.selectedProjectId === project.id) state.selectedProjectId = null;
     await loadProjects();
@@ -2907,15 +3728,44 @@ function showError(error) {
   showActivity(error?.message || "发生未知错误。", true);
 }
 
+function applyCodexStatus(status) {
+  state.serverReachable = true;
+  const codexState = status?.status || "offline";
+  const error = status?.codexError || status?.message || "";
+  const text = codexState === "ready" ? "本机 Codex 已连接"
+    : codexState === "login_required" ? (error || "Codex CLI 尚未登录")
+      : codexState === "starting" ? "正在连接本机 Codex"
+        : error || (codexState === "failed" ? "本机 Codex 连接失败" : "本机 Codex 连接中断");
+  setServerStatus(codexState === "ready", text);
+  if (state.codexStatusTimer) clearTimeout(state.codexStatusTimer);
+  state.codexStatusTimer = null;
+  if (state.user && (codexState === "starting" || codexState === "offline")) {
+    state.codexStatusTimer = setTimeout(checkCodexConnection, 2000);
+  }
+}
+
 function setServerStatus(online, text) {
+  state.codexReady = online;
   ui.serverStatus.classList.toggle("online", online);
   ui.serverStatus.classList.toggle("offline", !online);
   ui.serverStatus.textContent = text;
+  updateComposer();
+}
+
+async function checkCodexConnection() {
+  state.codexStatusTimer = null;
+  if (!state.user) return;
+  try {
+    await resumeWorkspace();
+  } catch {
+    state.serverReachable = false;
+    setServerStatus(false, "无法连接 CodexLAN 服务");
+    if (state.user) state.codexStatusTimer = setTimeout(checkCodexConnection, 2000);
+  }
 }
 
 function resizePrompt() {
-  ui.prompt.style.height = "auto";
-  ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 145)}px`;
+  resizeComposerInput(ui.prompt);
 }
 
 function scrollToLatest(smooth = true) {
@@ -2933,7 +3783,7 @@ function updateJumpLatest() {
     return;
   }
   state.followLatest = distance < 72;
-  ui.jumpLatest.hidden = state.followLatest || !state.currentThread || ui.conversation.scrollHeight <= ui.conversation.clientHeight;
+  ui.jumpLatest.hidden = state.followLatest || !currentThread() || ui.conversation.scrollHeight <= ui.conversation.clientHeight;
 }
 
 function followNewContent() {
@@ -2970,84 +3820,6 @@ function confirmAction({ kicker, title, message, confirmLabel }) {
     ui.confirmForm.addEventListener("submit", onSubmit);
     ui.confirmDialog.addEventListener("cancel", onCancel);
   });
-}
-
-function closeSidebar() {
-  ui.sidebar.classList.remove("open");
-  ui.sidebarScrim.classList.remove("open");
-  ui.openSidebar.setAttribute("aria-expanded", "false");
-}
-
-function openSidebar() {
-  closeTopbarOverlays();
-  ui.sidebar.classList.add("open");
-  ui.sidebarScrim.classList.add("open");
-  ui.openSidebar.setAttribute("aria-expanded", "true");
-}
-
-function toggleRunStrip() {
-  closeRecentThreads();
-  closeThreadMenu();
-  state.runStripOpen = !state.runStripOpen;
-  renderRunStrip();
-}
-
-function closeRunStrip() {
-  if (!state.runStripOpen) return;
-  state.runStripOpen = false;
-  ui.runStrip.hidden = true;
-  ui.runStatus.setAttribute("aria-expanded", "false");
-}
-
-function toggleThreadMenu() {
-  if (ui.openThreadMenu.disabled) return;
-  closeRunStrip();
-  closeRecentThreads();
-  const opening = ui.threadMenu.hidden;
-  ui.threadMenu.hidden = !opening;
-  ui.openThreadMenu.setAttribute("aria-expanded", String(opening));
-}
-
-function closeThreadMenu() {
-  ui.threadMenu.hidden = true;
-  ui.openThreadMenu.setAttribute("aria-expanded", "false");
-}
-
-function toggleRecentThreads() {
-  if (ui.openRecentThreads.disabled) return;
-  closeRunStrip();
-  closeThreadMenu();
-  closeAccountMenu();
-  renderRecentThreads();
-  const opening = ui.recentThreadMenu.hidden;
-  ui.recentThreadMenu.hidden = !opening;
-  ui.openRecentThreads.setAttribute("aria-expanded", String(opening));
-}
-
-function closeRecentThreads() {
-  ui.recentThreadMenu.hidden = true;
-  ui.openRecentThreads.setAttribute("aria-expanded", "false");
-}
-
-function closeTopbarOverlays() {
-  closeRunStrip();
-  closeThreadMenu();
-  closeRecentThreads();
-  closeAccountMenu();
-}
-
-function toggleAccountMenu() {
-  closeRunStrip();
-  closeThreadMenu();
-  closeRecentThreads();
-  const opening = ui.accountMenu.hidden;
-  ui.accountMenu.hidden = !opening;
-  ui.openAccountMenu.setAttribute("aria-expanded", String(opening));
-}
-
-function closeAccountMenu() {
-  ui.accountMenu.hidden = true;
-  ui.openAccountMenu.setAttribute("aria-expanded", "false");
 }
 
 function renderAccount() {
@@ -3207,9 +3979,12 @@ async function setUserActive(user, active) {
   }
 }
 
-function closeAllStreams() {
-  for (const stream of state.streams.values()) stream.close();
-  state.streams.clear();
+function forgetClientThread(threadId) {
+  state.queueSnapshots.delete(threadId);
+  state.threadTokenUsage.delete(threadId);
+  for (const [requestId, request] of state.userInputRequests) {
+    if (request.threadId === threadId) state.userInputRequests.delete(requestId);
+  }
 }
 
 window.codexHandleAndroidBack = () => {
@@ -3231,59 +4006,6 @@ window.codexHandleAndroidBack = () => {
   return "exit";
 };
 
-function loadSelection() {
-  try {
-    return JSON.parse(localStorage.getItem(userStorageKey("threads")) || "{}");
-  } catch {
-    return {};
-  }
-}
-
-function saveSelection() {
-  localStorage.setItem(userStorageKey("threads"), JSON.stringify(state.selectedThreads));
-}
-
-function loadTimingState() {
-  if (state.timingSaveTimer) clearTimeout(state.timingSaveTimer);
-  state.timingSaveTimer = null;
-  const restored = parseTimingState(localStorage.getItem(userStorageKey("timing-state")));
-  state.turnMetrics = restored.turnMetrics;
-  state.activeTurnStarts = restored.activeTurnStarts;
-}
-
-function scheduleTimingStateSave() {
-  if (!state.user || state.timingSaveTimer) return;
-  state.timingSaveTimer = setTimeout(persistTimingState, 50);
-}
-
-function persistTimingState() {
-  if (state.timingSaveTimer) clearTimeout(state.timingSaveTimer);
-  state.timingSaveTimer = null;
-  if (!state.user) return;
-  try {
-    localStorage.setItem(userStorageKey("timing-state"), serializeTimingState(state.turnMetrics, state.activeTurnStarts));
-  } catch {
-    // 计时记录不应阻断聊天主流程；后续服务端记录仍会在刷新时重新合并。
-  }
-}
-
-function rememberActiveTurnStart(threadId, turnId, startedAt) {
-  if (!threadId || !timestampMilliseconds(startedAt)) return;
-  const previous = state.activeTurnStarts.get(threadId);
-  const next = { turnId: turnId || previous?.turnId || null, startedAt: timestampMilliseconds(startedAt) };
-  if (previous?.turnId === next.turnId && previous?.startedAt === next.startedAt) return;
-  state.activeTurnStarts.set(threadId, next);
-  scheduleTimingStateSave();
-}
-
-function forgetActiveTurnStart(threadId, turnId = null) {
-  if (!threadId) return;
-  const saved = state.activeTurnStarts.get(threadId);
-  if (!saved || (turnId && saved.turnId && saved.turnId !== turnId)) return;
-  state.activeTurnStarts.delete(threadId);
-  scheduleTimingStateSave();
-}
-
 function userStorageKey(name) {
   return `codex-workspace-${name}:${state.user?.id || "anonymous"}`;
 }
@@ -3300,6 +4022,8 @@ async function api(path, options = {}) {
   const method = options.method || "GET";
   const headers = {};
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  options.signal?.addEventListener("abort", abortFromCaller, { once: true });
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
   if (options.body) headers["Content-Type"] = "application/json";
   if (!["GET", "HEAD"].includes(method) && state.csrfToken) headers["X-Codex-CSRF-Token"] = state.csrfToken;
@@ -3311,14 +4035,16 @@ async function api(path, options = {}) {
       signal: controller.signal,
     });
     const body = await response.json().catch(() => ({}));
-    if (response.status === 401) showAuth(false, body.error || "登录已失效，请重新登录。");
+    if (response.status === 401) location.reload();
     if (!response.ok) throw new Error(body.error || `请求失败（${response.status}）`);
     return body;
   } catch (error) {
+    if (error?.name === "AbortError" && options.signal?.aborted) throw error;
     if (error?.name === "AbortError") throw new Error("请求超时，请检查连接后重试。");
     throw error;
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
@@ -3342,7 +4068,6 @@ async function submitSetup(event) {
   }
   try {
     await authRequest("/api/auth/setup", {
-      setupToken: ui.setupToken.value,
       username: ui.setupUsername.value,
       displayName: ui.setupDisplayName.value,
       password: ui.setupPassword.value,
@@ -3362,7 +4087,6 @@ async function authRequest(path, body) {
 
 ui.loginForm.addEventListener("submit", submitLogin);
 ui.setupForm.addEventListener("submit", submitSetup);
-ui.openAccountMenu.addEventListener("click", toggleAccountMenu);
 ui.manageUsers.addEventListener("click", openUserManager);
 ui.changePassword.addEventListener("click", () => openPasswordDialog(false));
 ui.logout.addEventListener("click", async () => {
@@ -3378,23 +4102,25 @@ ui.passwordDialog.addEventListener("cancel", (event) => {
 });
 ui.addUser.addEventListener("click", () => openUserDialog());
 ui.userForm.addEventListener("submit", saveUser);
-ui.openSidebar.addEventListener("click", openSidebar);
-ui.closeSidebar.addEventListener("click", closeSidebar);
-ui.sidebarScrim.addEventListener("click", closeSidebar);
 ui.addProject.addEventListener("click", () => openProjectDialog());
 ui.manageProjectsSide.addEventListener("click", openProjectManager);
 ui.refreshWorkspace.addEventListener("click", () => {
-  persistTimingState();
   location.reload();
 });
 ui.openGlobalSettings.addEventListener("click", openGlobalSettings);
-ui.runStatus.addEventListener("click", toggleRunStrip);
-ui.openRecentThreads.addEventListener("click", toggleRecentThreads);
-ui.openThreadMenu.addEventListener("click", toggleThreadMenu);
 ui.newThread.addEventListener("click", () => createThread().catch(showError));
 ui.quickNewThread.addEventListener("click", () => createThread().catch(showError));
 ui.guide.addEventListener("click", () => { state.mode = "guide"; updateComposer(); ui.prompt.focus(); });
 ui.queue.addEventListener("click", () => { state.mode = "queue"; updateComposer(); ui.prompt.focus(); });
+ui.planMode.addEventListener("click", async () => {
+  const thread = currentThread();
+  if (!thread || isActiveThreadRuntime(currentRuntime())) return;
+  const active = thread.settings?.collaborationMode === "plan";
+  if (await saveSettings({ collaborationMode: active ? "default" : "plan" }, { quiet: true })) {
+    showActivity(active ? "已退出 Plan 模式。" : "已进入 Plan 模式。", false);
+    ui.prompt.focus();
+  }
+});
 ui.composer.addEventListener("submit", submitPrompt);
 ui.uploadFiles.addEventListener("click", chooseUploadFiles);
 ui.uploadFileInput.addEventListener("change", () => uploadSelectedFiles());
@@ -3403,20 +4129,9 @@ ui.prompt.addEventListener("input", () => {
   resizePrompt();
   updateComposer();
 });
-let promptCompositionActive = false;
-ui.prompt.addEventListener("compositionstart", () => { promptCompositionActive = true; });
-ui.prompt.addEventListener("compositionend", () => { promptCompositionActive = false; });
-ui.prompt.addEventListener("keydown", (event) => {
-  if (shouldSubmitPromptFromKeyboard(event, {
-    compositionActive: promptCompositionActive,
-    mobile: isMobileComposer(navigator),
-  })) {
-    event.preventDefault();
-    ui.composer.requestSubmit();
-  }
-});
 ui.stop.addEventListener("click", stopCurrentTurn);
 ui.renameThread.addEventListener("click", () => { closeThreadMenu(); openThreadDialog(); });
+ui.compactThread.addEventListener("click", compactCurrentThread);
 ui.deleteThread.addEventListener("click", () => { closeThreadMenu(); deleteCurrentThread(); });
 ui.threadForm.addEventListener("submit", saveThreadName);
 ui.queueEditForm.addEventListener("submit", saveQueueEdit);
@@ -3430,9 +4145,6 @@ ui.markdownPreviewDialog.addEventListener("click", (event) => {
   if (event.target === ui.markdownPreviewDialog) ui.markdownPreviewDialog.close();
 });
 ui.conversation.addEventListener("scroll", updateJumpLatest, { passive: true });
-ui.conversation.addEventListener("pointerdown", cancelScrollCommand, { passive: true });
-ui.conversation.addEventListener("touchstart", cancelScrollCommand, { passive: true });
-ui.conversation.addEventListener("wheel", cancelScrollCommand, { passive: true });
 ui.model.addEventListener("change", () => saveSettings({ model: ui.model.value }));
 ui.effort.addEventListener("change", () => saveSettings({ effort: ui.effort.value }));
 ui.tier.addEventListener("change", () => saveSettings({ serviceTier: ui.tier.value }));
@@ -3467,17 +4179,11 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("pageshow", (event) => {
   if (event.persisted) scheduleResume(0);
 });
-window.addEventListener("pagehide", persistTimingState);
 window.addEventListener("online", () => scheduleResume(0));
 window.addEventListener("focus", () => scheduleResume());
 window.addEventListener("codex-native-resume", () => scheduleResume(0));
+layout.bind();
 ui.openSettings.addEventListener("click", () => {
   if (window.CodexAndroid?.openConnectionSettings) window.CodexAndroid.openConnectionSettings();
   else ui.connectionDialog.showModal();
-});
-document.addEventListener("click", (event) => {
-  if (!ui.runStatus.contains(event.target) && !ui.runStrip.contains(event.target)) closeRunStrip();
-  if (!ui.threadMenuWrap.contains(event.target)) closeThreadMenu();
-  if (!ui.recentThreadWrap.contains(event.target)) closeRecentThreads();
-  if (!ui.accountMenuWrap.contains(event.target)) closeAccountMenu();
 });

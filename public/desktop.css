@@ -1,0 +1,117 @@
+.workspace-shell {
+  display: grid;
+  height: 100%;
+  grid-template-columns: 270px minmax(0, 1fr);
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100%;
+}
+
+.sidebar-scrim,
+.mobile-only {
+  display: none;
+}
+
+.workbench {
+  --content-gutter: max(26px, calc((100% - 1128px) / 2));
+  --topbar-gutter: max(14px, calc((100% - 1152px) / 2));
+  width: 100%;
+  height: 100%;
+}
+
+.topbar {
+  gap: 8px;
+  padding: 0 var(--topbar-gutter);
+}
+
+.topbar-context {
+  display: flex;
+}
+
+.topbar-context > span:first-child {
+  min-width: 0;
+  max-width: 190px;
+  flex: 0 1 auto;
+}
+
+.recent-thread-wrap {
+  flex: 1 1 160px;
+  width: 100%;
+  max-width: none;
+}
+
+.thread-switcher-button {
+  height: 32px;
+  padding: 0 8px;
+}
+
+.recent-thread-menu {
+  right: auto;
+  left: 0;
+  width: 620px;
+  max-width: calc(100vw - 500px);
+  max-height: min(520px, calc(100dvh - 76px));
+  gap: 2px;
+  padding: 6px;
+}
+
+.recent-thread-item {
+  height: 46px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 2px;
+  padding: 5px 11px;
+}
+
+.recent-thread-item strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.recent-thread-item small {
+  font-size: 9px;
+}
+
+.recent-thread-item.running strong {
+  padding-right: 16px;
+}
+
+.recent-thread-item.running::after {
+  right: 12px;
+}
+
+.conversation {
+  padding: 12px var(--content-gutter) 28px;
+}
+
+.jump-latest {
+  right: var(--content-gutter);
+  bottom: 14px;
+}
+
+.message {
+  max-width: min(780px, 92%);
+}
+
+.queue-panel {
+  width: min(560px, calc(100% - 52px));
+  max-height: min(22dvh, 180px);
+  margin: 0 auto 8px;
+}
+
+.composer-zone {
+  padding: 9px var(--content-gutter) calc(14px + env(safe-area-inset-bottom));
+}
+
+@media (max-width: 1100px) {
+  .recent-thread-menu {
+    right: 0;
+    left: auto;
+    width: min(620px, calc(100vw - 310px));
+    max-width: none;
+  }
+}

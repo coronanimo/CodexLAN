@@ -1,52 +1,58 @@
 # Architecture
 
-## System boundary
+CodexLAN has three runtime parts:
 
-```text
-Desktop/mobile browser or Android WebView
-              │ HTTP API + SSE
-              ▼
-        Node HTTP service
-        auth, state, files
-              │ JSONL over stdio
-              ▼
-       codex app-server
-              │
-              ▼
-    Windows files and processes
-```
+**Browser or Android WebView → HTTP and SSE → Node/Express service → JSONL over stdio → `codex app-server`**
 
-`server.mjs` serves the static browser application, validates web requests, persists application state, performs bounded file operations, and owns one child `codex app-server --listen stdio://` process. The browser never talks to app-server directly.
+The Node service owns the App Server process, serves the web interface, applies access control, and translates browser actions into Codex protocol requests. Browsers never connect to App Server directly.
 
-App-server uses JSON-RPC-style messages encoded as newline-delimited JSON. The service sends `initialize`, then `initialized`, and maps browser actions to thread, turn, steering, interruption, model, account-limit, and history requests. App-server is an experimental Codex interface and can change without notice; compatibility must be retested after every Codex CLI upgrade.
+## Components
 
-## Main source areas
+### Node service
 
-- `server.mjs`: HTTP routing, authentication, persistence, project ownership, file access, SSE fan-out, queue recovery, and app-server adaptation.
-- `public/index.html`, `public/styles.css`, `public/app.js`: the no-build browser application.
-- `public/*.js`: focused parsing, rendering, timing, snapshot, preview, download, and thread helpers shared with tests.
-- `test/`: Node built-in test suite for browser-side pure functions and state reconstruction.
-- `Start-Codex-Web.ps1`: Windows LAN binding, workspace setup, firewall opt-in, process supervision, and health checks.
-- `android/`: optional native WebView shell; it does not embed the Node service or Codex credentials.
+`server.mjs` assembles the Express application and starts a loopback listener for the PC workbench plus an optional private-LAN listener.
 
-## State and ownership
+- `server/accounts.mjs`: administrator setup, accounts, sessions, passwords, CSRF, and login throttling.
+- `server/projects.mjs`: projects, directory access, attachments, uploads, and downloads.
+- `server/conversations.mjs`: threads, turns, queues, steering, interruption, history, runtime state, and SSE.
+- `server/workspace-store.mjs`: durable application state and state-format migration.
+- `server/codex-client.mjs`: App Server process lifecycle and protocol transport.
+- `server/http.mjs`: shared HTTP helpers.
 
-Runtime application state lives under `data/`; service logs live under `logs/`; the default writable project root is `workspace/`. None belongs in source control.
+### Web client
 
-Application users have separate project records, thread ownership, queues, settings, and sessions. They still share one operating-system identity and one app-server child process. A project created in the UI is placed under `<workspace>/<normalized-user>/<project-name>`. Existing stored paths may remain as legacy paths for compatibility.
+The browser application is plain HTML, CSS, and JavaScript with no build step. `public/app.js` coordinates the application while smaller modules own reusable behavior. Desktop and mobile use the same state and product components; `desktop.css` and `mobile.css` provide different layouts.
 
-## Request security
+The client receives live thread updates through SSE. It reconnects after navigation or network interruption and rebuilds the visible execution state from server snapshots and subsequent events.
 
-The service uses HttpOnly, SameSite=Strict session cookies. State-changing API calls require a valid session, a same-origin request, and the session CSRF token. Administrative routes additionally require an administrator account. Login attempts are rate-limited and passwords are stored using salted scrypt hashes.
+### Android client
 
-File endpoints resolve and validate paths before access. Ordinary project download and upload routes are bound to an owned project. The administrator download route can read a broader set of local files and is therefore a distinct, documented trust boundary.
+The Android project is a WebView shell. Native code owns server selection, refresh, system file picking, downloads, and the offline control menu. Conversation and project features remain in the shared web client.
 
-Composer attachments stay in browser memory until a message is sent. The server then stores them below `.codexlan/attachments/<thread>/<date>/` inside the owned project, using generated unique names. The app-owned `.codexlan` directory ignores its own contents in Git. Removing an unsent attachment therefore creates no project file; successfully sent attachments remain available to historical chat references.
+## Data ownership
 
-## Live execution state
+Codex conversation history belongs to Codex. CodexLAN associates a thread with a project by matching the thread's canonical working directory to the project directory.
 
-The browser maintains one SSE connection for server events. Server-side maps track active thread state, queue revisions, retry timers, draft threads, timing, and cached history. Persisted timing and snapshots allow the UI to reconstruct command and file-change rows after navigation or reconnect instead of treating the DOM as the source of truth.
+CodexLAN stores web accounts, sessions, projects, queues, thread settings, access order, and runtime metadata in `workspace-state.json`. Project files remain in their project directories. Sent attachments are stored below each project's `.codexlan/attachments/` directory.
 
-## Compatibility-sensitive areas
+The Node service defaults to repository-local `data/` and `workspace/` directories. `CODEX_WEB_DATA_DIR` and `CODEX_WORKDIR` select other locations.
 
-After updating Codex CLI, manually verify initialization, model listing, thread create/resume/list, turn start, steering, interruption, approvals if present, streamed command and file events, token usage, account limits, and history pagination. Generated app-server schemas are diagnostic output tied to a particular Codex version and are intentionally not committed.
+## Access boundary
+
+All CodexLAN accounts share the Windows identity, Codex login, machine permissions, and usage limits of the service process. Accounts separate access inside CodexLAN; they are not operating-system sandboxes.
+
+Member projects are limited to that member's directory below the configured workspace root. Administrators may select other absolute directories. Project, thread, queue, attachment, and file routes check ownership before performing work.
+
+Authenticated writes require a session cookie, a same-origin request, and the session CSRF token. Passwords use salted scrypt hashes. File routes resolve canonical paths before access.
+
+## Process and network lifecycle
+
+The local workbench remains available when Codex is missing, signed out, or reconnecting. `/api/health` reports the Node service; `/api/ready` reports App Server readiness.
+
+The loopback and LAN listeners have separate state. A missing private address or occupied LAN port disables LAN access without taking down the local workbench.
+
+One Node service owns one App Server child process. Restarting the Node service also replaces that child process; reconnecting Codex can restart only the child while leaving the web service running.
+
+## Codex compatibility
+
+`codex app-server` is experimental. After a Codex CLI update, verify initialization, authentication, model listing, thread history, turn execution, steering, interruption, command and file events, token usage, and account limits.

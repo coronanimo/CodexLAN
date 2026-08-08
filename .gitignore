@@ -1,12 +1,12 @@
 generated-schema/
 data/
-logs/
 .tools/
 .codex-remote-attachments/
 .codexlan/
 workspace/
 release/
 dist/
+out/
 public/downloads/
 *.zip
 *.7z
