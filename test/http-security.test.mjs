@@ -397,6 +397,37 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.ok(recoveredQueueRead);
     assert.equal(recoveredQueueStart.params.clientUserMessageId, recoveredQueue.body.item.id);
 
+    const activeAfterRecovery = await waitForActiveThread(origin, threadId, createdProject.body.project.id, adminCookie);
+    const goalWhileRunning = await request(origin, `/api/threads/${threadId}/goal`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id, objective: "Keep working until stopped", status: "active" },
+    });
+    assert.equal(goalWhileRunning.status, 200);
+    const queuedBehindGoal = await request(origin, `/api/threads/${threadId}/queue`, {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id, text: "start after the Goal is stopped" },
+    });
+    assert.equal(queuedBehindGoal.status, 202);
+    const stoppedGoalSse = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
+    const stoppedGoal = await request(origin, `/api/threads/${threadId}/interrupt`, {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id, turnId: activeAfterRecovery.body.runtime.activeTurnId },
+    });
+    assert.equal(stoppedGoal.status, 200);
+    assert.equal(stoppedGoal.body.goalPaused, true);
+    assert.equal(stoppedGoal.body.goal.status, "paused");
+    const stoppedGoalEvents = await readSseUntil(stoppedGoalSse.body.getReader(), (contents) => (
+      contents.includes(`\"id\":\"${queuedBehindGoal.body.item.id}\",\"type\":\"userMessage\"`)
+        && contents.includes(clearedQueue)
+    ));
+    assert.match(stoppedGoalEvents, /start after the Goal is stopped/);
+
     const crossProjectRead = await request(origin, `/api/threads/${threadId}?projectId=${secondProject.body.project.id}`, { cookie: adminCookie });
     assert.equal(crossProjectRead.status, 404);
     const crossProjectUpload = await fetch(`${origin}/api/projects/${secondProject.body.project.id}/files/upload?threadId=${threadId}&name=wrong-project.txt`, {

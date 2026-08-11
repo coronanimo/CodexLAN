@@ -453,8 +453,18 @@ export function createConversations({ store, codex }) {
       const body = await readJson(request);
       const project = await store.getProject(body.projectId, user.id);
       await store.requireThreadOwner(threadId, user.id, project.id);
+      const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
+      let pausedGoal = null;
+      if (isActiveGoal(goal)) {
+        const result = await codex.request("thread/goal/set", { threadId, status: "paused" });
+        pausedGoal = result.goal;
+        threadGoals.set(threadId, pausedGoal);
+      }
       await codex.request("turn/interrupt", { threadId, turnId: validateId(body.turnId, "turnId") });
-      json(response, 200, { ok: true });
+      const pendingAdvance = queueAdvances.get(threadId);
+      if (pendingAdvance) await pendingAdvance;
+      await advanceQueue(threadId);
+      json(response, 200, { ok: true, goalPaused: Boolean(pausedGoal), ...(pausedGoal ? { goal: pausedGoal } : {}) });
     });
 
     application.post("/api/threads/:threadId/compact", async (request, response) => {

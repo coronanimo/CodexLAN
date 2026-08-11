@@ -3009,12 +3009,13 @@ async function stopCurrentTurn() {
       showActivity("当前任务已经结束。", false);
       return;
     }
-    await api(`/api/threads/${encodeURIComponent(thread.id)}/interrupt`, {
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/interrupt`, {
       method: "POST",
       body: { projectId: project.id, turnId: activeTurnId },
       timeoutMs: 8000,
     });
-    showActivity("已请求停止当前任务。", false);
+    if (result.goal) applyThreadGoal(thread.id, result.goal);
+    showActivity(result.goalPaused ? "目标已暂停，当前任务已停止。" : "已请求停止当前任务。", false);
   } catch (error) {
     showError(error);
   } finally {

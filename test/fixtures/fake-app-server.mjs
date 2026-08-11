@@ -407,7 +407,14 @@ function fakeResult(method, params = {}) {
   }
   if (method === "turn/interrupt") {
     const thread = threads.get(params.threadId);
-    if (thread) thread.status = "idle";
+    if (thread) {
+      thread.status = "idle";
+      const turn = thread.turns.find((entry) => entry.id === params.turnId);
+      if (turn) {
+        turn.status = "interrupted";
+        turn.completedAt = Date.now();
+      }
+    }
     return {};
   }
   return {};
