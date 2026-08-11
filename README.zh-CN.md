@@ -2,33 +2,28 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodexLAN 是一个运行在 Windows 上的自托管工作台，让同一网络中的电脑和移动设备通过浏览器使用本机 Codex CLI。它支持项目、Codex 对话、实时执行、任务队列、附件、Markdown 和公式渲染。
+CodexLAN 在一台 Windows 电脑上运行 Codex，并把对话工作台提供给同一可信网络中的浏览器。浏览器只是操作界面；命令执行、文件访问、Codex 登录和对话历史都留在服务端电脑上。
 
-这是基于实验性 `codex app-server` 接口开发的非官方社区项目。
+这是基于实验性 `codex app-server` 协议开发的独立社区项目，不是 OpenAI 官方产品。
 
-## 功能
+## 能做什么
 
-- 从 PC、iPhone 和 Android 继续 Codex 对话。
-- 查看实时推理、命令、输出、文件变更、用量和耗时。
-- 在任务执行期间发送引导，或把后续任务加入队列。
-- 使用 Goal 持续执行长期目标，查看实时状态、设置可选 Token 预算，并通过 `/goal`、`/goal pause`、`/goal resume` 和 `/goal clear` 管理。
-- 粘贴图片、上传文件、预览支持的文件并下载项目内容。
-- 使用管理员和成员账号分别管理项目与网页会话。
-- Android WebView 客户端可以保存并切换多个服务器，当前服务器离线时仍可操作。
+- 在电脑和手机浏览器中使用同一个对话工作台，也可选用 Android WebView 客户端。
+- 实时查看推理、命令、输出、文件变化、耗时、上下文用量和账号限额。
+- 给当前任务追加引导，把后续任务加入持久队列，使用规划模式，以及创建可暂停、恢复、清除并设置令牌预算的长期目标。
+- 创建多个网页账号并区分项目归属；支持附件、文件预览与下载、Markdown、表格和本地公式渲染。
 
 ## 运行要求
 
-| 组件 | 要求 |
-| --- | --- |
-| 服务端电脑 | Windows 10 或 11 |
-| Node.js | 源码运行需要 20 或更高版本 |
-| Codex | 已安装并登录 Codex CLI |
-| 浏览器 | 当前版本的桌面或移动浏览器 |
-| Android 客户端 | Android 8.0 / API 26 或更高版本 |
+- 服务端电脑使用 Windows 10 或 11。
+- Node.js 20 或更高版本。
+- 已安装并登录 Codex CLI。
+- 客户端使用当前版本的浏览器。
+- 只有使用可选 Android 客户端时才要求 Android 8.0 或更高版本。
 
-## 从源码启动
+## 启动服务
 
-安装并登录 Codex CLI，然后运行：
+在仓库根目录运行：
 
 ```powershell
 codex login
@@ -38,56 +33,84 @@ Copy-Item config\codexlan.example.json config\codexlan.json
 npm run service:start
 ```
 
-启动前编辑 `config/codexlan.json`。守护进程入口是 `server/service.mjs`，业务服务入口是 `server/index.mjs`。服务进入就绪状态后若意外退出，守护进程会自动拉起。
+打开服务输出的本机地址，创建第一个管理员账号。其他设备使用输出的局域网地址。
 
-| 操作 | 命令 |
+仓库中的样例配置不包含任何本机盘符或用户目录：
+
+```json
+{
+  "$schema": "./codexlan.schema.json",
+  "port": 8688,
+  "host": "auto",
+  "dataRoot": "../data",
+  "codexBin": null
+}
+```
+
+需要修改的是复制后的 `config/codexlan.json`，不要修改样例文件。配置项含义如下：
+
+| 配置项 | 含义 |
 | --- | --- |
-| 启动 | `npm run service:start` |
-| 查看状态和 PID | `npm run service:status` |
-| 查看最近日志 | `npm run service:log` |
-| 重启业务服务 | `npm run service:restart` |
-| 停止 | `npm run service:stop` |
+| `port` | 本机和局域网共用的 HTTP 端口，默认 `8688`。 |
+| `host` | `auto` 自动选择专用 IPv4；设为 `127.0.0.1` 时只允许本机访问。 |
+| `dataRoot` | 保存账号、会话、队列、对话设置和守护状态。相对路径从 `config/` 目录解析。 |
+| `workspaceRoot` | 可选，限定系统自动管理的用户项目放在哪里。省略时使用 `<dataRoot>/projects`；已有项目仍可保存各自的绝对路径。 |
+| `codexBin` | 可选，指定 Codex 可执行文件；`null` 表示使用 `PATH` 中的 `codex`。 |
 
-当前共享端口由配置文件决定，本机配置为 `8688`。`config/` 只放配置，`data/` 只放用户、会话、项目、队列、目标和守护状态，`logs/` 单独放日志。`workspaceRoot` 是多用户工作区的共同边界，本机设为 `F:\GPTData`；每个项目仍保存自己的绝对路径，系统自动创建的用户项目位于 `F:\GPTData\<用户名>\<项目名>`。
+未知配置项或非法值会直接阻止启动，不会被静默忽略。
 
-源码目录只保留明确职责：`server/` 是服务端和守护进程，`public/` 是网页，`android/` 是安卓客户端，`test/` 是测试与测试夹具，`docs/` 是文档。
+## 服务管理
 
-如果 Windows 防火墙阻止专用网络中的其他设备访问，请在管理员 PowerShell 中添加入站规则：
+| 命令 | 作用 |
+| --- | --- |
+| `npm run service:start` | 启动后台守护进程并等待服务就绪。 |
+| `npm run service:status` | 查看守护进程 PID、服务 PID、状态和访问地址。 |
+| `npm run service:log` | 查看最近的服务日志。 |
+| `npm run service:restart` | 通过现有守护进程重启服务；应从外部终端执行。 |
+| `npm run service:stop` | 停止服务和守护进程；应从外部终端执行。 |
+| `npm start` | 前台运行，供开发和排错使用。 |
+
+服务就绪后如果意外退出，守护进程会自动拉起。控制状态保存在 `dataRoot` 下，日志写入 `logs/codexlan.log`。
+
+## 局域网访问
+
+使用 `host: "auto"` 时，CodexLAN 在配置端口上监听，只接受本机回环地址和选中的一个专用 IPv4 地址。其他设备无法连接时，先确认 Windows 已把当前网络设为“专用网络”。默认端口对应的防火墙规则如下，需要在管理员 PowerShell 中执行：
 
 ```powershell
 New-NetFirewallRule -DisplayName 'CodexLAN 8688' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8688 -Profile Private
 ```
 
-## 客户端与安装包
+内置服务使用明文 HTTP，不要直接暴露到公网。
 
-- PC 和 iPhone 直接使用网页界面；iPhone 可以通过 Safari 的共享菜单添加到主屏幕，独立运行时可使用顶栏的刷新按钮。
-- Android WebView 客户端位于 [`android/`](android/)。
-- 当前产物状态和发布步骤见 [docs/RELEASES.md](docs/RELEASES.md)。
+## 数据与权限边界
 
-## 安全
+CodexLAN 使用启动服务的 Windows 账号执行命令和访问文件。网页账号可以隔离 CodexLAN 内的项目和会话，但仍然共享同一个 Windows 身份、Codex 登录和 Codex 使用额度。只应给可信任、可以共同使用这套 Codex 环境的人创建账号。
 
-CodexLAN 以启动它的 Windows 账号权限执行命令和访问文件。所有网页账号共享该 Windows 身份、Codex 登录和使用额度。请只在可信的专用网络中提供给可信用户，并尽量缩小项目根目录范围。
+以下运行数据不会提交到仓库：
 
-内置服务使用明文 HTTP，不要直接暴露到公网。配置远程访问或添加用户前请阅读[安全说明](docs/SECURITY.md)。
+- `config/codexlan.json`：本机服务配置。
+- `data/`：使用样例配置时的应用状态和守护状态。
+- `logs/`：服务日志。
+- 各项目目录：源码和项目内附件。
 
-## 文档
+添加用户或调整网络暴露范围前，请阅读[安全说明](docs/SECURITY.md)。
 
-- [架构](docs/ARCHITECTURE.md)
-- [部署、备份与升级](docs/DEPLOYMENT.md)
-- [开发](docs/DEVELOPMENT.md)
-- [故障排查](docs/TROUBLESHOOTING.md)
-- [Android](android/README.md)
-- [发布](docs/RELEASES.md)
-- [贡献指南](docs/CONTRIBUTING.md)
+## 仓库目录
+
+- `server/`：HTTP 服务、App Server 客户端、持久化、配置和守护进程。
+- `public/`：浏览器界面以及桌面、移动端样式。
+- `android/`：可选的 Android WebView 客户端。
+- `test/`：自动化测试和模拟 App Server。
+- `docs/`：架构、部署、开发、排错、发布和项目文档。
 
 ## 开发
 
-运行完整的 JavaScript 检查和测试：
+运行语法检查和完整测试：
 
 ```powershell
 npm run check
 ```
 
-未完成事项记录在[待办事项](docs/TODO.md)，用户可感知的变化记录在[变更日志](docs/CHANGELOG.md)。
+更多说明见[架构](docs/ARCHITECTURE.md)、[部署](docs/DEPLOYMENT.md)、[开发](docs/DEVELOPMENT.md)和[故障排查](docs/TROUBLESHOOTING.md)。用户可见的变化记录在[变更日志](docs/CHANGELOG.md)，已知事项记录在[待办事项](docs/TODO.md)。
 
 CodexLAN 使用 [MIT License](LICENSE)。

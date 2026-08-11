@@ -2,33 +2,28 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodexLAN is a self-hosted Windows workspace for using a local Codex CLI from desktop and mobile browsers on the same network. It supports projects, Codex conversations, live execution, queues, attachments, Markdown, and formula rendering.
+CodexLAN runs Codex on a Windows computer and exposes the conversation workspace to browsers on the same trusted network. The browser is only the interface: commands, file access, Codex authentication, and conversation history remain on the server computer.
 
-This is an independent community project built on the experimental `codex app-server` interface.
+This is an independent community project built against the experimental `codex app-server` protocol. It is not an OpenAI product.
 
-## Features
+## What it provides
 
-- Continue Codex conversations from PC, iPhone, and Android.
-- View streamed reasoning, commands, output, file changes, usage, and elapsed time.
-- Send guidance during a turn or queue work for later.
-- Run durable Goal work with live status, optional token budgets, and `/goal`, `/goal pause`, `/goal resume`, and `/goal clear` controls.
-- Paste images, upload files, preview supported files, and download project content.
-- Separate administrator and member accounts with per-account projects and sessions.
-- Use the Android WebView client to switch between saved servers even when a server is offline.
+- One conversation workspace for desktop and mobile browsers, with an optional Android WebView client.
+- Live reasoning, commands, output, file changes, elapsed time, context usage, and account limits.
+- Guidance for the active turn, a persistent queue for later work, Plan mode, and long-running Goals with pause, resume, clear, and optional token budgets.
+- Multiple web accounts, project ownership, attachments, file preview and download, Markdown, tables, and local formula rendering.
 
 ## Requirements
 
-| Component | Requirement |
-| --- | --- |
-| Server computer | Windows 10 or 11 |
-| Node.js | 20 or newer for source runs |
-| Codex | Codex CLI installed and signed in |
-| Browser | A current desktop or mobile browser |
-| Android client | Android 8.0 / API 26 or newer |
+- Windows 10 or 11 on the server computer.
+- Node.js 20 or newer.
+- Codex CLI installed and signed in.
+- A current browser on each client device.
+- Android 8.0 or newer only when using the optional Android client.
 
-## Start from source
+## Start the service
 
-Install and sign in to Codex CLI, then run:
+From the repository root:
 
 ```powershell
 codex login
@@ -38,46 +33,84 @@ Copy-Item config\codexlan.example.json config\codexlan.json
 npm run service:start
 ```
 
-Edit `config/codexlan.json` before startup. The supervisor runs in the background, restarts a server that crashes after reaching ready state, stores its control state below `dataRoot`, and writes service output to `logs/codexlan.log`. Use `npm run service:status`, `npm run service:restart`, and `npm run service:stop` to manage it. `npm start` remains available for foreground development.
+Open the local address printed by the service and create the first administrator account. Other devices use the printed LAN address.
 
-The configured port is shared by loopback and the selected private-LAN address. `config/` contains configuration, `data/` contains application and supervisor state, and `logs/` contains logs. `workspaceRoot` defines the shared multi-user workspace boundary. Each project retains its own absolute path, while managed user projects are created below `<workspaceRoot>/<username>/`.
+The checked-in example is deliberately machine-neutral:
 
-If Windows Firewall blocks other devices on a Private network, add an inbound rule from an elevated PowerShell window:
+```json
+{
+  "$schema": "./codexlan.schema.json",
+  "port": 8688,
+  "host": "auto",
+  "dataRoot": "../data",
+  "codexBin": null
+}
+```
+
+Edit the copied `config/codexlan.json`, not the example file. Supported settings are:
+
+| Setting | Meaning |
+| --- | --- |
+| `port` | HTTP port shared by loopback and LAN access. Default: `8688`. |
+| `host` | `auto` selects a private IPv4 interface; `127.0.0.1` disables LAN access. |
+| `dataRoot` | Accounts, sessions, queues, thread settings, and supervisor state. Relative paths resolve from `config/`. |
+| `workspaceRoot` | Optional boundary for automatically managed user projects. When omitted, CodexLAN uses `<dataRoot>/projects`. Existing projects may still point to their own absolute directories. |
+| `codexBin` | Optional path to a specific Codex executable. `null` uses `codex` from `PATH`. |
+
+Unknown settings and invalid values stop startup with an error instead of being ignored.
+
+## Service commands
+
+| Command | Action |
+| --- | --- |
+| `npm run service:start` | Start the background supervisor and wait for readiness. |
+| `npm run service:status` | Show supervisor PID, server PID, state, and addresses. |
+| `npm run service:log` | Print the latest service log entries. |
+| `npm run service:restart` | Restart the server through the existing supervisor. Run this from an external terminal. |
+| `npm run service:stop` | Stop the server and supervisor. Run this from an external terminal. |
+| `npm start` | Run the server in the foreground for development. |
+
+The supervisor restarts a server that crashes after reaching readiness. Its control state is stored below `dataRoot`; logs are written to `logs/codexlan.log`.
+
+## Network access
+
+With `host: "auto"`, CodexLAN listens on the configured port and accepts requests through loopback and one selected private IPv4 interface. If another device cannot connect, confirm that Windows marks the network as Private. For the default port, an elevated PowerShell can add this firewall rule:
 
 ```powershell
 New-NetFirewallRule -DisplayName 'CodexLAN 8688' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8688 -Profile Private
 ```
 
-## Clients and packages
+The built-in listener is plain HTTP. Do not expose it directly to the public internet.
 
-- PC and iPhone use the web interface directly. Safari users can add the workbench to the Home Screen from the Share menu; the mobile top bar keeps a page-refresh button available in standalone mode.
-- The optional Android WebView client is under [`android/`](android/).
-- Current artifact status and release procedures are in [docs/RELEASES.md](docs/RELEASES.md).
+## Data and trust boundary
 
-## Security
+CodexLAN executes with the Windows identity that started the service. Web accounts isolate CodexLAN projects and sessions from each other, but they still share that Windows identity, the same Codex login, and the same Codex usage limits. Only give accounts to people who are trusted to use that computer's Codex environment.
 
-CodexLAN can execute commands and access files with the permissions of the Windows account running it. Web accounts share that Windows identity, Codex login, and usage limits. Use the service only on a trusted private network with trusted users, and choose the smallest practical project root.
+Runtime data is not committed:
 
-The built-in listener is plain HTTP. Do not expose it directly to the public internet. See [Security](docs/SECURITY.md) before configuring remote access or additional users.
+- `config/codexlan.json`: local server configuration.
+- `data/`: application and supervisor state when the example configuration is used.
+- `logs/`: service logs.
+- Project directories: source files and project-local attachments.
 
-## Documentation
+See [Security](docs/SECURITY.md) before adding users or changing network exposure.
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Deployment, backup, and upgrades](docs/DEPLOYMENT.md)
-- [Development](docs/DEVELOPMENT.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Android](android/README.md)
-- [Releases](docs/RELEASES.md)
-- [Contributing](docs/CONTRIBUTING.md)
+## Repository layout
+
+- `server/`: HTTP service, App Server client, persistence, configuration, and supervisor.
+- `public/`: shared browser interface and desktop/mobile styles.
+- `android/`: optional Android WebView client.
+- `test/`: automated tests and the fake App Server fixture.
+- `docs/`: architecture, deployment, development, troubleshooting, release, and project documents.
 
 ## Development
 
-Run the complete JavaScript check and test suite with:
+Run syntax checks and the complete test suite with:
 
 ```powershell
 npm run check
 ```
 
-Known work is tracked in [TODO](docs/TODO.md). User-facing changes are recorded in the [changelog](docs/CHANGELOG.md).
+More detail is available in [Architecture](docs/ARCHITECTURE.md), [Deployment](docs/DEPLOYMENT.md), [Development](docs/DEVELOPMENT.md), and [Troubleshooting](docs/TROUBLESHOOTING.md). User-visible changes are recorded in the [changelog](docs/CHANGELOG.md), and known work is tracked in [TODO](docs/TODO.md).
 
 CodexLAN is available under the [MIT License](LICENSE).
