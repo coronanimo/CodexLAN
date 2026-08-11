@@ -668,12 +668,12 @@ export function createConversations({ store, codex }) {
     const runner = (async () => {
       const next = (await store.listQueue(threadId))[0];
       if (!next || queueSteerJobs.has(`${threadId}:${next.id}`)) return;
-      const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
-      if (isActiveGoal(goal)) return;
       const project = await store.getProject(next.projectId);
       await store.requireThreadOwner(threadId, project.ownerId, project.id);
       try {
         const resumed = await codex.ensureLoaded(threadId, project);
+        const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
+        if (isActiveGoal(goal)) return;
         const canonicalThread = resumed?.thread
           || (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
         const activeTurn = activeTurnFromThread(canonicalThread);
