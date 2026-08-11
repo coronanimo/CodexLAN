@@ -666,8 +666,6 @@ export function createConversations({ store, codex }) {
   async function advanceQueue(threadId) {
     if (queueAdvances.has(threadId)) return queueAdvances.get(threadId);
     const runner = (async () => {
-      const state = threadState.get(threadId);
-      if (state?.activeTurnId || isActiveThreadStatus(state?.status)) return;
       const next = (await store.listQueue(threadId))[0];
       if (!next || queueSteerJobs.has(`${threadId}:${next.id}`)) return;
       const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
@@ -676,19 +674,19 @@ export function createConversations({ store, codex }) {
       await store.requireThreadOwner(threadId, project.ownerId, project.id);
       try {
         const resumed = await codex.ensureLoaded(threadId, project);
-        const resumedThread = resumed?.thread || null;
-        if (resumedThread) {
-          const activeTurn = activeTurnFromThread(resumedThread);
-          if (activeTurn || isActiveThreadStatus(resumedThread?.status)) {
-            updateThreadRuntime(threadId, {
-              projectId: project.id,
-              status: resumedThread.status,
-              activeTurnId: activeTurn?.id || null,
-              startedAt: timestampMilliseconds(activeTurn?.startedAt) || Date.now(),
-            });
-            return;
-          }
+        const canonicalThread = resumed?.thread
+          || (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
+        const activeTurn = activeTurnFromThread(canonicalThread);
+        if (activeTurn || isActiveThreadStatus(canonicalThread?.status)) {
+          updateThreadRuntime(threadId, {
+            projectId: project.id,
+            status: canonicalThread.status,
+            activeTurnId: activeTurn?.id || null,
+            startedAt: timestampMilliseconds(activeTurn?.startedAt) || Date.now(),
+          });
+          return;
         }
+        updateThreadRuntime(threadId, { projectId: project.id, status: canonicalThread?.status || "idle" });
         const settings = await validateSettings(await store.getThreadSettings(threadId, project.settings));
         const params = {
           threadId,

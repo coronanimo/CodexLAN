@@ -370,7 +370,17 @@ function fakeResult(method, params = {}) {
   }
   if (method === "thread/name/set") {
     const thread = threads.get(params.threadId);
-    if (thread) thread.name = params.name;
+    if (thread) {
+      thread.name = params.name;
+      if (params.name === "Silently completed conversation") {
+        thread.status = "idle";
+        const turn = thread.turns.at(-1);
+        if (turn) {
+          turn.status = "completed";
+          turn.completedAt = Date.now();
+        }
+      }
+    }
     return {};
   }
   if (method === "thread/delete") {

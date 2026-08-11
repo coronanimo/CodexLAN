@@ -371,6 +371,32 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       csrf: adminCsrf,
     });
 
+    const silentlyCompleted = await request(origin, `/api/threads/${threadId}`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id, name: "Silently completed conversation" },
+    });
+    assert.equal(silentlyCompleted.status, 200);
+    const recoveredQueueSse = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
+    const recoveredQueue = await request(origin, `/api/threads/${threadId}/queue`, {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id, text: "recover queue after a missed completion event" },
+    });
+    assert.equal(recoveredQueue.status, 202);
+    const recoveredQueueEvents = await readSseUntil(recoveredQueueSse.body.getReader(), (contents) => (
+      contents.includes(`\"id\":\"${recoveredQueue.body.item.id}\",\"type\":\"userMessage\"`)
+        && contents.includes(clearedQueue)
+    ));
+    assert.match(recoveredQueueEvents, /recover queue after a missed completion event/);
+    const recoveredQueueTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    const recoveredQueueRead = recoveredQueueTrace.findLast((entry) => entry.method === "thread/read" && entry.params.threadId === threadId);
+    const recoveredQueueStart = recoveredQueueTrace.findLast((entry) => entry.method === "turn/start" && entry.params.threadId === threadId);
+    assert.ok(recoveredQueueRead);
+    assert.equal(recoveredQueueStart.params.clientUserMessageId, recoveredQueue.body.item.id);
+
     const crossProjectRead = await request(origin, `/api/threads/${threadId}?projectId=${secondProject.body.project.id}`, { cookie: adminCookie });
     assert.equal(crossProjectRead.status, 404);
     const crossProjectUpload = await fetch(`${origin}/api/projects/${secondProject.body.project.id}/files/upload?threadId=${threadId}&name=wrong-project.txt`, {
