@@ -14,4 +14,4 @@ Describe the user-visible or developer-visible result.
 - [ ] Relevant manual verification completed
 - [ ] No production data, credentials, logs, personal paths, or build artifacts included
 - [ ] User-facing changes documented in both READMEs when applicable
-- [ ] `CHANGELOG.md` updated when applicable
+- [ ] `docs/CHANGELOG.md` updated when applicable

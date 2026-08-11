@@ -8,12 +8,14 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 
 - Android WebView client with a draggable local control orb, multi-server switching, system file picking, downloads, and Android share-target support.
 - Plan mode, manual context compaction, and interactive Codex questions in the conversation.
+- Goal mode management with persistent status, optional token budgets, automatic continuation, and slash-command controls.
 - Clipboard image paste, attachment previews, project-local attachment storage, and image-only messages.
 - Final answers can be copied as original Markdown, separately from the Plan and execution process.
 - Markdown, fenced code, tables, links, and local KaTeX formula rendering in assistant messages.
 - Loopback-only first-administrator setup, member accounts, sessions, password management, CSRF checks, and login throttling.
 - Node and Android CI builds plus isolated HTTP security tests.
 - A page-refresh control in the mobile top bar for iPhone Home Screen use.
+- Strict JSON server configuration and a detached supervisor with explicit start, stop, restart, and status commands.
 
 ### Changed
 
@@ -28,6 +30,7 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 - Runtime state, queue revisions, timing, and thread access metadata now live in the server state instead of browser storage.
 - The Android application ID is now `com.hushiwei.codexlan`; installations using the previous private ID require a fresh install.
 - User-facing copy refers to the Windows machine as the server computer rather than the retired Host product name.
+- Loopback and LAN access now share one listener and one port instead of running two HTTP servers.
 
 ### Fixed
 

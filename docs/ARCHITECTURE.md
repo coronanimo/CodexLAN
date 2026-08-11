@@ -10,7 +10,7 @@ The Node service owns the App Server process, serves the web interface, applies 
 
 ### Node service
 
-`server.mjs` assembles the Express application and starts a loopback listener for the PC workbench plus an optional private-LAN listener.
+`server/index.mjs` assembles the Express application and starts one HTTP listener shared by loopback and the selected private-LAN interface. `server/service.mjs` owns the background supervisor and its control commands. Requests arriving through any other local interface are rejected.
 
 - `server/accounts.mjs`: administrator setup, accounts, sessions, passwords, CSRF, and login throttling.
 - `server/projects.mjs`: projects, directory access, attachments, uploads, and downloads.
@@ -35,7 +35,7 @@ Codex conversation history belongs to Codex. CodexLAN associates a thread with a
 
 CodexLAN stores web accounts, sessions, projects, queues, thread settings, access order, and runtime metadata in `workspace-state.json`. Project files remain in their project directories. Sent attachments are stored below each project's `.codexlan/attachments/` directory.
 
-The Node service defaults to repository-local `data/` and `workspace/` directories. `CODEX_WEB_DATA_DIR` and `CODEX_WORKDIR` select other locations.
+The Node service stores its state below the configured repository-local `data/` directory. `workspaceRoot` defines the shared multi-user workspace boundary. Automatically managed user projects live below `<workspaceRoot>/<username>/`; every project record retains its individual absolute path.
 
 ## Access boundary
 

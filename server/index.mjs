@@ -2,18 +2,18 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
-import { networkInterfaces } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createGzip } from "node:zlib";
 import express from "express";
-import { registerAccounts } from "./server/accounts.mjs";
-import { AppServerClient } from "./server/codex-client.mjs";
-import { createConversations } from "./server/conversations.mjs";
-import { json } from "./server/http.mjs";
-import { registerProjects } from "./server/projects.mjs";
-import { AuthService, WorkspaceStore } from "./server/workspace-store.mjs";
+import { registerAccounts } from "./accounts.mjs";
+import { AppServerClient } from "./codex-client.mjs";
+import { isLoopbackIpv4, isPrivateIpv4, loadServerConfig, selectListenerAddress } from "./config.mjs";
+import { createConversations } from "./conversations.mjs";
+import { json } from "./http.mjs";
+import { registerProjects } from "./projects.mjs";
+import { AuthService, WorkspaceStore } from "./workspace-store.mjs";
 
-const appRoot = dirname(fileURLToPath(import.meta.url));
+const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8"));
 if (typeof packageMetadata.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(packageMetadata.version)) {
   throw new Error("package.json does not contain a valid application version.");
@@ -21,51 +21,40 @@ if (typeof packageMetadata.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-
 const appVersion = packageMetadata.version;
 const nodeVersion = process.version.replace(/^v/, "");
 const nodeArchitecture = process.arch;
-const port = readPort("CODEX_WEB_PORT", 8687);
-const requestedHost = process.env.CODEX_WEB_HOST;
+const serverConfig = await loadServerConfig({ appRoot });
+const port = serverConfig.port;
+const requestedHost = serverConfig.host;
 if (requestedHost !== undefined && !isPrivateIpv4(requestedHost) && !isLoopbackIpv4(requestedHost)) {
-  throw new Error("CODEX_WEB_HOST must be a private or loopback IPv4 address.");
+  throw new Error("host must be \"auto\" or a private/loopback IPv4 address.");
 }
 const localOnly = isLoopbackIpv4(requestedHost);
-const configuredLocalPort = readPort("CODEX_LOCAL_PORT", 0, 0);
-const localPort = localOnly ? port : configuredLocalPort;
-const lanSetting = process.env.CODEX_LAN_ENABLED;
-if (lanSetting !== undefined && lanSetting !== "0" && lanSetting !== "1") {
-  throw new Error("CODEX_LAN_ENABLED must be 0 or 1.");
-}
-const lanEnabled = !localOnly && lanSetting !== "0";
-const lanHost = lanEnabled ? selectListenerAddress(requestedHost) : null;
-const configuredWorkspace = process.env.CODEX_WORKDIR;
-if (configuredWorkspace !== undefined && !configuredWorkspace.trim()) throw new Error("CODEX_WORKDIR must not be empty.");
-const workspace = resolve(configuredWorkspace || join(appRoot, "workspace"));
+const lanHost = localOnly ? null : selectListenerAddress(requestedHost);
+if (!localOnly && !lanHost) throw new Error("No private IPv4 address is available for the shared listener.");
+const listenHost = localOnly ? "127.0.0.1" : "0.0.0.0";
+const allowedListenerAddresses = new Set(["127.0.0.1", ...(lanHost ? [lanHost] : [])]);
 const staticRoot = join(appRoot, "public");
 const assetVersion = `${Math.trunc(statSync(join(staticRoot, "app.js")).mtimeMs)}`;
-const configuredDataRoot = process.env.CODEX_WEB_DATA_DIR;
-if (configuredDataRoot !== undefined && !configuredDataRoot.trim()) throw new Error("CODEX_WEB_DATA_DIR must not be empty.");
-const dataRoot = resolve(configuredDataRoot || join(appRoot, "data"));
+const dataRoot = serverConfig.dataRoot;
+const workspaceRoot = serverConfig.workspaceRoot;
 const stateFile = join(dataRoot, "workspace-state.json");
-const configuredCodexBin = process.env.CODEX_BIN;
-if (configuredCodexBin !== undefined && !configuredCodexBin.trim()) throw new Error("CODEX_BIN must not be empty when set.");
-if (!configuredWorkspace) await mkdir(workspace, { recursive: true });
-if (!existsSync(workspace) || !statSync(workspace).isDirectory()) {
-  throw new Error(`CODEX_WORKDIR is not a directory: ${workspace}`);
+const configuredCodexBin = serverConfig.codexBin;
+if (!serverConfig.workspaceRootConfigured) await mkdir(workspaceRoot, { recursive: true });
+if (!existsSync(workspaceRoot) || !statSync(workspaceRoot).isDirectory()) {
+  throw new Error(`workspaceRoot is not a directory: ${workspaceRoot}`);
 }
-
-
-
-const store = new WorkspaceStore({ dataRoot, stateFile, workspace });
+const store = new WorkspaceStore({ dataRoot, stateFile, workspace: workspaceRoot });
 await store.ready;
 const auth = new AuthService(store);
-const codex = new AppServerClient({ workspace, appVersion, codexBin: configuredCodexBin });
+const codex = new AppServerClient({ workspace: workspaceRoot, appVersion, codexBin: configuredCodexBin });
 
 const httpServers = [];
 const listenerState = {
   local: { status: "starting", url: null, error: null },
   lan: {
-    enabled: lanEnabled,
-    status: lanEnabled ? (lanHost ? "starting" : "unavailable") : "disabled",
+    enabled: Boolean(lanHost),
+    status: lanHost ? "starting" : "disabled",
     url: null,
-    error: lanEnabled && !lanHost ? "没有可用的私有局域网 IPv4 地址。" : null,
+    error: null,
   },
 };
 const conversations = createConversations({ store, codex });
@@ -80,32 +69,27 @@ let shuttingDown = false;
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => void shutdown(0));
 }
+process.on("message", (message) => {
+  if (message?.type === "codexlan:shutdown") void shutdown(0);
+});
 
 function createWorkspaceServer() {
   return createServer(workspaceApplication);
 }
 
 async function startHttpServers() {
-  const local = await listen(createWorkspaceServer(), "127.0.0.1", localPort);
-  listenerState.local = { status: "ready", url: local.url, error: null };
-  httpServers.push(local.server);
-
+  const shared = await listen(createWorkspaceServer(), listenHost, port);
+  listenerState.local = { status: "ready", url: `http://127.0.0.1:${port}`, error: null };
   if (lanHost) {
-    try {
-      const lan = await listen(createWorkspaceServer(), lanHost, port);
-      listenerState.lan = { enabled: true, status: "ready", url: lan.url, error: null };
-      httpServers.push(lan.server);
-    } catch (error) {
-      listenerState.lan = { enabled: true, status: "unavailable", url: null, error: listenerErrorMessage(error, lanHost, port) };
-      process.stderr.write(`[web] ${listenerState.lan.error}\n`);
-    }
+    listenerState.lan = { enabled: true, status: "ready", url: `http://${lanHost}:${port}`, error: null };
   }
+  httpServers.push(shared.server);
 
   console.log("\nCodexLAN 已启动。");
-  console.log(`默认项目目录：${workspace}`);
+  if (serverConfig.configPath) console.log(`配置文件：${serverConfig.configPath}`);
+  console.log(`工作区根目录：${workspaceRoot}`);
   console.log(`本机工作台：${listenerState.local.url}`);
   if (listenerState.lan.url) console.log(`局域网地址：${listenerState.lan.url}`);
-  else if (listenerState.lan.enabled) console.log(`局域网访问未启动：${listenerState.lan.error}`);
   console.log("账号隔离已启用：仍请仅在可信 Private 局域网使用。\n");
 }
 
@@ -137,6 +121,9 @@ function createWorkspaceApplication() {
   const application = express();
   application.disable("x-powered-by");
   application.use((request, response, next) => {
+    if (!allowedListenerAddresses.has(normalizeSocketAddress(request.socket.localAddress))) {
+      return json(response, 403, { error: "这个网络接口不允许访问 CodexLAN。" });
+    }
     request.codexUrl = new URL(request.originalUrl, `http://${request.headers.host || "localhost"}`);
     response.codexAcceptsGzip = /(?:^|,)\s*gzip(?:\s*;|\s*,|$)/i.test(request.headers["accept-encoding"] || "");
     setSecurityHeaders(response);
@@ -145,7 +132,7 @@ function createWorkspaceApplication() {
   registerHealthRoutes(application);
   registerAccounts(application, { auth, store, onSessionsRevoked: conversations.closeUserEventStreams });
   registerRuntimeRoutes(application);
-  registerProjects(application, { store, workspace, conversations });
+  registerProjects(application, { store, conversations });
   conversations.registerRoutes(application);
   application.use("/api", (request, response) => json(response, 404, { error: "找不到 API。" }));
   application.use((request, response) => serveStatic(request.codexUrl.pathname, request, response));
@@ -188,7 +175,7 @@ function registerRuntimeRoutes(application) {
     codexAgent: codex.agent,
     codexError: codex.error,
     listeners: listenerState,
-    defaultWorkspace: workspace,
+    workspaceRoot,
   }));
 }
 
@@ -239,40 +226,7 @@ function text(response, status, body) {
   response.end(body);
 }
 
-function readPort(name, fallback, minimum = 1) {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  if (!/^\d+$/.test(value)) throw new Error(`${name} must be an integer from ${minimum} to 65535.`);
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > 65535) {
-    throw new Error(`${name} must be an integer from ${minimum} to 65535.`);
-  }
-  return parsed;
-}
-
-function selectListenerAddress(requestedHost) {
-  if (requestedHost) return requestedHost;
-  const addresses = Object.values(networkInterfaces()).flat().filter((address) => address?.family === "IPv4" && !address.internal && isPrivateIpv4(address.address));
-  const preferred = addresses.find((address) => address.address.startsWith("192.168.")) || addresses.find((address) => address.address.startsWith("10.")) || addresses[0];
-  return preferred?.address || null;
-}
-
-function listenerErrorMessage(error, address, requestedPort) {
-  if (error?.code === "EADDRINUSE") return `局域网端口 ${requestedPort} 已被占用。`;
-  if (error?.code === "EADDRNOTAVAIL") return `局域网地址 ${address} 当前不可用。`;
-  if (error?.code === "EACCES") return `没有权限监听局域网端口 ${requestedPort}。`;
-  return `局域网访问未启动：${error?.message || "未知错误"}`;
-}
-
-function isLoopbackIpv4(address) {
-  const octets = typeof address === "string" ? address.split(".").map((part) => Number(part)) : [];
-  return octets.length === 4
-    && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
-    && octets[0] === 127;
-}
-
-function isPrivateIpv4(address) {
-  const octets = typeof address === "string" ? address.split(".").map((part) => Number(part)) : [];
-  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  return octets[0] === 10 || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] === 192 && octets[1] === 168);
+function normalizeSocketAddress(address) {
+  if (address === "::1") return "127.0.0.1";
+  return String(address || "").replace(/^::ffff:/, "");
 }

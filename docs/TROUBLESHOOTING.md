@@ -14,19 +14,19 @@ The service requires Node 20 or newer. Complete `codex login` before using Codex
 
 ## No private IPv4 address was found
 
-The local workbench remains available. LAN access stays unavailable until the machine has an RFC1918 private IPv4 address (`10.x`, `172.16-31.x`, or `192.168.x`). Connect to the intended trusted LAN, then restart the Node service. VPN route priority can change which adapter is selected.
+With `host: "auto"`, startup requires an RFC1918 private IPv4 address (`10.x`, `172.16-31.x`, or `192.168.x`). Connect to the intended trusted LAN, then run `npm run service:restart`. Set `host` to `127.0.0.1` for an explicitly local-only service.
 
 ## The page opens on the server computer but not another device
 
 - Confirm both devices use the same trusted network and the exact LAN address shown by CodexLAN.
 - Confirm Windows labels that network as Private.
 - Check guest Wi-Fi or client isolation settings.
-- Run `Get-NetTCPConnection -LocalPort 8687 -State Listen` on the server computer.
-- If necessary, add an inbound TCP rule for port `8687` to the Windows Private profile; do not create a Public-profile rule.
+- Run `Get-NetTCPConnection -LocalPort 8688 -State Listen` on the server computer.
+- If necessary, add an inbound TCP rule for port `8688` to the Windows Private profile; do not create a Public-profile rule.
 
 ## The server exits during startup
 
-Inspect the terminal output from `npm start`. Remove secrets and personal paths before sharing excerpts. Check the first reported startup error, the configured project root, and the selected LAN port.
+Run `npm run service:status`, then run `npm run service:log`. Check the first startup error, configured data directory, and shared port.
 
 Run:
 
@@ -46,7 +46,7 @@ Check that the browser uses the exact service origin and is not switching betwee
 
 ## Projects or files are missing
 
-Projects created through the UI live under the configured workspace root. Confirm `CODEX_WORKDIR` points to the expected root, the service user can access it, and the directory was not moved. Deleting a project record does not delete its files, but moving a directory can invalidate its stored path.
+Each project record stores its own absolute path. Confirm the service user can access that exact directory and that it was not moved. Automatically managed user projects live below `<workspaceRoot>/<username>/`. Deleting a project record does not delete its files, but moving a directory can invalidate its stored path.
 
 ## A Codex CLI update changed behavior
 

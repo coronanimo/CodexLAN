@@ -8,18 +8,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const fixturePath = join(repositoryRoot, "test-support", "fake-app-server.mjs");
-const packageVersion = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8")).version;
-
-test("keeps the loopback service available when the LAN port is occupied", { timeout: 20_000 }, async (context) => {
+const fixturePath = join(repositoryRoot, "test", "fixtures", "fake-app-server.mjs");
+test("fails clearly when the single shared port is occupied", { timeout: 20_000 }, async (context) => {
   const privateAddress = privateIpv4Address();
   if (!privateAddress) return context.skip("No private IPv4 address is available on this test machine.");
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), "codex-lan-server-lifecycle-"));
   const workspace = join(temporaryRoot, "workspace");
   const data = join(temporaryRoot, "state");
-  const localPort = await availableLoopbackPort();
-  const origin = `http://127.0.0.1:${localPort}`;
   const blocker = createServer();
   await Promise.all([mkdir(workspace), mkdir(data)]);
   const replacementProjectPath = join(workspace, "admin", "默认项目");
@@ -78,16 +74,15 @@ test("keeps the loopback service available when the LAN port is occupied", { tim
     sessions: {},
     legacyProjectIds: [],
   }, null, 2)}\n`, "utf8");
-  await new Promise((resolveListen, rejectListen) => blocker.once("error", rejectListen).listen(0, privateAddress, resolveListen));
+  await new Promise((resolveListen, rejectListen) => blocker.once("error", rejectListen).listen(0, "0.0.0.0", resolveListen));
   const occupiedPort = blocker.address().port;
-  const child = spawn(process.execPath, ["server.mjs"], {
+  const child = spawn(process.execPath, ["server/index.mjs"], {
     cwd: repositoryRoot,
     env: {
       ...process.env,
       NODE_ENV: "test",
       CODEX_WEB_HOST: privateAddress,
       CODEX_WEB_PORT: String(occupiedPort),
-      CODEX_LOCAL_PORT: String(localPort),
       CODEX_WORKDIR: workspace,
       CODEX_WEB_DATA_DIR: data,
       CODEX_TEST_APP_SERVER: fixturePath,
@@ -100,14 +95,9 @@ test("keeps the loopback service available when the LAN port is occupied", { tim
   child.stderr.on("data", (chunk) => { errors += chunk; });
 
   try {
-    const health = await waitForLanState(origin, child, () => errors);
-    assert.equal(health.appVersion, packageVersion);
-    assert.equal(health.nodeVersion, process.version.slice(1));
-    assert.equal(health.nodeArchitecture, process.arch);
-    assert.equal(health.codexAgent, "codex-lan-http-test");
-    assert.equal(health.listeners.local.status, "ready");
-    assert.equal(health.listeners.lan.status, "unavailable");
-    assert.match(health.listeners.lan.error, new RegExp(`端口 ${occupiedPort} 已被占用`));
+    await waitForChildExit(child, () => errors);
+    assert.equal(child.exitCode, 1);
+    assert.match(errors, /EADDRINUSE|address already in use/);
     const migratedState = JSON.parse(await readFile(join(data, "workspace-state.json"), "utf8"));
     assert.equal(migratedState.version, 13);
     assert.equal(migratedState.projects[0].path, workspace);
@@ -135,10 +125,11 @@ test("keeps first-time setup and project state available when Codex is not insta
   const port = await availableLoopbackPort();
   const origin = `http://127.0.0.1:${port}`;
   await Promise.all([mkdir(workspace), mkdir(data)]);
-  const child = spawn(process.execPath, ["server.mjs"], {
+  const child = spawn(process.execPath, ["server/index.mjs"], {
     cwd: repositoryRoot,
     env: {
       ...process.env,
+      NODE_ENV: "test",
       CODEX_WEB_HOST: "127.0.0.1",
       CODEX_WEB_PORT: String(port),
       CODEX_WORKDIR: workspace,
@@ -219,25 +210,24 @@ async function waitForHealth(origin, child, readErrors) {
   throw new Error(`Timed out waiting for missing-Codex health: ${readErrors()}`);
 }
 
-async function waitForLanState(origin, child, readErrors) {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`LAN lifecycle test server exited early: ${readErrors()}`);
-    try {
-      const response = await fetch(`${origin}/api/health`);
-      if (response.status === 200) {
-        const health = await response.json();
-        if (health.listeners?.lan?.status === "unavailable" && health.codexStatus === "ready") return health;
-      }
-    } catch {}
-    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-  }
-  throw new Error(`Timed out waiting for LAN lifecycle state: ${readErrors()}`);
-}
-
 function onceExit(child) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolveExit) => child.once("exit", resolveExit));
+}
+
+function waitForChildExit(child, readErrors) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolveExit, rejectExit) => {
+    const timer = setTimeout(() => {
+      child.removeListener("exit", finish);
+      rejectExit(new Error(`Server did not reject occupied port: ${readErrors()}`));
+    }, 10_000);
+    const finish = () => {
+      clearTimeout(timer);
+      resolveExit();
+    };
+    child.once("exit", finish);
+  });
 }
 
 async function stopChild(child) {

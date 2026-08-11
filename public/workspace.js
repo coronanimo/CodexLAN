@@ -4,6 +4,12 @@ const DEFAULT_MODEL_ID = "gpt-5.6-sol";
 
 export { isActiveThreadStatus, threadStatusValue };
 
+export function threadDisplayName(thread) {
+  return (typeof thread?.name === "string" && thread.name.trim())
+    || (typeof thread?.preview === "string" && thread.preview.trim())
+    || "未命名聊天";
+}
+
 export function isActiveThreadRuntime(runtime) {
   return Boolean(runtime?.activeTurnId) || isActiveThreadStatus(runtime?.status);
 }

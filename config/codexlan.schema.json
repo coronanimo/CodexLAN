@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codexlan.local/codexlan.schema.json",
+  "title": "CodexLAN server configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "host": {
+      "description": "Use auto to select a private IPv4 address.",
+      "type": ["string", "null"]
+    },
+    "workspaceRoot": {
+      "description": "Shared workspace boundary. Managed user projects are created below this directory.",
+      "type": "string",
+      "minLength": 1
+    },
+    "dataRoot": { "type": "string", "minLength": 1 },
+    "codexBin": { "type": ["string", "null"] }
+  }
+}

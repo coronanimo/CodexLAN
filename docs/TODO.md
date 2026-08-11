@@ -5,8 +5,7 @@ This file lists unfinished project-level work.
 ## Product
 
 - Finish splitting `public/app.js` into the existing workspace, layout, composer, plan, desktop, and mobile modules. Conversation rendering, live execution, dispatch, and account settings still need clear owners.
-- Add Goal support after Plan and context compaction are stable against the installed Codex App Server.
-- Add a shared slash-command entry for Plan, Goal, and context compaction.
+- Add a shared slash-command picker for Plan, Goal, and context compaction.
 - Improve keyboard navigation, screen-reader labels, and mobile-browser regression coverage.
 
 ## Reliability

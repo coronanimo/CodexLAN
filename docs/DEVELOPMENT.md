@@ -15,11 +15,12 @@ Use separate `CODEX_WEB_DATA_DIR` and `CODEX_WORKDIR` directories for manual tes
 
 ## Source layout
 
-- `server.mjs` starts the HTTP service and assembles the server modules.
-- `server/` contains accounts, projects, conversations, persistence, HTTP helpers, and the App Server client.
+- `server/index.mjs` starts the HTTP service and assembles the server modules.
+- `server/service.mjs` controls the background supervisor.
+- `server/` also contains accounts, projects, conversations, persistence, HTTP helpers, and the App Server client.
 - `public/` contains the shared browser application and its desktop and mobile layouts.
 - `android/` contains the Android WebView client.
-- `test/` contains Node tests; `test-support/` contains the fake App Server used by integration tests.
+- `test/` contains Node tests and `test/fixtures/` contains the fake App Server used by integration tests.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for runtime boundaries and data ownership.
 

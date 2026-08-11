@@ -26,7 +26,7 @@ Use separate Windows users, service instances, Codex sessions, and workspace roo
 
 The built-in listener uses plain HTTP and binds to a private IPv4 address selected from the default route. Plain HTTP is suitable only for a trusted LAN. It does not provide encryption against other devices on that network.
 
-For any access outside that LAN, terminate TLS with a trusted reverse proxy, restrict inbound access, preserve the original `Host` and scheme correctly, and test the same-origin and secure-cookie behavior. Never forward port `8687` directly to the public internet.
+For any access outside that LAN, terminate TLS with a trusted reverse proxy, restrict inbound access, preserve the original `Host` and scheme correctly, and test the same-origin and secure-cookie behavior. Never forward the configured CodexLAN port directly to the public internet.
 
 The child `codex app-server` is spawned over local stdio; the project does not expose app-server's experimental WebSocket listener.
 
@@ -34,9 +34,9 @@ The child `codex app-server` is spawned over local stdio; the project does not e
 
 Never commit or distribute:
 
-- `data/`, `workspace/`, `.codex-remote-attachments/`, `.codexlan/`
+- `data/`, `logs/`, `.codex-remote-attachments/`, `.codexlan/`
 - Codex credentials, sessions, configuration, chat history, or account data
-- Real user workspaces, local SDKs, `.tools/`, `android/local.properties`
+- Real user workspaces, local SDKs, `android/.tools/`, `android/local.properties`
 - APK/AAB files, signing keys, Gradle outputs, release archives, or downloaded attachments
 - Passwords, tokens, private addresses, local absolute paths, or diagnostic logs
 

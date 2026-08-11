@@ -10,7 +10,7 @@ import { httpError, mergeSettings, samePath } from "./workspace-store.mjs";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
-export function registerProjects(application, { store, workspace, conversations }) {
+export function registerProjects(application, { store, conversations }) {
   application.get("/api/projects", async (request, response) => {
     json(response, 200, { projects: await store.listProjects(request.identity.user.id) });
   });
@@ -42,7 +42,7 @@ export function registerProjects(application, { store, workspace, conversations 
 
   application.get("/api/admin/files/download", async (request, response) => {
     requireAdmin(request.identity.user);
-    await sendAdminFile(response, request.codexUrl.searchParams.get("path"), workspace, request.method === "HEAD");
+    await sendAdminFile(response, request.codexUrl.searchParams.get("path"), request.method === "HEAD");
   });
 
   application.patch("/api/projects/:projectId", async (request, response) => {
@@ -177,7 +177,7 @@ function validateUploadFileName(value) {
   return fileName;
 }
 
-async function sendAdminFile(response, requestedPath, workspace, headOnly = false) {
+async function sendAdminFile(response, requestedPath, headOnly = false) {
   if (typeof requestedPath !== "string" || !requestedPath.trim()) throw httpError(400, "缺少要读取的文件路径。");
   if (!isAbsolute(requestedPath.trim())) throw httpError(400, "文件路径必须是绝对路径。");
   const candidate = resolve(requestedPath.trim());

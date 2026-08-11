@@ -152,6 +152,7 @@ export class WorkspaceStore {
       this.threadProjects = state.threadProjects;
       this.threadAccesses = state.threadAccesses;
       this.sessions = state.sessions;
+      await repairMemberProjectPaths(this.projects, this.users, this.workspace);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -885,11 +886,38 @@ function managedUserRoot(workspace, username) {
   return join(workspace, normalizeUsername(username));
 }
 
-function requireStrictPathInside(root, candidate, message) {
-  const relativePath = relative(resolve(root), resolve(candidate));
-  if (!relativePath || relativePath.startsWith(`..${sep}`) || relativePath === ".." || isAbsolute(relativePath)) {
-    throw httpError(403, message);
+async function repairMemberProjectPaths(projects, users, workspace) {
+  for (const project of projects) {
+    const owner = users.find((user) => user.id === project.ownerId);
+    if (!owner || owner.role === "admin") continue;
+    const userRoot = managedUserRoot(workspace, owner.username);
+    if (isStrictPathInside(userRoot, project.path)) continue;
+    const target = join(userRoot, safeProjectDirectoryName(project.name));
+    if (!projectDirectoryAvailable(target)) {
+      throw new Error(`成员项目“${project.name}”不在账号目录中，且迁移目标不存在：${target}`);
+    }
+    if (projects.some((candidate) => candidate.id !== project.id && samePath(candidate.path, target))) {
+      throw new Error(`成员项目“${project.name}”的迁移目标已被其他项目占用：${target}`);
+    }
+    const [resolvedUserRoot, resolvedTarget] = await Promise.all([realpath(userRoot), realpath(target)]);
+    if (!isStrictPathInside(resolvedUserRoot, resolvedTarget)) {
+      throw new Error(`成员项目“${project.name}”的迁移目标越过账号目录：${target}`);
+    }
+    project.path = resolvedTarget;
+    project.updatedAt = new Date().toISOString();
   }
+}
+
+function isStrictPathInside(root, candidate) {
+  const relativePath = relative(resolve(root), resolve(candidate));
+  return Boolean(relativePath)
+    && !relativePath.startsWith(`..${sep}`)
+    && relativePath !== ".."
+    && !isAbsolute(relativePath);
+}
+
+function requireStrictPathInside(root, candidate, message) {
+  if (!isStrictPathInside(root, candidate)) throw httpError(403, message);
 }
 
 function isRecord(value) {

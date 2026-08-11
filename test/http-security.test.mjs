@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const fixturePath = join(repositoryRoot, "test-support", "fake-app-server.mjs");
+const fixturePath = join(repositoryRoot, "test", "fixtures", "fake-app-server.mjs");
 
 test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path boundaries", { timeout: 30_000 }, async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "codex-lan-http-test-"));
@@ -21,7 +21,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
   await Promise.all([mkdir(workspace), mkdir(data), writeFile(outsideFile, "must-not-leak", "utf8")]);
   const port = await availablePort();
   const origin = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["server.mjs"], {
+  const child = spawn(process.execPath, ["server/index.mjs"], {
     cwd: repositoryRoot,
     env: {
       ...process.env,

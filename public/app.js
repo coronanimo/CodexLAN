@@ -3,11 +3,12 @@ import { renderMarkdownDocument } from "./markdown-preview.js";
 import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
 import { commandDisplayText, commandOutputTail, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries } from "./workspace.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName } from "./workspace.js";
 import { appendAnsiOutput, renderAnsiOutput } from "./ansi-output.js";
-import { diffLineStats, renderFileChanges } from "./diff-output.js";
+import { diffLineStats, renderFileChanges, unifiedDiffChanges } from "./diff-output.js";
 import { clipboardImageFiles, clipboardImageName, isMobileComposer, messageWithAttachments, resizeComposerInput } from "./composer.js";
 import { createTurnPlanView, planShortcut, updateTurnPlanView } from "./plan.js";
+import { goalPresentation, goalShortcut, isActiveGoal } from "./goal.js";
 import { createWorkbenchLayout } from "./layout.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -72,6 +73,7 @@ const ui = {
   composerEffort: $("#composer-effort-select"),
   composerTier: $("#composer-tier-select"),
   planMode: $("#plan-mode"),
+  goalMode: $("#goal-mode"),
   guide: $("#mode-guide"),
   queue: $("#mode-queue"),
   composer: $("#composer"),
@@ -145,6 +147,17 @@ const ui = {
   threadForm: $("#thread-form"),
   threadNameInput: $("#thread-name-input"),
   threadFormError: $("#thread-form-error"),
+  goalDialog: $("#goal-dialog"),
+  goalForm: $("#goal-form"),
+  goalSummary: $("#goal-summary"),
+  goalStatusLabel: $("#goal-status-label"),
+  goalUsage: $("#goal-usage"),
+  goalObjective: $("#goal-objective"),
+  goalTokenBudget: $("#goal-token-budget"),
+  goalFormError: $("#goal-form-error"),
+  goalClear: $("#goal-clear"),
+  goalToggle: $("#goal-toggle"),
+  goalSave: $("#goal-save"),
   queueEditDialog: $("#queue-edit-dialog"),
   queueEditForm: $("#queue-edit-form"),
   queueEditInput: $("#queue-edit-input"),
@@ -186,6 +199,8 @@ const state = {
   queueSnapshots: new Map(),
   queueGuiding: new Set(),
   compactingThreads: new Set(),
+  goalDialogThreadId: null,
+  goalMutating: false,
   userInputRequests: new Map(),
   editingQueueItemId: null,
   mode: "queue",
@@ -217,7 +232,7 @@ const state = {
   assetVersion: null,
   codexReady: false,
   codexStatusTimer: null,
-  defaultWorkspace: null,
+  workspaceRoot: null,
 };
 
 const layout = createWorkbenchLayout({ ui, state, renderRunStrip, renderRecentThreads });
@@ -231,6 +246,7 @@ const {
 const platformEntry = await import(isMobileComposer(navigator) ? "./mobile.js" : "./desktop.js");
 const platform = platformEntry.bindPlatformInteractions({ ui, cancelScrollCommand, closeTopbarOverlays });
 const { closeSidebar } = platform;
+const compactSelects = bindCompactSelects();
 
 boot().catch((error) => {
   if (!state.user) {
@@ -304,7 +320,7 @@ async function loadCollaborationModes() {
     state.collaborationModes = result.modes || [];
   } catch (error) {
     state.collaborationModes = [];
-    showActivity(`Plan 模式暂不可用：${error.message}`, true);
+    showActivity(`规划模式暂不可用：${error.message}`, true);
   }
 }
 
@@ -361,7 +377,7 @@ function renderContextUsage() {
   const percent = Math.round(usage.usedPercent);
   ui.contextUsageFill.style.width = `${usage.usedPercent}%`;
   ui.contextUsageLabel.textContent = `窗口 ${percent}%`;
-  ui.contextUsage.title = `当前上下文 ${usage.usedTokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens`;
+  ui.contextUsage.title = `当前上下文 ${usage.usedTokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} 令牌`;
   ui.contextUsage.classList.toggle("warn", percent >= 75 && percent < 90);
   ui.contextUsage.classList.toggle("critical", percent >= 90);
 }
@@ -563,6 +579,7 @@ function clearThread() {
   renderQueue();
   updateComposer();
   renderSettings();
+  renderGoalButton();
   ui.jumpLatest.hidden = true;
   renderContextUsage();
 }
@@ -733,12 +750,14 @@ function renderThreads() {
     if (thread.id === state.selectedThreadId) button.classList.add("active");
     if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
     if (isActiveThreadRuntime(thread.runtime)) button.classList.add("running");
+    else if (isActiveGoal(thread.goal)) button.classList.add("goal-active");
     const title = document.createElement("strong");
-    title.textContent = thread.name || "未命名聊天";
+    title.textContent = threadDisplayName(thread);
     const details = document.createElement("small");
     const queueCount = thread.queueCount || 0;
     if (thread.id === state.threadSelectionTargetId) details.textContent = "打开中…";
     else if (isActiveThreadRuntime(thread.runtime)) setElapsedDisplay(details, "执行中", thread.runtime);
+    else if (isActiveGoal(thread.goal)) details.textContent = "目标续跑中";
     else details.textContent = queueCount ? `队列 ${queueCount}` : "空闲";
     button.append(title, details);
     button.addEventListener("click", () => selectThread(thread.id).catch(showError));
@@ -754,9 +773,10 @@ function renderRecentThreads() {
     project.id,
     project.name,
     thread.id,
-    thread.name,
+    threadDisplayName(thread),
     thread.accessedAt,
     isActiveThreadRuntime(thread.runtime),
+    thread.goal?.status || null,
     thread.id === state.selectedThreadId,
     thread.id === state.threadSelectionTargetId,
   ]));
@@ -771,8 +791,9 @@ function renderRecentThreads() {
     if (thread.id === state.selectedThreadId) button.classList.add("active");
     if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
     if (isActiveThreadRuntime(thread.runtime)) button.classList.add("running");
+    else if (isActiveGoal(thread.goal)) button.classList.add("goal-active");
     const title = document.createElement("strong");
-    title.textContent = thread.name || "未命名聊天";
+    title.textContent = threadDisplayName(thread);
     const projectName = document.createElement("small");
     projectName.textContent = thread.id === state.threadSelectionTargetId ? `${project.name} · 打开中…` : project.name;
     button.append(title, projectName);
@@ -791,7 +812,7 @@ function renderRunStrip() {
   const running = [];
   for (const project of state.projects) {
     for (const thread of state.threads.get(project.id) || []) {
-      if (isActiveThreadRuntime(thread.runtime) || thread.queueCount) running.push({ project, thread });
+      if (isActiveThreadRuntime(thread.runtime) || isActiveGoal(thread.goal) || thread.queueCount) running.push({ project, thread });
     }
   }
   if (!running.length) {
@@ -803,10 +824,13 @@ function renderRunStrip() {
     return;
   }
   const activeCount = running.filter(({ thread }) => isActiveThreadRuntime(thread.runtime)).length;
+  const goalCount = running.filter(({ thread }) => !isActiveThreadRuntime(thread.runtime) && isActiveGoal(thread.goal)).length;
   const queuedCount = running.reduce((total, { thread }) => total + (thread.queueCount || 0), 0);
   ui.runStatus.hidden = false;
   ui.runStatus.classList.toggle("queue-only", activeCount === 0);
-  const statusText = activeCount ? `${activeCount} 个聊天正在运行` : `${queuedCount} 个任务正在排队`;
+  const statusText = activeCount
+    ? `${activeCount} 个聊天正在运行`
+    : goalCount ? `${goalCount} 个目标持续执行中` : `${queuedCount} 个任务正在排队`;
   ui.runStatusLabel.textContent = statusText;
   ui.runStatus.setAttribute("aria-label", statusText);
   ui.runStatus.title = statusText;
@@ -818,12 +842,13 @@ function renderRunStrip() {
     button.className = "run-card";
     if (thread.id === state.selectedThreadId) button.classList.add("active");
     const dot = document.createElement("span");
-    dot.className = `run-card-dot${isActiveThreadRuntime(thread.runtime) ? "" : " queue"}`;
+    dot.className = `run-card-dot${isActiveThreadRuntime(thread.runtime) ? "" : isActiveGoal(thread.goal) ? " goal" : " queue"}`;
     const words = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = `${project.name} · ${thread.name || "未命名聊天"}`;
+    title.textContent = `${project.name} · ${threadDisplayName(thread)}`;
     const detail = document.createElement("small");
     if (isActiveThreadRuntime(thread.runtime)) setElapsedDisplay(detail, "正在执行", thread.runtime);
+    else if (isActiveGoal(thread.goal)) detail.textContent = thread.queueCount ? `目标持续执行 · 队列 ${thread.queueCount}` : "目标持续执行中";
     else detail.textContent = `等待队列 ${thread.queueCount}`;
     words.append(title, detail);
     button.append(dot, words);
@@ -841,10 +866,10 @@ function renderSettings() {
   const settings = thread?.settings || {};
   const selectedModel = selectedModelForThread(thread);
   fillOptions(ui.model, state.models, (model) => model.displayName || model.id, selectedModel?.id, "当前模型不可用");
-  fillOptions(ui.composerModel, state.models, compactModelLabel, selectedModel?.id, "No model");
+  fillOptions(ui.composerModel, state.models, compactModelLabel, selectedModel?.id, "没有可用模型");
   const efforts = selectedModel?.supportedReasoningEfforts || [];
   const selectedEffort = settings.effort || selectedModel?.defaultReasoningEffort || efforts[0]?.reasoningEffort;
-  fillOptions(ui.effort, efforts, (effort) => reasoningLabel(effort.reasoningEffort), selectedEffort, "Default");
+  fillOptions(ui.effort, efforts, (effort) => reasoningLabel(effort.reasoningEffort), selectedEffort, "默认");
   fillCompactEffortOptions(ui.composerEffort, efforts, selectedEffort);
   const tiers = selectedModel?.serviceTiers || [];
   const selectedTier = settings.serviceTier || "";
@@ -856,8 +881,8 @@ function renderSettings() {
   ui.planMode.hidden = !planAvailable;
   ui.planMode.classList.toggle("active", planActive);
   ui.planMode.setAttribute("aria-pressed", String(planActive));
-  ui.planMode.textContent = planActive ? "计划中" : "计划";
-  ui.planMode.title = planActive ? "退出 Plan 模式" : "进入 Plan 模式；也可输入 /plan";
+  ui.planMode.setAttribute("aria-label", planActive ? "退出规划模式" : "进入规划模式");
+  ui.planMode.title = planActive ? "退出规划模式" : "进入规划模式；也可输入 /plan";
   ui.tierField.hidden = !selectedModel;
   const disabled = !thread || !state.models.length;
   ui.model.disabled = disabled;
@@ -866,15 +891,16 @@ function renderSettings() {
   ui.composerEffort.disabled = disabled || !efforts.length;
   ui.tier.disabled = disabled || !tiers.length;
   ui.composerTier.disabled = disabled || !tiers.length;
+  compactSelects.refresh();
   ui.summary.disabled = !thread;
   ui.planMode.disabled = !thread || isActiveThreadRuntime(currentRuntime());
-  ui.configThreadName.textContent = thread ? `当前聊天：${thread.name || "未命名聊天"}` : "请先选择聊天。";
+  ui.configThreadName.textContent = thread ? `当前聊天：${threadDisplayName(thread)}` : "请先选择聊天。";
   const selectedTierEntry = tiers.find((tier) => tier.id === selectedTier);
   ui.tierDescription.textContent = selectedTierEntry
-    ? `${serviceTierLabel(selectedTierEntry)}: ${selectedTierEntry.description || "Accelerated service tier."}`
+    ? `当前速度档位：${serviceTierLabel(selectedTierEntry)}。`
     : tiers.length
-      ? "Standard (Default): no accelerated service tier requested."
-      : "This model does not offer optional service tiers.";
+      ? "标准（默认）：未请求加速服务档位。"
+      : "该模型不提供可选速度档位。";
 }
 
 function selectedModelForThread(thread) {
@@ -900,7 +926,7 @@ function fillOptions(select, entries, label, selectedId, emptyLabel) {
 
 function fillTierOptions(select, tiers, selectedId) {
   select.replaceChildren();
-  select.append(new Option("Standard (Default)", "", false, !selectedId));
+  select.append(new Option("标准（默认）", "", false, !selectedId));
   for (const tier of tiers) {
     const option = new Option(serviceTierLabel(tier), tier.id, false, tier.id === selectedId);
     select.append(option);
@@ -909,14 +935,14 @@ function fillTierOptions(select, tiers, selectedId) {
 
 function fillCompactTierOptions(select, tiers, selectedId) {
   select.replaceChildren();
-  select.append(new Option("Standard", "", false, !selectedId));
+  select.append(new Option("标准", "", false, !selectedId));
   for (const tier of tiers) select.append(new Option(serviceTierLabel(tier), tier.id, false, tier.id === selectedId));
 }
 
 function fillCompactEffortOptions(select, efforts, selectedId) {
   select.replaceChildren();
   if (!efforts.length) {
-    select.append(new Option("Reasoning", ""));
+    select.append(new Option("推理", ""));
     return;
   }
   for (const effort of efforts) {
@@ -926,26 +952,78 @@ function fillCompactEffortOptions(select, efforts, selectedId) {
 }
 
 function reasoningLabel(effort) {
-  return ({ low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max", ultra: "Ultra" })[effort] || "Default";
+  return ({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高", ultra: "极限" })[effort] || "默认";
 }
 
 function compactModelLabel(model) {
-  const label = String(model?.displayName || model?.id || "Model");
+  const label = String(model?.displayName || model?.id || "模型");
   return label.replace(/^gpt[-\s]*/i, "");
 }
 
 function serviceTierLabel(tier) {
-  const name = String(tier?.name || "");
-  if (name && /^[\x20-\x7e]+$/.test(name)) return name;
-  const id = String(tier?.id || "");
-  if (id) return id.slice(0, 1).toUpperCase() + id.slice(1);
-  return "Service";
+  const value = String(tier?.id || tier?.name || "").toLowerCase();
+  return ({ standard: "标准", fast: "快速", priority: "优先", flex: "弹性" })[value] || "服务档";
+}
+
+function bindCompactSelects() {
+  const controls = [...document.querySelectorAll("[data-compact-select]")].map((root) => {
+    const select = root.querySelector("select");
+    const trigger = root.querySelector(".compact-select-trigger");
+    const menu = root.querySelector(".compact-select-menu");
+    const label = root.getAttribute("aria-label") || "选项";
+    trigger.setAttribute("aria-label", label);
+    const close = () => {
+      menu.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+    };
+    const refresh = () => {
+      const selected = select.selectedOptions[0];
+      trigger.querySelector("span").textContent = selected?.textContent || label;
+      trigger.disabled = select.disabled;
+      menu.replaceChildren();
+      for (const option of select.options) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.role = "option";
+        item.textContent = option.textContent;
+        item.disabled = option.disabled;
+        item.setAttribute("aria-selected", String(option.selected));
+        item.addEventListener("click", () => {
+          select.value = option.value;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+          refresh();
+          close();
+        });
+        menu.append(item);
+      }
+    };
+    trigger.addEventListener("click", () => {
+      const opening = menu.hidden;
+      controls.forEach((control) => control.close());
+      if (!opening || trigger.disabled) return;
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+    });
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      close();
+      trigger.focus();
+    });
+    select.addEventListener("change", refresh);
+    new MutationObserver(refresh).observe(select, { childList: true, subtree: true });
+    refresh();
+    return { root, close, refresh };
+  });
+  document.addEventListener("click", (event) => {
+    if (!controls.some((control) => control.root.contains(event.target))) controls.forEach((control) => control.close());
+  });
+  return { refresh: () => controls.forEach((control) => control.refresh()) };
 }
 
 function renderCurrentThread({ messages = true } = {}) {
   const thread = currentThread();
   if (!thread) return clearThread();
-  ui.threadName.textContent = thread.name || "未命名聊天";
+  ui.threadName.textContent = threadDisplayName(thread);
   ui.openRecentThreads.disabled = false;
   renderRecentThreads();
   renderThreadActions();
@@ -954,6 +1032,7 @@ function renderCurrentThread({ messages = true } = {}) {
   renderQueue();
   updateComposer();
   renderSettings();
+  renderGoalButton();
   renderContextUsage();
   syncElapsedTimer();
 }
@@ -962,14 +1041,27 @@ function renderThreadActions() {
   const thread = currentThread();
   const local = thread && isLocalThreadId(thread.id);
   const active = isActiveThreadRuntime(currentRuntime());
+  const goalActive = isActiveGoal(thread?.goal);
   const compacting = thread && state.compactingThreads.has(thread.id);
   const submitting = state.submittingMessage || (thread && state.submittingThreadIds.has(thread.id));
   const switching = Boolean(state.threadSelectionTargetId);
   ui.openThreadMenu.disabled = !thread || switching || submitting;
   ui.renameThread.disabled = !thread || switching || submitting;
-  ui.compactThread.disabled = !thread || local || active || compacting || submitting || !state.codexReady || switching;
+  ui.compactThread.disabled = !thread || local || active || goalActive || compacting || submitting || !state.codexReady || switching;
   ui.compactThread.textContent = compacting ? "正在压缩上下文…" : "压缩上下文";
-  ui.deleteThread.disabled = !thread || active || compacting || submitting || switching;
+  ui.deleteThread.disabled = !thread || active || goalActive || compacting || submitting || switching;
+}
+
+function renderGoalButton() {
+  const thread = currentThread();
+  const presentation = goalPresentation(thread?.goal);
+  ui.goalMode.dataset.tone = presentation.tone;
+  ui.goalMode.classList.toggle("active", presentation.status === "active");
+  ui.goalMode.setAttribute("aria-pressed", String(presentation.status === "active"));
+  ui.goalMode.setAttribute("aria-label", presentation.exists ? presentation.label : "管理目标");
+  ui.goalMode.title = presentation.exists
+    ? `${presentation.label}：${presentation.objective}`
+    : "创建或管理目标；也可输入 /goal";
 }
 
 function renderConversation(turns) {
@@ -2248,16 +2340,17 @@ function renderQueue() {
   const runtimeIdentityPending = runtimeActive && !runtime.activeTurnId;
   for (const [index, item] of queue.entries()) {
     const row = ui.queueItemTemplate.content.firstElementChild.cloneNode(true);
-    row.querySelector(".queue-index").textContent = String(index + 1);
+    const queueIndex = row.querySelector(".queue-index");
+    queueIndex.textContent = String(index + 1);
     row.querySelector(".queue-text").textContent = item.text;
     const guideButton = row.querySelector('[data-action="guide"]');
     const guiding = state.queueGuiding.has(item.id);
     row.classList.toggle("guiding", guiding);
     if (guiding) row.setAttribute("aria-busy", "true");
-    row.querySelector(".queue-index").textContent = guiding ? "↗" : String(index + 1);
+    if (guiding) queueIndex.replaceChildren(iconElement("guide"));
     if (guiding) row.querySelector(".queue-text").dataset.status = "正在转入信息流";
     guideButton.disabled = !runtime.activeTurnId || guiding;
-    guideButton.textContent = guiding ? "…" : "↗";
+    guideButton.setAttribute("aria-busy", String(guiding));
     guideButton.title = runtimeIdentityPending ? "正在同步当前执行标识" : runtime.activeTurnId ? "转入当前信息流" : "当前没有运行中的任务";
     row.querySelector('[data-action="edit"]').disabled = guiding;
     row.querySelector('[data-action="up"]').disabled = guiding || index === 0;
@@ -2278,6 +2371,7 @@ function updateComposer() {
   const switching = Boolean(state.threadSelectionTargetId);
   const runtime = currentRuntime();
   const active = isActiveThreadRuntime(runtime);
+  const goalActive = isActiveGoal(currentThread()?.goal);
   const activeTurnReady = Boolean(runtime.activeTurnId);
   const hasInput = Boolean(ui.prompt.value.trim() || state.composerAttachments.length);
   const projectAvailable = currentProject()?.available !== false;
@@ -2285,11 +2379,13 @@ function updateComposer() {
   const guideAvailable = hasThread && activeTurnReady;
   if (state.mode === "guide" && !active) state.mode = "queue";
   ui.guide.classList.toggle("active", state.mode === "guide");
-  ui.guide.classList.toggle("guide-active", state.mode === "guide");
   ui.queue.classList.toggle("active", state.mode === "queue");
+  ui.guide.setAttribute("aria-checked", String(state.mode === "guide"));
+  ui.queue.setAttribute("aria-checked", String(state.mode === "queue"));
   ui.guide.disabled = !state.codexReady || !guideAvailable || switching;
   ui.queue.disabled = !state.codexReady || switching;
-  ui.planMode.disabled = !state.codexReady || !hasThread || active || switching;
+  ui.planMode.disabled = !state.codexReady || !hasThread || active || goalActive || switching;
+  ui.goalMode.disabled = !state.codexReady || !hasThread || state.materializingThread || state.submittingMessage || state.goalMutating || switching;
   renderThreadActions();
   ui.guide.title = active && !activeTurnReady ? "正在同步当前执行标识" : guideAvailable ? "向当前任务追加引导" : "当前没有运行中的任务";
   ui.prompt.disabled = !state.codexReady || !currentProject() || !projectAvailable || switching;
@@ -2301,24 +2397,24 @@ function updateComposer() {
   ui.send.hidden = showStop;
   ui.send.disabled = !state.codexReady || !currentProject() || !projectAvailable || state.materializingThread || state.submittingMessage || state.uploadingFiles || switching || !hasInput;
   if (state.materializingThread) {
-    ui.send.querySelector("span").textContent = "↑";
+    setSendIcon("send");
     ui.send.setAttribute("aria-label", "正在创建聊天");
     ui.send.title = "正在创建聊天";
     ui.send.classList.remove("guide");
   } else if (state.submittingMessage) {
-    ui.send.querySelector("span").textContent = state.mode === "guide" ? "↗" : "↑";
+    setSendIcon(state.mode === "guide" ? "guide" : "send");
     ui.send.setAttribute("aria-label", "正在发送");
     ui.send.title = "正在发送";
     ui.send.classList.toggle("guide", state.mode === "guide");
   } else if (state.mode === "guide") {
     ui.prompt.placeholder = activeTurnReady ? "补充目标、限制或修正方向…" : "正在同步当前执行，请稍候…";
-    ui.send.querySelector("span").textContent = "↗";
+    setSendIcon("guide");
     ui.send.setAttribute("aria-label", "发送引导");
     ui.send.title = "发送引导";
     ui.send.classList.add("guide");
   } else {
     ui.prompt.placeholder = state.codexReady ? "输入要交给 Codex 的任务…" : "连接 Codex 后可以开始对话";
-    ui.send.querySelector("span").textContent = "↑";
+    setSendIcon("send");
     const sendLabel = active ? "加入队列" : "发送";
     ui.send.setAttribute("aria-label", sendLabel);
     ui.send.title = sendLabel;
@@ -2330,6 +2426,26 @@ function updateComposer() {
 function chooseUploadFiles() {
   if (!currentProject() || state.uploadingFiles) return;
   ui.uploadFileInput.click();
+}
+
+function setSendIcon(kind) {
+  const icon = ui.send.querySelector("svg");
+  if (!icon) return;
+  icon.replaceChildren(iconPath(kind));
+}
+
+function iconElement(kind) {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.append(iconPath(kind));
+  return icon;
+}
+
+function iconPath(kind) {
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", kind === "guide" ? "m4 12 15-7-5 14-3-5zM11 14l3-3" : "M12 18V6m-4.5 4.5L12 6l4.5 4.5");
+  return path;
 }
 
 window.codexReceiveAndroidShare = () => {
@@ -2587,6 +2703,16 @@ async function submitPrompt(event) {
     const mode = state.mode;
     const activeTurnId = thread.runtime?.activeTurnId || null;
     let prompt = sourcePrompt;
+    const goalCommand = goalShortcut(sourcePrompt);
+    if (goalCommand) {
+      if (attachments.length) throw new Error("目标不能包含附件；请在目标文字中引用项目里的文件路径。");
+      await executeGoalCommand(goalCommand, project, thread);
+      if (ui.prompt.value === sourcePrompt) {
+        ui.prompt.value = "";
+        resizePrompt();
+      }
+      return;
+    }
     const shortcut = planShortcut(sourcePrompt);
     if (shortcut && !attachments.length) {
       const planActive = thread.settings?.collaborationMode === "plan";
@@ -2599,7 +2725,7 @@ async function submitPrompt(event) {
           ui.prompt.value = "";
           resizePrompt();
         }
-        showActivity(targetMode === "plan" ? "已进入 Plan 模式。" : "已退出 Plan 模式。", false);
+        showActivity(targetMode === "plan" ? "已进入规划模式。" : "已退出规划模式。", false);
         return;
       }
     }
@@ -2642,6 +2768,233 @@ async function submitPrompt(event) {
     ensureEventStream();
     updateComposer();
   }
+}
+
+async function executeGoalCommand(command, project, thread) {
+  if (command.action === "show") {
+    await openGoalDialog();
+    return;
+  }
+  if (command.action === "set") {
+    if (isLocalThreadId(thread.id)) thread = await materializeThread(project, thread, command.objective);
+    await patchThreadGoal(project, thread, { objective: command.objective, status: "active" });
+    showActivity("目标已启动，Codex 会持续执行到完成或暂停。", false);
+    return;
+  }
+  if (!thread.goal) throw new Error("当前聊天还没有目标。输入 /goal 加目标内容即可启动。");
+  if (command.action === "clear") {
+    await deleteThreadGoal(project, thread);
+    showActivity("目标已清除；当前任务不会被中断。", false);
+    return;
+  }
+  const status = command.action === "pause" ? "paused" : "active";
+  await patchThreadGoal(project, thread, { status });
+  showActivity(status === "paused" ? "目标已暂停；当前任务会继续到本轮结束。" : "目标已恢复。", false);
+}
+
+async function openGoalDialog() {
+  const thread = currentThread();
+  if (!thread) return;
+  state.goalDialogThreadId = thread.id;
+  ui.goalForm.dataset.dirty = "false";
+  ui.goalFormError.textContent = "";
+  renderGoalDialog({ syncFields: true });
+  if (!ui.goalDialog.open) {
+    ui.goalDialog.showModal();
+    ui.goalDialog.querySelector('button[value="cancel"]')?.focus({ preventScroll: true });
+  }
+  if (isLocalThreadId(thread.id)) return;
+  const project = currentProject();
+  if (!project) return;
+  try {
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/goal?projectId=${encodeURIComponent(project.id)}`);
+    if (state.goalDialogThreadId !== thread.id) return;
+    applyThreadGoal(thread.id, result.goal);
+    renderGoalDialog({ syncFields: ui.goalForm.dataset.dirty !== "true" });
+  } catch (error) {
+    if (state.goalDialogThreadId === thread.id && ui.goalDialog.open) ui.goalFormError.textContent = error.message;
+  }
+}
+
+function goalDialogThread() {
+  const threadId = state.goalDialogThreadId;
+  if (!threadId) return null;
+  const projectId = findProjectForThread(threadId);
+  return projectId ? findThread(projectId, threadId) : null;
+}
+
+function renderGoalDialog({ syncFields = false } = {}) {
+  const thread = goalDialogThread();
+  if (!thread) return;
+  const goal = thread.goal || null;
+  const presentation = goalPresentation(goal);
+  ui.goalSummary.dataset.tone = presentation.tone;
+  ui.goalStatusLabel.textContent = presentation.label;
+  if (goal) {
+    const used = Number.isFinite(Number(goal.tokensUsed)) ? Number(goal.tokensUsed) : 0;
+    const budget = Number.isFinite(Number(goal.tokenBudget)) && Number(goal.tokenBudget) > 0 ? Number(goal.tokenBudget) : null;
+    const tokens = budget
+      ? `${used.toLocaleString()} / ${budget.toLocaleString()} 令牌`
+      : `${used.toLocaleString()} 令牌`;
+    const elapsed = formatDuration(Math.max(0, Number(goal.timeUsedSeconds) || 0) * 1000);
+    ui.goalUsage.textContent = `${tokens} · ${elapsed}`;
+  } else {
+    ui.goalUsage.textContent = "设置后，Codex 会在聊天空闲时自动继续。";
+  }
+  if (syncFields) {
+    ui.goalObjective.value = goal?.objective || "";
+    ui.goalTokenBudget.value = goal?.tokenBudget || "";
+  }
+  ui.goalClear.hidden = !goal;
+  ui.goalToggle.hidden = !presentation.control;
+  ui.goalToggle.textContent = presentation.control === "pause" ? "暂停" : "恢复";
+  ui.goalSave.textContent = !goal || presentation.status === "complete" ? "启动目标" : "保存修改";
+  ui.goalObjective.disabled = state.goalMutating;
+  ui.goalTokenBudget.disabled = state.goalMutating;
+  ui.goalClear.disabled = state.goalMutating;
+  ui.goalToggle.disabled = state.goalMutating;
+  ui.goalSave.disabled = state.goalMutating;
+}
+
+function applyThreadGoal(threadId, goal) {
+  const projectId = findProjectForThread(threadId);
+  const thread = projectId && findThread(projectId, threadId);
+  if (!thread) return null;
+  const updated = updateThreadInState(projectId, { ...thread, goal: goal || null });
+  if (state.selectedThreadId === threadId) {
+    renderGoalButton();
+    updateComposer();
+  }
+  if (state.goalDialogThreadId === threadId && ui.goalDialog.open) {
+    renderGoalDialog({ syncFields: ui.goalForm.dataset.dirty !== "true" });
+  }
+  renderThreads();
+  renderRunStrip();
+  return updated;
+}
+
+async function patchThreadGoal(project, thread, patch) {
+  ensureEventStream();
+  await waitForEventStream();
+  const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/goal`, {
+    method: "PATCH",
+    body: { projectId: project.id, ...patch },
+  });
+  applyThreadGoal(thread.id, result.goal);
+  return result.goal;
+}
+
+async function deleteThreadGoal(project, thread) {
+  const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/goal?projectId=${encodeURIComponent(project.id)}`, { method: "DELETE" });
+  applyThreadGoal(thread.id, null);
+  return result.cleared;
+}
+
+function goalBudgetFromInput() {
+  const value = ui.goalTokenBudget.value.trim();
+  if (!value) return null;
+  const budget = Number(value);
+  if (!Number.isSafeInteger(budget) || budget <= 0) throw new Error("令牌预算必须是正整数，或留空表示不限制。");
+  return budget;
+}
+
+async function saveGoal(event) {
+  event.preventDefault();
+  if (event.submitter?.value === "cancel") {
+    if (ui.goalDialog.open) ui.goalDialog.close("cancel");
+    return;
+  }
+  if (state.goalMutating) return;
+  let thread = goalDialogThread();
+  const projectId = thread && findProjectForThread(thread.id);
+  const project = projectId && state.projects.find((entry) => entry.id === projectId);
+  if (!thread || !project) return;
+  const objective = ui.goalObjective.value.trim();
+  if (!objective) {
+    ui.goalFormError.textContent = "请输入长期目标。";
+    ui.goalObjective.focus();
+    return;
+  }
+  let tokenBudget;
+  try {
+    tokenBudget = goalBudgetFromInput();
+  } catch (error) {
+    ui.goalFormError.textContent = error.message;
+    ui.goalTokenBudget.focus();
+    return;
+  }
+  setGoalMutating(true);
+  ui.goalFormError.textContent = "";
+  try {
+    if (isLocalThreadId(thread.id)) {
+      thread = await materializeThread(project, thread, objective);
+      state.goalDialogThreadId = thread.id;
+    }
+    const status = !thread.goal || thread.goal.status === "complete" ? "active" : undefined;
+    const patch = { objective, tokenBudget, ...(status ? { status } : {}) };
+    await patchThreadGoal(project, thread, patch);
+    ui.goalForm.dataset.dirty = "false";
+    if (ui.goalDialog.open) ui.goalDialog.close();
+    showActivity(status === "active" ? "目标已启动，Codex 会持续执行到完成或暂停。" : "目标已更新。", false);
+  } catch (error) {
+    ui.goalFormError.textContent = error.message;
+  } finally {
+    setGoalMutating(false);
+  }
+}
+
+async function toggleGoal() {
+  const thread = goalDialogThread();
+  const projectId = thread && findProjectForThread(thread.id);
+  const project = projectId && state.projects.find((entry) => entry.id === projectId);
+  const control = goalPresentation(thread?.goal).control;
+  if (!thread || !project || !control || state.goalMutating) return;
+  const status = control === "pause" ? "paused" : "active";
+  setGoalMutating(true);
+  ui.goalFormError.textContent = "";
+  try {
+    await patchThreadGoal(project, thread, { status });
+    if (ui.goalDialog.open) ui.goalDialog.close();
+    showActivity(status === "paused" ? "目标已暂停；当前任务会继续到本轮结束。" : "目标已恢复。", false);
+  } catch (error) {
+    ui.goalFormError.textContent = error.message;
+  } finally {
+    setGoalMutating(false);
+  }
+}
+
+async function clearGoal() {
+  const thread = goalDialogThread();
+  const projectId = thread && findProjectForThread(thread.id);
+  const project = projectId && state.projects.find((entry) => entry.id === projectId);
+  if (!thread?.goal || !project || state.goalMutating) return;
+  const objective = thread.goal.objective;
+  if (ui.goalDialog.open) ui.goalDialog.close();
+  const confirmed = await confirmAction({
+    kicker: "清除目标",
+    title: objective.length > 44 ? `${objective.slice(0, 43)}…` : objective,
+    message: "这会移除目标和累计用量；已经完成的聊天记录不会删除，当前任务也不会被中断。",
+    confirmLabel: "清除目标",
+  });
+  if (!confirmed) {
+    await openGoalDialog();
+    return;
+  }
+  setGoalMutating(true);
+  try {
+    await deleteThreadGoal(project, thread);
+    showActivity("目标已清除；当前任务不会被中断。", false);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setGoalMutating(false);
+  }
+}
+
+function setGoalMutating(value) {
+  state.goalMutating = value;
+  updateComposer();
+  if (state.goalDialogThreadId && ui.goalDialog.open) renderGoalDialog();
 }
 
 async function stopCurrentTurn() {
@@ -2750,7 +3103,7 @@ async function deleteCurrentThread() {
   }
   const confirmed = await confirmAction({
     kicker: "删除聊天记录",
-    title: thread.name || "未命名聊天",
+    title: threadDisplayName(thread),
     message: "这会永久删除该聊天及其 Codex 历史记录，项目目录和项目文件不会被删除。",
     confirmLabel: "永久删除",
   });
@@ -2944,6 +3297,14 @@ function handleCodexEvent(threadId, event) {
   if (!projectId) return;
   let thread = findThread(projectId, threadId);
   if (!thread) return;
+  if (event.method === "thread/goal/updated") {
+    applyThreadGoal(threadId, params.goal);
+    return;
+  }
+  if (event.method === "thread/goal/cleared") {
+    applyThreadGoal(threadId, null);
+    return;
+  }
   if ((event.method === "workspace/state" && (isActiveThreadRuntime(params.runtime) || params.activeItems?.length))
     || event.method === "turn/started"
     || event.method === "turn/completed"
@@ -3000,7 +3361,11 @@ function handleCodexEvent(threadId, event) {
   }
   if (event.method === "workspace/state") {
     const runtime = params.runtime || thread.runtime;
-    updateThreadInState(projectId, { ...thread, runtime });
+    updateThreadInState(projectId, {
+      ...thread,
+      runtime,
+      ...(Object.hasOwn(params, "goal") ? { goal: params.goal || null } : {}),
+    });
     const changed = applyQueueSnapshot(threadId, params.queue, params.queueRevision);
     syncUserInputRequests(threadId, params.userInputRequests);
     for (const item of params.activeItems || []) {
@@ -3013,6 +3378,7 @@ function handleCodexEvent(threadId, event) {
     if (state.selectedThreadId === threadId) {
       if (changed) renderQueue();
       if (runtime?.activeTurnId && params.activePlan) renderTurnPlan(runtime.activeTurnId, params.activePlan);
+      renderGoalButton();
       updateComposer();
       renderThreadActions();
     }
@@ -3104,6 +3470,22 @@ function handleCodexEvent(threadId, event) {
     clearTurnActivity(params.turnId);
     mergeTurnMetric(params.turnId, { plan: { plan: params.plan, explanation: params.explanation } });
     if (state.selectedThreadId === threadId) renderTurnPlan(params.turnId, { plan: params.plan, explanation: params.explanation });
+    return;
+  }
+  if (event.method === "turn/diff/updated") {
+    const changes = unifiedDiffChanges(params.diff);
+    if (!changes.length || !params.turnId) return;
+    const itemId = activeFileChangeItemId(projectId, threadId, params.turnId);
+    const current = rememberedThreadItem(projectId, threadId, params.turnId, itemId)
+      || currentExecutionItem(params.turnId, itemId);
+    const item = fileChangeUpdateItem(current, {
+      itemId,
+      changes,
+      startedAtMs: timestampMilliseconds(current?.startedAt) || timestampMilliseconds(params.updatedAtMs) || Date.now(),
+    });
+    mergeItemMetric(params.turnId, itemId, item);
+    rememberThreadItem(projectId, threadId, params.turnId, item);
+    if (state.selectedThreadId === threadId) upsertExecutionItem(params.turnId, item);
     return;
   }
   if (event.method.startsWith("item/") && params.turnId) clearTurnActivity(params.turnId);
@@ -3301,6 +3683,12 @@ function rememberedThreadItem(projectId, threadId, turnId, itemId) {
     ?.find((item) => item.id === itemId) || null;
 }
 
+function activeFileChangeItemId(projectId, threadId, turnId) {
+  const items = findThread(projectId, threadId)?.turns?.find((turn) => turn.id === turnId)?.items || [];
+  const active = [...items].reverse().find((item) => item?.type === "fileChange" && executionStatus(item).tone === "running");
+  return active?.id || `${turnId}:diff`;
+}
+
 function applyQueueSnapshot(threadId, queue, queueRevision) {
   const revision = Number.isInteger(queueRevision) && queueRevision >= 0 ? queueRevision : null;
   const previous = state.queueSnapshots.get(threadId);
@@ -3370,7 +3758,7 @@ async function refreshWorkspace({ quiet = false } = {}) {
     refresh = (async () => {
       const status = await api("/api/status");
       if (!acceptAssetVersion(status)) return;
-      state.defaultWorkspace = status.defaultWorkspace || null;
+      state.workspaceRoot = status.workspaceRoot || null;
       applyCodexStatus(status);
       await loadProjects();
       if (state.codexReady) {
@@ -3642,7 +4030,7 @@ function openProjectDialog(project = null) {
   ui.projectPath.placeholder = admin ? "留空则在个人目录创建，或输入任意绝对目录" : "";
   ui.projectPath.value = project?.path || (admin
     ? ""
-    : `${state.defaultWorkspace || "工作区根目录"}\\${state.user?.username || "账号"}\\（按项目名称自动创建）`);
+    : `${state.workspaceRoot || "工作区根目录"}\\${state.user?.username || "账号"}\\（按项目名称自动创建）`);
   ui.projectError.textContent = "";
   ui.deleteProject.hidden = !project;
   ui.projectDialog.showModal();
@@ -4114,16 +4502,26 @@ ui.mobileRefresh.addEventListener("click", reloadPage);
 ui.openGlobalSettings.addEventListener("click", openGlobalSettings);
 ui.newThread.addEventListener("click", () => createThread().catch(showError));
 ui.quickNewThread.addEventListener("click", () => createThread().catch(showError));
-ui.guide.addEventListener("click", () => { state.mode = "guide"; updateComposer(); ui.prompt.focus(); });
-ui.queue.addEventListener("click", () => { state.mode = "queue"; updateComposer(); ui.prompt.focus(); });
+ui.guide.addEventListener("click", () => { state.mode = "guide"; updateComposer(); });
+ui.queue.addEventListener("click", () => { state.mode = "queue"; updateComposer(); });
 ui.planMode.addEventListener("click", async () => {
   const thread = currentThread();
-  if (!thread || isActiveThreadRuntime(currentRuntime())) return;
+  if (!thread || isActiveThreadRuntime(currentRuntime()) || isActiveGoal(thread.goal)) return;
   const active = thread.settings?.collaborationMode === "plan";
   if (await saveSettings({ collaborationMode: active ? "default" : "plan" }, { quiet: true })) {
-    showActivity(active ? "已退出 Plan 模式。" : "已进入 Plan 模式。", false);
-    ui.prompt.focus();
+    showActivity(active ? "已退出规划模式。" : "已进入规划模式。", false);
   }
+});
+ui.goalMode.addEventListener("click", () => { void openGoalDialog(); });
+ui.goalForm.addEventListener("submit", saveGoal);
+ui.goalToggle.addEventListener("click", () => { void toggleGoal(); });
+ui.goalClear.addEventListener("click", () => { void clearGoal(); });
+ui.goalObjective.addEventListener("input", () => { ui.goalForm.dataset.dirty = "true"; });
+ui.goalTokenBudget.addEventListener("input", () => { ui.goalForm.dataset.dirty = "true"; });
+ui.goalDialog.addEventListener("close", () => {
+  state.goalDialogThreadId = null;
+  ui.goalForm.dataset.dirty = "false";
+  ui.goalFormError.textContent = "";
 });
 ui.composer.addEventListener("submit", submitPrompt);
 ui.uploadFiles.addEventListener("click", chooseUploadFiles);

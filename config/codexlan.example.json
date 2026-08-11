@@ -1,0 +1,8 @@
+{
+  "$schema": "./codexlan.schema.json",
+  "port": 8688,
+  "host": "auto",
+  "workspaceRoot": "F:\\GPTData",
+  "dataRoot": "../data",
+  "codexBin": null
+}

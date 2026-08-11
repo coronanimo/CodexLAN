@@ -5,12 +5,19 @@
 The verified deployment target is a Windows 10/11 server computer on a trusted private LAN. The Node listener does not provide TLS.
 
 ```powershell
-npm start
+Copy-Item config\codexlan.example.json config\codexlan.json
+npm run service:start
 ```
 
-- `CODEX_WORKDIR`: root that may contain user-managed project directories; source runs default to repository-local `workspace/`.
-- `CODEX_WEB_PORT`: LAN HTTP port; defaults to `8687`.
-- `CODEX_WEB_DATA_DIR`: state directory; source runs default to repository-local `data/`.
+`config/codexlan.json` is the authoritative local configuration. It supports `port`, `host`, `workspaceRoot`, `dataRoot`, and `codexBin`; relative paths resolve from the config file. Environment variables remain available when a key is absent, primarily for tests and temporary launches.
+
+The server uses one shared listener. With `host: "auto"`, it binds once to `0.0.0.0:<port>` and accepts requests only through loopback or the selected private IPv4 interface. The supervisor performs a port preflight, reports deterministic startup failures once, and only auto-restarts a process that had already reached ready state.
+
+```powershell
+npm run service:status
+npm run service:restart
+npm run service:stop
+```
 
 The service currently runs from source and requires Node.js. There is no Windows binary package.
 
@@ -21,7 +28,7 @@ There is no default username or password. On empty application state, open the p
 ## LAN checklist
 
 1. Keep the Windows network profile set to Private.
-2. Select the smallest practical workspace root.
+2. Set `workspaceRoot` to the smallest shared boundary containing the managed user directories.
 3. Start without a firewall rule first; add a Private-profile rule only if another LAN device cannot connect.
 4. Allow accounts only for mutually trusted people.
 5. Prevent the server computer from sleeping while long-running work must remain reachable.
@@ -36,8 +43,9 @@ The project does not yet include a tested reverse-proxy configuration. Test logi
 
 Stop CodexLAN before taking a consistent backup. Back up separately and protect:
 
-- `CODEX_WEB_DATA_DIR`, or `data/` when it is unset: users, password hashes, sessions, ownership, queues, and UI state.
-- The configured workspace root and project files.
+- Configured `dataRoot`, or `data/` by default: users, password hashes, sessions, ownership, queues, UI state, and supervisor state.
+- `logs/`: supervisor and server logs.
+- Every registered project directory and its files.
 - Codex CLI configuration and conversation state when they are part of the recovery scope.
 
 Do not put backups in the repository or a public release. Test restoration with the same Windows user permissions and a compatible Codex CLI version.
@@ -46,10 +54,10 @@ Do not put backups in the repository or a public release. Test restoration with 
 
 1. Read `CHANGELOG.md` and known issues.
 2. Back up `data/` and every configured workspace.
-3. Stop CodexLAN and confirm the Node/app-server processes have exited.
+3. Run `npm run service:stop` and confirm the Node/app-server processes have exited.
 4. Replace source files without replacing runtime data.
 5. Run `npm run check`.
-6. Start with the previous configuration and run the app-server compatibility checks in [DEVELOPMENT.md](DEVELOPMENT.md).
+6. Start with `npm run service:start` and run the app-server compatibility checks in [DEVELOPMENT.md](DEVELOPMENT.md).
 7. Keep the backup until login, projects, history, queues, files, and active work are verified.
 
 State upgrades are one-way. Version 9 state migrates directly to version 13; unsupported versions fail at startup. Keep a backup when testing an upgrade or downgrade.

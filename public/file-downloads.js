@@ -14,9 +14,20 @@ export function downloadableFiles(value) {
     return file;
   };
   let text = String(value || "");
+  text = text.replace(/:codex-file-citation\{([^}\r\n]*)\}/g, (match, attributes) => {
+    const path = directiveAttribute(attributes, "path");
+    const label = directiveAttribute(attributes, "label") || directiveAttribute(attributes, "name");
+    return collect(path, label) ? "" : match;
+  });
   text = text.replace(/\[([^\]\r\n]{1,160})\]\(\s*<?([^\)\r\n]+?)>?\s*\)/g, (match, label, target) => collect(target, label) ? label : match);
   text = text.replace(/<((?:file:\/\/\/|\/?[a-z]:[\\/])[^>\r\n]+)>/gi, (match, target) => collect(target, "")?.name || match);
   return { text: text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), files };
+}
+
+function directiveAttribute(attributes, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|\\s)${escapedName}\\s*=\\s*(?:"([^"\\r\\n]*)"|'([^'\\r\\n]*)')`).exec(attributes);
+  return match?.[1] ?? match?.[2] ?? "";
 }
 
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd", "mdx"]);

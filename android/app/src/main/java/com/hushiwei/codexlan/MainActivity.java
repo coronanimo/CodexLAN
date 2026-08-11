@@ -425,7 +425,7 @@ public final class MainActivity extends Activity {
         addressInput = new EditText(this);
         addressInput.setSingleLine(true);
         addressInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        addressInput.setHint("http://192.168.1.50:8687");
+        addressInput.setHint("http://192.168.1.50:8688");
         addressInput.setText(preferences.getString(ADDRESS_KEY, ""));
         addressInput.setSelectAllOnFocus(false);
         Button connect = new Button(this);

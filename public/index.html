@@ -128,18 +128,32 @@
         <section class="composer-zone">
           <div class="composer-toolbar">
             <input id="upload-file-input" type="file" accept="*/*" multiple hidden>
-            <button id="upload-files" class="compact-attachment-button" type="button" aria-label="上传附件" title="上传文件或图片；也可直接粘贴剪贴板图片">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 7v9a3 3 0 0 0 6 0V5a4 4 0 0 0-8 0v11a5 5 0 0 0 10 0V8"/></svg>
-            </button>
             <div class="composer-quick-settings">
-              <label class="compact-select compact-model" aria-label="当前聊天模型"><select id="composer-model-select"></select></label>
-              <label class="compact-select compact-effort" aria-label="当前聊天推理深度"><select id="composer-effort-select"></select></label>
-              <label class="compact-select compact-tier" aria-label="当前聊天优先级"><select id="composer-tier-select"></select></label>
+              <div class="compact-select compact-model" data-compact-select aria-label="当前聊天模型">
+                <select id="composer-model-select" tabindex="-1" aria-hidden="true"></select>
+                <button class="compact-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false"><span></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
+                <div class="compact-select-menu" role="listbox" hidden></div>
+              </div>
+              <div class="compact-select compact-effort" data-compact-select aria-label="当前聊天推理深度">
+                <select id="composer-effort-select" tabindex="-1" aria-hidden="true"></select>
+                <button class="compact-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false"><span></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
+                <div class="compact-select-menu" role="listbox" hidden></div>
+              </div>
+              <div class="compact-select compact-tier" data-compact-select aria-label="当前聊天优先级">
+                <select id="composer-tier-select" tabindex="-1" aria-hidden="true"></select>
+                <button class="compact-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false"><span></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg></button>
+                <div class="compact-select-menu" role="listbox" hidden></div>
+              </div>
             </div>
-            <button id="plan-mode" class="plan-mode-button" type="button" aria-pressed="false" title="切换 Plan 模式；也可输入 /plan" hidden>计划</button>
-            <div class="mode-switch" role="group" aria-label="消息模式">
-              <button id="mode-guide" type="button"><span aria-hidden="true">↗</span> 引导</button>
-              <button id="mode-queue" type="button">排队</button>
+            <button id="upload-files" class="composer-tool-button compact-attachment-button" type="button" aria-label="上传附件" title="上传文件或图片；也可直接粘贴剪贴板图片">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 7v9a3 3 0 0 0 6 0V5a4 4 0 0 0-8 0v11a5 5 0 0 0 10 0V8"/></svg>
+              <span class="composer-tool-label">附件</span>
+            </button>
+            <button id="goal-mode" class="composer-tool-button goal-mode-button" type="button" aria-label="管理目标" aria-pressed="false" title="管理目标；也可输入 /goal"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="m16.5 7.5 3-3"/></svg><span class="composer-tool-label">目标</span></button>
+            <button id="plan-mode" class="composer-tool-button plan-mode-button" type="button" aria-label="进入规划模式" aria-pressed="false" title="进入规划模式；也可输入 /plan" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 4 5 2 4-2 5 2v13l-5-2-4 2-5-2zM10 6v13m4-15v13"/></svg><span class="composer-tool-label">规划</span></button>
+            <div class="mode-switch" role="radiogroup" aria-label="发送方式">
+              <button id="mode-guide" class="composer-tool-button" type="button" role="radio" aria-checked="false" aria-label="引导当前任务" title="向当前任务追加引导"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 12 15-7-5 14-3-5zM11 14l3-3"/></svg><span class="composer-tool-label">引导</span></button>
+              <button id="mode-queue" class="composer-tool-button" type="button" role="radio" aria-checked="true" aria-label="排队发送" title="排队发送"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4.5 5.5h10v4h-10zM4.5 10h14v4h-14zM4.5 14.5h10v4h-10zM17 5.5l2 2-2 2"/></svg><span class="composer-tool-label">排队</span></button>
             </div>
           </div>
           <div id="context-usage" class="context-usage" hidden>
@@ -151,7 +165,7 @@
             <textarea id="prompt" rows="1" maxlength="200000" enterkeyhint="enter" aria-label="任务内容"></textarea>
             <div class="composer-actions">
               <button id="stop" class="composer-stop-button" type="button" hidden disabled aria-label="停止当前任务" title="停止当前任务"><span aria-hidden="true">■</span></button>
-              <button id="send" class="send-button" type="submit" aria-label="发送" title="发送"><span aria-hidden="true">↑</span></button>
+              <button id="send" class="send-button" type="submit" aria-label="发送" title="发送"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 18V6m-4.5 4.5L12 6l4.5 4.5"/></svg></button>
             </div>
           </form>
         </section>
@@ -223,6 +237,21 @@
         <label>聊天名称<input id="thread-name-input" maxlength="100" required></label>
         <p id="thread-form-error" class="form-error"></p>
         <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">保存名称</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="goal-dialog" class="thread-dialog goal-dialog">
+      <form id="goal-form" method="dialog">
+        <div class="dialog-heading"><div><span>持续执行</span><h2>目标管理</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <div id="goal-summary" class="goal-summary" data-tone="empty">
+          <span class="goal-summary-mark" aria-hidden="true"></span>
+          <div><strong id="goal-status-label">尚未设置目标</strong><small id="goal-usage">设置后，Codex 会在聊天空闲时自动继续。</small></div>
+        </div>
+        <label>长期目标<textarea id="goal-objective" rows="6" maxlength="200000" placeholder="说明要达成什么、如何验证，以及何时停止。" required></textarea></label>
+        <label>令牌预算<input id="goal-token-budget" type="number" min="1" step="1" max="9007199254740991" inputmode="numeric" placeholder="不限制"></label>
+        <p class="config-note">激活后会持续自动执行。暂停或清除目标不会中断当前正在运行的任务，可使用停止按钮立即中断。</p>
+        <p id="goal-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions goal-dialog-actions"><button id="goal-clear" class="danger-button" type="button">清除目标</button><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button id="goal-toggle" class="quiet-button" type="button">暂停</button><button id="goal-save" value="default" type="submit" class="primary-button">启动目标</button></div>
       </form>
     </dialog>
 
@@ -300,7 +329,7 @@
     </dialog>
 
     <template id="message-template"><article class="message"><div class="message-meta"></div><div class="message-body"></div></article></template>
-    <template id="queue-item-template"><li class="queue-item"><span class="queue-index"></span><span class="queue-text"></span><div class="queue-actions"><button data-action="guide" type="button" aria-label="转为当前任务的引导" title="转为引导">↗</button><button data-action="edit" type="button" aria-label="编辑排队任务">✎</button><button data-action="up" type="button" aria-label="上移">↑</button><button data-action="down" type="button" aria-label="下移">↓</button><button data-action="remove" type="button" aria-label="移除">×</button></div></li></template>
+    <template id="queue-item-template"><li class="queue-item"><span class="queue-index"></span><span class="queue-text"></span><div class="queue-actions"><button data-action="guide" type="button" aria-label="转为当前任务的引导" title="转为引导"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 12 15-7-5 14-3-5zM11 14l3-3"/></svg></button><button data-action="edit" type="button" aria-label="编辑排队任务">✎</button><button data-action="up" type="button" aria-label="上移">↑</button><button data-action="down" type="button" aria-label="下移">↓</button><button data-action="remove" type="button" aria-label="移除">×</button></div></li></template>
     <script src="/vendor/katex/katex.min.js?v=0.16.22"></script>
     <script type="module" src="/app.js"></script>
   </body>

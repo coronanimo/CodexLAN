@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const threads = new Map();
+const goals = new Map();
 const materializedThreads = new Set();
 const pendingUserInputs = new Map();
 if (process.env.CODEX_TEST_SEED_CWD) {
@@ -90,6 +91,18 @@ input.on("line", (line) => {
       }
       if (message.method === "turn/steer") emitUserMessage(message.params, { turn: { id: result.turnId } });
       if (message.method === "thread/compact/start") emitContextCompaction(message.params);
+      if (message.method === "thread/goal/set") {
+        process.stdout.write(`${JSON.stringify({
+          method: "thread/goal/updated",
+          params: { threadId: message.params.threadId, turnId: null, goal: result.goal },
+        })}\n`);
+      }
+      if (message.method === "thread/goal/clear" && result.cleared) {
+        process.stdout.write(`${JSON.stringify({
+          method: "thread/goal/cleared",
+          params: { threadId: message.params.threadId },
+        })}\n`);
+      }
       if (message.method === "initialize" && unboundNotificationThread) {
         setTimeout(() => process.stdout.write(`${JSON.stringify({
           method: "turn/started",
@@ -301,6 +314,29 @@ function fakeResult(method, params = {}) {
   }
   if (method === "thread/compact/start") return {};
   if (method === "account/rateLimits/read") return {};
+  if (method === "thread/goal/get") return { goal: copy(goals.get(params.threadId) || null) };
+  if (method === "thread/goal/set") {
+    const current = goals.get(params.threadId);
+    const objective = Object.hasOwn(params, "objective") ? String(params.objective || "").trim() : current?.objective;
+    if (!objective) throw new Error("goal objective is required");
+    const now = Math.floor(Date.now() / 1000);
+    const goal = {
+      threadId: params.threadId,
+      objective,
+      status: params.status || current?.status || "active",
+      tokenBudget: Object.hasOwn(params, "tokenBudget") ? params.tokenBudget : current?.tokenBudget ?? null,
+      tokensUsed: current?.tokensUsed || 0,
+      timeUsedSeconds: current?.timeUsedSeconds || 0,
+      createdAt: current?.createdAt || now,
+      updatedAt: now,
+    };
+    goals.set(params.threadId, goal);
+    return { goal: copy(goal) };
+  }
+  if (method === "thread/goal/clear") {
+    const cleared = goals.delete(params.threadId);
+    return { cleared };
+  }
   if (method === "thread/start") {
     const thread = {
       id: randomUUID(),
@@ -339,6 +375,7 @@ function fakeResult(method, params = {}) {
   }
   if (method === "thread/delete") {
     threads.delete(params.threadId);
+    goals.delete(params.threadId);
     return {};
   }
   if (method === "turn/start") {

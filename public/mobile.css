@@ -58,9 +58,16 @@ html.android-shell, html.android-shell body { overscroll-behavior: none; }
   .execution-entry pre { max-height: 220px; padding: 9px 10px 11px 60px; }
   .queue-panel { width: calc(100% - 24px); max-height: min(30dvh, 180px); margin: 0 auto 7px; }
   .composer-zone { padding: 7px 15px calc(9px + env(safe-area-inset-bottom)); }
-  .compact-model { width: 78px; }
-  .compact-effort { width: 62px; }
-  .compact-tier { width: 62px; }
+  .composer-toolbar { gap: 3px; }
+  .compact-model { width: 62px; }
+  .compact-effort { width: 48px; }
+  .compact-tier { width: 48px; }
+  .dialog-actions.goal-dialog-actions { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.3fr); }
+  .goal-dialog-actions > span { display: none; }
+  .goal-dialog-actions .danger-button { grid-column: 1 / -1; width: auto; }
+  .goal-dialog-actions button[value="cancel"] { grid-column: 1; }
+  .goal-dialog-actions #goal-toggle { grid-column: 2; }
+  .goal-dialog-actions #goal-save { grid-column: 3; }
   .empty-state { margin-top: 8vh; }
   .project-manager-row { display: grid; gap: 10px; }
   .project-manager-row code { max-width: calc(100vw - 85px); }

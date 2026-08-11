@@ -3,6 +3,7 @@ import { MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandExecutionSna
 import { timestampMilliseconds } from "../public/elapsed-time.js";
 import { isActiveThreadStatus } from "../public/workspace.js";
 import { turnPlanSnapshot } from "../public/plan.js";
+import { isActiveGoal } from "../public/goal.js";
 import { json, readJson, validateId, validateText } from "./http.mjs";
 import {
   SESSION_TIMER_MAX_MS,
@@ -24,11 +25,13 @@ export function createConversations({ store, codex }) {
   const queueAdvances = new Map();
   const queueSteerJobs = new Map();
   const threadTokenUsage = new Map();
+  const threadGoals = new Map();
   const userInputRequests = new Map();
   const MAX_THREAD_TOKEN_USAGE = 300;
   const DEFAULT_REASONING_SUMMARY = "detailed";
   const REASONING_SUMMARIES = new Set(["auto", "concise", "detailed", "none"]);
   const COLLABORATION_MODES = new Set(["default", "plan"]);
+  const USER_GOAL_STATUSES = new Set(["active", "paused"]);
   const DEFAULT_HISTORY_PAGE_SIZE = 12;
   const MAX_HISTORY_PAGE_SIZE = 40;
   let modelCache = { expiresAt: 0, data: [] };
@@ -149,6 +152,8 @@ export function createConversations({ store, codex }) {
     const threadId = message.params.threadId;
     const projectId = store.threadProjects[threadId];
     if (!projectId) return;
+    if (message.method === "thread/goal/updated") threadGoals.set(threadId, message.params.goal);
+    if (message.method === "thread/goal/cleared") threadGoals.set(threadId, null);
     if (message.method === "thread/tokenUsage/updated" && message.params.tokenUsage) {
       threadTokenUsage.delete(threadId);
       threadTokenUsage.set(threadId, message.params.tokenUsage);
@@ -178,6 +183,10 @@ export function createConversations({ store, codex }) {
       message = { ...message, params: { ...message.params, runtime } };
     }
     broadcast(threadId, compactNotification(message));
+    if (message.method === "thread/goal/cleared"
+      || (message.method === "thread/goal/updated" && !isActiveGoal(message.params.goal))) {
+      void advanceQueue(threadId);
+    }
   }
   
   codex.events.on("offline", (details) => {
@@ -231,7 +240,7 @@ export function createConversations({ store, codex }) {
       const accessedAt = await store.recordThreadAccess(user.id, result.thread.id);
       await store.setThreadSettings(result.thread.id, settings);
       const runtime = { projectId: project.id, activeTurnId: null, status: "idle" };
-      const thread = { ...result.thread, accessedAt, status: result.thread.status || "idle", turns: result.thread.turns || [], settings, runtime, ...(requestedName ? { name: requestedName } : {}) };
+      const thread = { ...result.thread, accessedAt, status: result.thread.status || "idle", turns: result.thread.turns || [], settings, goal: null, runtime, ...(requestedName ? { name: requestedName } : {}) };
       json(response, 201, {
         thread,
         runtime,
@@ -264,12 +273,15 @@ export function createConversations({ store, codex }) {
           startedAt: timestampMilliseconds(recoveredActiveTurn.startedAt) || threadState.get(threadId)?.startedAt || Date.now(),
         } : {}),
       });
-      const settings = await store.getThreadSettings(threadId, project.settings);
-      const queueSnapshot = await store.getQueueSnapshot(threadId);
+      const [settings, queueSnapshot, goal] = await Promise.all([
+        store.getThreadSettings(threadId, project.settings),
+        store.getQueueSnapshot(threadId),
+        readThreadGoal(threadId),
+      ]);
       const metrics = Object.fromEntries(history.turns.flatMap((turn) => storedMetrics[turn.id] ? [[turn.id, storedMetrics[turn.id]]] : []));
       const accessedAt = await store.recordThreadAccess(user.id, threadId, { deferred: true });
       json(response, 200, {
-        thread: { ...thread, settings, accessedAt },
+        thread: { ...thread, settings, goal, accessedAt },
         ...queueSnapshot,
         runtime,
         metrics,
@@ -305,6 +317,36 @@ export function createConversations({ store, codex }) {
       if (!changed) throw httpError(400, "没有需要修改的聊天内容。");
       json(response, 200, { ok: true, ...(name ? { name } : {}), ...(settings ? { settings } : {}) });
     });
+
+    application.get("/api/threads/:threadId/goal", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = request.params.threadId;
+      const project = await projectFromQuery(request.codexUrl, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      json(response, 200, { goal: await readThreadGoal(threadId) });
+    });
+
+    application.patch("/api/threads/:threadId/goal", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = request.params.threadId;
+      const body = await readJson(request);
+      const project = await store.getProject(body.projectId, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      const params = validateGoalPatch(threadId, body);
+      const result = await codex.request("thread/goal/set", params);
+      threadGoals.set(threadId, result.goal);
+      json(response, 200, { goal: result.goal });
+    });
+
+    application.delete("/api/threads/:threadId/goal", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = request.params.threadId;
+      const project = await projectFromQuery(request.codexUrl, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      const result = await codex.request("thread/goal/clear", { threadId });
+      threadGoals.set(threadId, null);
+      json(response, 200, { cleared: result.cleared === true, goal: null });
+    });
   
     application.delete("/api/threads/:threadId", async (request, response) => {
       const user = request.identity.user;
@@ -313,6 +355,8 @@ export function createConversations({ store, codex }) {
       await store.requireThreadOwner(threadId, user.id, project.id);
       const runtime = threadState.get(threadId);
       if (runtime?.activeTurnId || isActiveThreadStatus(runtime?.status)) throw httpError(409, "聊天仍在执行中，请先停止任务再删除。");
+      const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
+      if (isActiveGoal(goal)) throw httpError(409, "Goal 仍在运行，请先暂停或清除 Goal 再删除聊天。");
       if (queueAdvances.has(threadId) || [...queueSteerJobs.keys()].some((key) => key.startsWith(threadId + ":"))) {
         throw httpError(409, "聊天队列正在处理，请完成后再删除。");
       }
@@ -467,6 +511,37 @@ export function createConversations({ store, codex }) {
     accountRateLimitsCache = { expiresAt: Date.now() + 15_000, data };
     return data;
   }
+
+  async function readThreadGoal(threadId) {
+    const result = await codex.request("thread/goal/get", { threadId });
+    const goal = result?.goal || null;
+    threadGoals.set(threadId, goal);
+    return goal;
+  }
+
+  function validateGoalPatch(threadId, candidate) {
+    const params = { threadId };
+    let changed = false;
+    if (Object.hasOwn(candidate, "objective")) {
+      params.objective = validateText(candidate.objective);
+      changed = true;
+    }
+    if (Object.hasOwn(candidate, "status")) {
+      if (!USER_GOAL_STATUSES.has(candidate.status)) throw httpError(400, "Goal 状态只能设为运行中或已暂停。");
+      params.status = candidate.status;
+      changed = true;
+    }
+    if (Object.hasOwn(candidate, "tokenBudget")) {
+      const budget = candidate.tokenBudget;
+      if (budget !== null && (!Number.isSafeInteger(budget) || budget <= 0)) {
+        throw httpError(400, "Goal token 预算必须是正整数，或留空表示不限制。");
+      }
+      params.tokenBudget = budget;
+      changed = true;
+    }
+    if (!changed) throw httpError(400, "没有需要修改的 Goal 内容。");
+    return params;
+  }
   
   async function listCodexThreadsAtPath(cwd) {
     const threads = [];
@@ -482,8 +557,23 @@ export function createConversations({ store, codex }) {
   async function listProjectThreads(project, user) {
     const listedThreads = await listCodexThreadsAtPath(project.path);
     const ownedThreads = await store.bindProjectThreads(listedThreads, user.id, project.id);
+    const listedIds = new Set(ownedThreads.map((thread) => thread.id));
+    const relocatedThreads = await Promise.all(store.threadIdsForProject(project.id)
+      .filter((threadId) => !listedIds.has(threadId))
+      .map(async (threadId) => {
+        try {
+          return (await codex.request("thread/read", { threadId, includeTurns: false })).thread || null;
+        } catch {
+          return null;
+        }
+      }));
+    ownedThreads.push(...relocatedThreads.filter(Boolean));
     return Promise.all(ownedThreads.map(async (thread) => {
-      const queueSnapshot = await store.getQueueSnapshot(thread.id);
+      const [queueSnapshot, settings, goal] = await Promise.all([
+        store.getQueueSnapshot(thread.id),
+        store.getThreadSettings(thread.id, project.settings),
+        readThreadGoal(thread.id),
+      ]);
       const knownRuntime = threadState.get(thread.id);
       const storedActiveTurn = !knownRuntime?.activeTurnId && isActiveThreadStatus(thread.status)
         ? activeTurnFromMetrics(await store.getTurnMetrics(thread.id))
@@ -497,9 +587,10 @@ export function createConversations({ store, codex }) {
         ...thread,
         accessedAt: store.threadAccess(user.id, thread.id),
         runtime,
+        goal,
         queueCount: queueSnapshot.queue.length,
         queueRevision: queueSnapshot.queueRevision,
-        settings: await store.getThreadSettings(thread.id, project.settings),
+        settings,
       };
     }));
   }
@@ -579,6 +670,8 @@ export function createConversations({ store, codex }) {
       if (state?.activeTurnId || isActiveThreadStatus(state?.status)) return;
       const next = (await store.listQueue(threadId))[0];
       if (!next || queueSteerJobs.has(`${threadId}:${next.id}`)) return;
+      const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
+      if (isActiveGoal(goal)) return;
       const project = await store.getProject(next.projectId);
       await store.requireThreadOwner(threadId, project.ownerId, project.id);
       try {
@@ -696,8 +789,11 @@ export function createConversations({ store, codex }) {
   }
   
   function projectHasActiveThread(projectId) {
-    return [...threadState.values()].some((runtime) => runtime.projectId === projectId
+    const hasActiveTurn = [...threadState.values()].some((runtime) => runtime.projectId === projectId
       && (runtime.activeTurnId || isActiveThreadStatus(runtime.status)));
+    if (hasActiveTurn) return true;
+    return [...threadGoals].some(([threadId, goal]) => isActiveGoal(goal)
+      && store.threadProjects[threadId] === projectId);
   }
   
   function forgetProjectRuntime(projectId, boundThreadIds) {
@@ -710,6 +806,7 @@ export function createConversations({ store, codex }) {
     discardCommandOutputBatches(threadId);
     threadState.delete(threadId);
     threadTokenUsage.delete(threadId);
+    threadGoals.delete(threadId);
     codex.loadedThreads.delete(threadId);
   }
   
@@ -864,6 +961,7 @@ export function createConversations({ store, codex }) {
   async function sendInitialWorkspaceState(response, userId) {
     const threadIds = new Set([
       ...threadState.keys(),
+      ...threadGoals.keys(),
       ...await store.listQueuedThreadIds(),
       ...[...userInputRequests.values()].map((request) => request.threadId),
     ]);
@@ -881,6 +979,7 @@ export function createConversations({ store, codex }) {
           threadId,
           ...snapshot,
           runtime,
+          ...(threadGoals.has(threadId) ? { goal: threadGoals.get(threadId) } : {}),
           activeItems: activeExecutionSnapshots(activeTurn, runtime?.activeTurnId),
           activePlan: activeTurn?.plan || null,
           userInputRequests: [...userInputRequests.values()]

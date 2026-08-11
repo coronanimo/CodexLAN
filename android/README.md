@@ -6,7 +6,7 @@
 
 This native shell opens a user-configured CodexLAN address in an Android WebView. It stores the web session in an HttpOnly WebView cookie and uses Android system interfaces for back gestures, server selection, files, and downloads.
 
-Enter the complete address printed by the CodexLAN service. The app does not ship with a server address. Plain HTTP is limited to trusted LAN use; remote access requires HTTPS as described in [SECURITY.md](../SECURITY.md).
+Enter the complete address printed by the CodexLAN service. The app does not ship with a server address. Plain HTTP is limited to trusted LAN use; remote access requires HTTPS as described in [SECURITY.md](../docs/SECURITY.md).
 
 The application ID is `com.hushiwei.codexlan`. It is a different application from earlier private builds that used `cn.shiwei.codexworkspace`, so it cannot update those installations in place.
 
@@ -39,7 +39,7 @@ The shared web composer remains the only editing surface. Android presents a nat
 
 这个原生外壳负责在 Android WebView 中打开用户配置的 CodexLAN 地址。工作台会话保存在 WebView 的 HttpOnly Cookie 中；Android 原生层处理返回手势、服务器选择、文件和系统下载。
 
-请填写 CodexLAN 服务显示的完整地址。应用不预置服务器地址。明文 HTTP 只适合可信局域网；远程访问需要使用 [SECURITY.md](../SECURITY.md) 所述的 HTTPS 配置。
+请填写 CodexLAN 服务显示的完整地址。应用不预置服务器地址。明文 HTTP 只适合可信局域网；远程访问需要使用 [SECURITY.md](../docs/SECURITY.md) 所述的 HTTPS 配置。
 
 当前 application ID 为 `com.hushiwei.codexlan`。它与早期使用 `cn.shiwei.codexworkspace` 的私有版本是两个不同应用，不能覆盖升级原安装。
 

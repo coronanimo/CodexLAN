@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "../public/elapsed-time.js";
 import { downloadableFiles, projectForLocalFile, textPreviewKind } from "../public/file-downloads.js";
 import { MAX_LIVE_COMMAND_OUTPUT, MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandDisplayText, commandExecutionSnapshot, commandOutputTail, executionItemDuration, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "../public/execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeListedThread, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadStatusValue } from "../public/workspace.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeListedThread, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName, threadStatusValue } from "../public/workspace.js";
 import { createAnsiOutputState, parseAnsiOutput, parseAnsiOutputChunk } from "../public/ansi-output.js";
-import { diffLineKind, diffLineStats, textLineCount } from "../public/diff-output.js";
+import { diffLineKind, diffLineStats, textLineCount, unifiedDiffChanges } from "../public/diff-output.js";
 import { isMobileComposer, shouldSubmitPromptFromKeyboard } from "../public/composer.js";
 import { plainInlineMarkdown } from "../public/text-format.js";
 import { planShortcut, turnPlanPresentation, turnPlanSnapshot } from "../public/plan.js";
@@ -41,7 +41,7 @@ test("keeps IME and mobile Enter keys inside the prompt", () => {
 
 test("removes lightweight Markdown markers from execution titles", () => {
   assert.equal(plainInlineMarkdown("**Finalizing deployment**"), "Finalizing deployment");
-  assert.equal(plainInlineMarkdown("Review `server.mjs`"), "Review server.mjs");
+  assert.equal(plainInlineMarkdown("Review `server/index.mjs`"), "Review server/index.mjs");
 });
 
 test("renders final plans as conversation documents instead of execution entries", () => {
@@ -77,7 +77,7 @@ test("recognizes previewable text and source files", () => {
   assert.equal(textPreviewKind("README.md"), "markdown");
   assert.equal(textPreviewKind("settings.json"), "json");
   assert.equal(textPreviewKind("server.log"), "text");
-  assert.equal(textPreviewKind("server.mjs"), "code");
+  assert.equal(textPreviewKind("server/index.mjs"), "code");
   assert.equal(textPreviewKind("Dockerfile"), "code");
   assert.equal(textPreviewKind(".env.production"), "code");
   assert.equal(textPreviewKind("project.csproj"), "code");
@@ -118,6 +118,28 @@ test("counts added and removed diff lines without counting file headers", () => 
     added: 2,
     removed: 1,
   });
+});
+
+test("splits a live turn diff into per-file changes", () => {
+  assert.deepEqual(unifiedDiffChanges([
+    "diff --git a/public/app.js b/public/app.js",
+    "index 1..2 100644",
+    "--- a/public/app.js",
+    "+++ b/public/app.js",
+    "@@ -1 +1,2 @@",
+    "-old",
+    "+new",
+    "+more",
+    "diff --git a/old.txt b/old.txt",
+    "deleted file mode 100644",
+    "--- a/old.txt",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    "-gone",
+  ].join("\n")), [
+    { path: "public/app.js", kind: "update", diff: "diff --git a/public/app.js b/public/app.js\nindex 1..2 100644\n--- a/public/app.js\n+++ b/public/app.js\n@@ -1 +1,2 @@\n-old\n+new\n+more" },
+    { path: "old.txt", kind: "delete", diff: "diff --git a/old.txt b/old.txt\ndeleted file mode 100644\n--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone" },
+  ]);
 });
 
 test("counts complete file contents for added and deleted files", () => {
@@ -197,6 +219,21 @@ test("removes line and column suffixes from Windows file links before previewing
   });
 });
 
+test("turns Codex file citation directives into downloadable files", () => {
+  assert.deepEqual(downloadableFiles(':codex-file-citation{path="F:/GPTData/hu/Meta0/deliverables/从数据资产到可执行多因子模型_教材.docx" purpose="output"}'), {
+    text: "",
+    files: [{
+      path: "F:/GPTData/hu/Meta0/deliverables/从数据资产到可执行多因子模型_教材.docx",
+      name: "从数据资产到可执行多因子模型_教材.docx",
+      label: "从数据资产到可执行多因子模型_教材.docx",
+    }],
+  });
+  assert.deepEqual(downloadableFiles('文件已生成。\n\n:codex-file-citation{purpose="output" path=\'C:\\Exports\\report.docx\' name="教材"}'), {
+    text: "文件已生成。",
+    files: [{ path: "C:\\Exports\\report.docx", name: "report.docx", label: "教材" }],
+  });
+});
+
 test("uses the project that actually contains a linked local file", () => {
   const projects = [
     { id: "default", path: "C:\\Workspace\\default" },
@@ -231,6 +268,12 @@ test("orders recent chats by when the user opened them", () => {
     "opened-earlier",
     "new-message",
   ]);
+});
+
+test("uses the thread preview when a list entry has no explicit name", () => {
+  assert.equal(threadDisplayName({ name: null, preview: "Goal management" }), "Goal management");
+  assert.equal(threadDisplayName({ name: "Renamed chat", preview: "Goal management" }), "Renamed chat");
+  assert.equal(threadDisplayName({ name: null, preview: "" }), "未命名聊天");
 });
 
 test("does not let a stale thread refresh undo recent access order", () => {

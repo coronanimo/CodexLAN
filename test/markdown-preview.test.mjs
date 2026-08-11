@@ -91,6 +91,8 @@ test("renders inline and block formulas without interpreting fenced code as math
       "",
       "Angles use \\(a^2+b^2=c^2\\).",
       "",
+      "设第 \\(k\\) 类量化策略根据公共数据 \\(x_{i,t}\\) 形成目标持仓。",
+      "",
       "$$",
       "\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}",
       "$$",
@@ -100,12 +102,14 @@ test("renders inline and block formulas without interpreting fenced code as math
       "```",
     ].join("\n"));
 
-    assert.deepEqual(container.children.map((child) => child.tagName), ["P", "P", "DIV", "FIGURE"]);
+    assert.deepEqual(container.children.map((child) => child.tagName), ["P", "P", "P", "DIV", "FIGURE"]);
     assert.equal(container.children[0].children.some((child) => child.className.includes("markdown-math-inline")), true);
     assert.equal(container.children[1].children.some((child) => child.className.includes("markdown-math-inline")), true);
-    assert.equal(container.children[2].attributes.get("data-display"), "true");
-    assert.equal(container.children[2].textContent.includes("\\frac"), true);
-    assert.equal(container.children[3].textContent, "text$not_math$");
+    assert.deepEqual(container.children[2].children.filter((child) => child.className.includes("markdown-math-inline")).map((child) => child.textContent), ["MATH:k", "MATH:x_{i,t}"]);
+    assert.equal(container.children[2].textContent, "设第 MATH:k 类量化策略根据公共数据 MATH:x_{i,t} 形成目标持仓。");
+    assert.equal(container.children[3].attributes.get("data-display"), "true");
+    assert.equal(container.children[3].textContent.includes("\\frac"), true);
+    assert.equal(container.children[4].textContent, "text$not_math$");
   } finally {
     globalThis.document = previousDocument;
     globalThis.katex = previousKatex;

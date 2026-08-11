@@ -41,6 +41,36 @@ export function textLineCount(contents) {
   return lines.length - (lines.at(-1) === "" ? 1 : 0);
 }
 
+export function unifiedDiffChanges(value) {
+  const changes = [];
+  let current = null;
+  const finish = () => {
+    if (!current) return;
+    current.diff = current.lines.join("\n");
+    delete current.lines;
+    if (current.path || current.diff) changes.push(current);
+    current = null;
+  };
+  for (const line of String(value || "").split("\n")) {
+    const boundary = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (boundary) {
+      finish();
+      current = { path: boundary[2], kind: "update", lines: [line] };
+      continue;
+    }
+    if (!current) continue;
+    current.lines.push(line);
+    if (line === "new file mode 100644" || line === "--- /dev/null") current.kind = "add";
+    if (line === "deleted file mode 100644" || line === "+++ /dev/null") current.kind = "delete";
+    const addedPath = /^\+\+\+ b\/(.+)$/.exec(line);
+    if (addedPath && current.kind !== "delete") current.path = addedPath[1];
+    const removedPath = /^--- a\/(.+)$/.exec(line);
+    if (removedPath && current.kind === "delete") current.path = removedPath[1];
+  }
+  finish();
+  return changes;
+}
+
 export function renderFileChanges(element, changes) {
   element.replaceChildren();
   for (const change of changes || []) {
