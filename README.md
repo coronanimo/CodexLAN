@@ -2,54 +2,50 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-**Keep Codex on one Windows workstation. Take control from any PC or phone on your trusted network.**
+**A fast, direct LAN control surface for Codex on your Windows workstation.**
 
-CodexLAN turns the computer that already holds your repositories, tools, credentials, and Codex login into a private, always-available agent workspace. Start a task at your desk, inspect it from your phone, steer the active run, queue the next job, or leave a Goal running without moving the project to another machine.
+## Why CodexLAN exists
 
-It is a browser-native control surface for local Codex, not a remote-desktop stream and not a hosted coding environment. Commands and file access still happen on the Windows server computer; the browser carries the conversation, controls, and live results.
+Official remote access is convenient, but a relayed connection can feel slow when the route to the remote service is poor. That cost is especially noticeable for users in regions with high cross-border latency: even two devices on the same LAN may communicate through a distant relay.
+
+CodexLAN takes the short path. A browser connects directly to the Windows computer running Codex, so prompts, streamed events, conversation switches, and control actions stay on the local network. The workstation keeps the repositories, tools, credentials, and Codex login; other screens get a responsive interface for the same work.
 
 This is an independent community project built against the experimental `codex app-server` protocol. It is not an OpenAI product.
 
-## The problem it solves
+## Best fit
 
-Local Codex works where the real development environment lives, but that usually ties control to one screen. Long runs keep going after you leave the desk; follow-up work arrives while another task is still active; a phone can reach the computer but a terminal or remote desktop is a poor conversation interface. Moving the whole workflow to a hosted environment may also be undesirable when repositories, data, toolchains, or credentials must stay local.
-
-CodexLAN fills that operational gap. One Windows machine owns execution, while every authorized browser gets a purpose-built view of the same projects and conversations.
-
-## Who it is for
-
-- Individual developers, researchers, and data or quantitative practitioners who keep a capable Windows workstation running.
-- People who move between a desk, laptop, iPhone, or Android device and want the same Codex conversations on each screen.
-- Users who run multi-step or long-duration work and need to observe, steer, queue, pause, and resume instead of sending one prompt at a time.
-- Small groups of mutually trusted people who share one Windows environment and Codex account but need separate CodexLAN logins, projects, and conversation lists.
+- Developers and researchers who keep a Windows workstation online and want low-latency access from another computer or phone.
+- Users whose route to an official remote relay is slower than their direct home or office network.
+- People running long or multi-step tasks who need to inspect, steer, queue, pause, and resume work away from the desk.
+- Small groups of mutually trusted users sharing one Windows environment and Codex account while keeping CodexLAN projects and conversations separate.
 
 CodexLAN is not designed as a public SaaS or as isolation for untrusted tenants. Web accounts separate application data; they do not create separate Windows identities or separate Codex subscriptions.
 
-## Product highlights
+## What changes in daily use
 
-### Leave the desk without abandoning the run
+### Direct LAN interaction
 
-Open the same workspace from a desktop browser, an iPhone Home Screen shortcut, or the optional Android client. Conversation history, current execution, queue state, and Goal state come from the server rather than one browser's local storage.
+Prompts and live events travel directly between the browser and the workstation. On a stable LAN, sending, streaming, switching conversations, and stopping work stay responsive without depending on a remote relay path.
 
-### Keep work moving beyond one prompt
+### Continue from any screen
 
-Send guidance into the active turn without starting over. Queue follow-up tasks in order. Use Plan mode before implementation. Create a durable Goal that Codex can continue when the thread becomes idle, with pause, resume, clear, elapsed usage, and an optional token budget.
+Start at the desk and check the same run from a phone or laptop. Inspect current output, steer the active turn, stop it, or download generated files. iPhone works through the browser or a Home Screen shortcut; Android also has an optional WebView client.
 
-### See what the agent is actually doing
+### More than one prompt at a time
 
-Follow reasoning summaries, commands, incremental output, elapsed time, context consumption, account limits, structured plans, and live file diffs. CodexLAN is built for supervising real work, not showing a spinner until a final answer appears.
+Queue follow-up tasks while a turn is running, send guidance without restarting, enter Plan mode before implementation, or create a long-running Goal with pause, resume, clear, elapsed usage, and an optional token budget.
 
-### Keep the working environment on your machine
+### Visible execution
 
-Repositories, local data, shells, development tools, credentials, and Codex history stay on the Windows computer. Attach files or pasted images, preview supported documents, and download generated outputs without turning the server into a general public file host.
+See reasoning summaries, commands, incremental output, elapsed time, context consumption, account limits, structured plans, and live file diffs. The interface makes it possible to tell whether work is progressing, blocked on a command, or changing the wrong files.
 
-### Share access without mixing the interface
+### One local working environment
 
-Administrators can create member accounts and assign projects. Each user gets separate web sessions, project ownership, conversation access, queues, and recent-history ordering while the trusted group continues to share the underlying Windows and Codex environment.
+Repositories, local data, shells, development tools, credentials, and Codex history stay on the Windows computer. The browser can send attachments, paste images, preview files, and download results without creating a second development environment.
 
-### Run it as a service, not a fragile terminal window
+### Supervised background operation
 
-The background supervisor records server state, exposes explicit status and log commands, restarts a process that crashes after reaching readiness, and refuses an in-process restart that would kill its own control path.
+The supervisor records service state, exposes status and log commands, restarts a server that crashes after reaching readiness, and prevents a managed server from killing its own supervisor through an internal restart.
 
 ## Requirements
 
@@ -73,15 +69,14 @@ npm run service:start
 
 Open the local address printed by the service and create the first administrator account. Other devices use the printed LAN address.
 
-The checked-in example is deliberately machine-neutral:
+The copied configuration starts with:
 
 ```json
 {
   "$schema": "./codexlan.schema.json",
   "port": 8688,
   "host": "auto",
-  "dataRoot": "../data",
-  "codexBin": null
+  "dataRoot": "../data"
 }
 ```
 
@@ -93,7 +88,7 @@ Edit the copied `config/codexlan.json`, not the example file. Supported settings
 | `host` | `auto` selects a private IPv4 interface; `127.0.0.1` disables LAN access. |
 | `dataRoot` | Accounts, sessions, queues, thread settings, and supervisor state. Relative paths resolve from `config/`. |
 | `workspaceRoot` | Optional boundary for automatically managed user projects. When omitted, CodexLAN uses `<dataRoot>/projects`. Existing projects may still point to their own absolute directories. |
-| `codexBin` | Optional path to a specific Codex executable. `null` uses `codex` from `PATH`. |
+| `codexBin` | Optional path to a specific Codex executable. When omitted, CodexLAN uses `codex` from `PATH`. |
 
 Unknown settings and invalid values stop startup with an error instead of being ignored.
 

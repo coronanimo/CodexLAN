@@ -2,6 +2,5 @@
   "$schema": "./codexlan.schema.json",
   "port": 8688,
   "host": "auto",
-  "dataRoot": "../data",
-  "codexBin": null
+  "dataRoot": "../data"
 }
