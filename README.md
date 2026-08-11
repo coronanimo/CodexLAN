@@ -2,16 +2,54 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-CodexLAN runs Codex on a Windows computer and exposes the conversation workspace to browsers on the same trusted network. The browser is only the interface: commands, file access, Codex authentication, and conversation history remain on the server computer.
+**Keep Codex on one Windows workstation. Take control from any PC or phone on your trusted network.**
+
+CodexLAN turns the computer that already holds your repositories, tools, credentials, and Codex login into a private, always-available agent workspace. Start a task at your desk, inspect it from your phone, steer the active run, queue the next job, or leave a Goal running without moving the project to another machine.
+
+It is a browser-native control surface for local Codex, not a remote-desktop stream and not a hosted coding environment. Commands and file access still happen on the Windows server computer; the browser carries the conversation, controls, and live results.
 
 This is an independent community project built against the experimental `codex app-server` protocol. It is not an OpenAI product.
 
-## What it provides
+## The problem it solves
 
-- One conversation workspace for desktop and mobile browsers, with an optional Android WebView client.
-- Live reasoning, commands, output, file changes, elapsed time, context usage, and account limits.
-- Guidance for the active turn, a persistent queue for later work, Plan mode, and long-running Goals with pause, resume, clear, and optional token budgets.
-- Multiple web accounts, project ownership, attachments, file preview and download, Markdown, tables, and local formula rendering.
+Local Codex works where the real development environment lives, but that usually ties control to one screen. Long runs keep going after you leave the desk; follow-up work arrives while another task is still active; a phone can reach the computer but a terminal or remote desktop is a poor conversation interface. Moving the whole workflow to a hosted environment may also be undesirable when repositories, data, toolchains, or credentials must stay local.
+
+CodexLAN fills that operational gap. One Windows machine owns execution, while every authorized browser gets a purpose-built view of the same projects and conversations.
+
+## Who it is for
+
+- Individual developers, researchers, and data or quantitative practitioners who keep a capable Windows workstation running.
+- People who move between a desk, laptop, iPhone, or Android device and want the same Codex conversations on each screen.
+- Users who run multi-step or long-duration work and need to observe, steer, queue, pause, and resume instead of sending one prompt at a time.
+- Small groups of mutually trusted people who share one Windows environment and Codex account but need separate CodexLAN logins, projects, and conversation lists.
+
+CodexLAN is not designed as a public SaaS or as isolation for untrusted tenants. Web accounts separate application data; they do not create separate Windows identities or separate Codex subscriptions.
+
+## Product highlights
+
+### Leave the desk without abandoning the run
+
+Open the same workspace from a desktop browser, an iPhone Home Screen shortcut, or the optional Android client. Conversation history, current execution, queue state, and Goal state come from the server rather than one browser's local storage.
+
+### Keep work moving beyond one prompt
+
+Send guidance into the active turn without starting over. Queue follow-up tasks in order. Use Plan mode before implementation. Create a durable Goal that Codex can continue when the thread becomes idle, with pause, resume, clear, elapsed usage, and an optional token budget.
+
+### See what the agent is actually doing
+
+Follow reasoning summaries, commands, incremental output, elapsed time, context consumption, account limits, structured plans, and live file diffs. CodexLAN is built for supervising real work, not showing a spinner until a final answer appears.
+
+### Keep the working environment on your machine
+
+Repositories, local data, shells, development tools, credentials, and Codex history stay on the Windows computer. Attach files or pasted images, preview supported documents, and download generated outputs without turning the server into a general public file host.
+
+### Share access without mixing the interface
+
+Administrators can create member accounts and assign projects. Each user gets separate web sessions, project ownership, conversation access, queues, and recent-history ordering while the trusted group continues to share the underlying Windows and Codex environment.
+
+### Run it as a service, not a fragile terminal window
+
+The background supervisor records server state, exposes explicit status and log commands, restarts a process that crashes after reaching readiness, and refuses an in-process restart that would kill its own control path.
 
 ## Requirements
 
