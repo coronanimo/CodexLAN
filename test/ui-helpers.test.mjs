@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "../public/elapsed-time.js";
 import { downloadableFiles, projectForLocalFile, textPreviewKind } from "../public/file-downloads.js";
-import { MAX_LIVE_COMMAND_OUTPUT, MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandDisplayText, commandExecutionSnapshot, commandOutputTail, executionItemDuration, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "../public/execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeListedThread, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName, threadStatusValue } from "../public/workspace.js";
+import { MAX_LIVE_COMMAND_OUTPUT, MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandDisplayText, commandExecutionSnapshot, commandOutputTail, executionBodyHasContent, executionItemDuration, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "../public/execution-events.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeListedThread, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName, threadStatusValue } from "../public/workspace.js";
 import { createAnsiOutputState, parseAnsiOutput, parseAnsiOutputChunk } from "../public/ansi-output.js";
 import { diffLineKind, diffLineStats, textLineCount, unifiedDiffChanges } from "../public/diff-output.js";
 import { isMobileComposer, shouldSubmitPromptFromKeyboard } from "../public/composer.js";
@@ -340,6 +340,30 @@ test("keeps streamed history usable until canonical history replaces it", () => 
   assert.equal(hasCurrentThreadHistory({ ...loaded, syncedUpdatedAt: null }), false);
   assert.equal(hasCurrentThreadHistory({ ...loaded, updatedAt: "2026-08-08T12:01:00Z" }), false);
   assert.equal(hasCurrentThreadHistory({ turns: [], history: { hasMore: false } }), false);
+});
+
+test("invalidates cached history after a live event stream interruption", () => {
+  const loaded = {
+    id: "thread",
+    turns: [{ id: "turn" }],
+    history: { hasMore: false },
+    historyLive: true,
+    syncedUpdatedAt: "2026-08-08T12:00:00Z",
+    updatedAt: "2026-08-08T12:00:00Z",
+  };
+  const invalidated = invalidateThreadHistory(loaded);
+  assert.notEqual(invalidated, loaded);
+  assert.equal(invalidated.historyLive, false);
+  assert.equal(invalidated.syncedUpdatedAt, null);
+  assert.equal(hasCurrentThreadHistory(invalidated), false);
+  assert.equal(invalidateThreadHistory({ id: "summary" }).id, "summary");
+});
+
+test("keeps collapsed incremental command output measurable without an ANSI stream", () => {
+  assert.equal(executionBodyHasContent({ incrementalOutput: true, ansiStream: null, pendingBody: "queued output" }), true);
+  assert.equal(executionBodyHasContent({ incrementalOutput: true, ansiStream: null, pendingBody: "" }), false);
+  assert.equal(executionBodyHasContent({ incrementalOutput: true, ansiStream: { renderedLength: 4 }, pendingBody: "" }), true);
+  assert.equal(executionBodyHasContent({ body: "completed output" }), true);
 });
 
 test("does not let an older thread-list response remove a newly created chat", () => {

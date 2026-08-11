@@ -2,8 +2,8 @@ import { downloadableFiles, projectForLocalFile, textPreviewKind } from "./file-
 import { renderMarkdownDocument } from "./markdown-preview.js";
 import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
-import { commandDisplayText, commandOutputTail, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName } from "./workspace.js";
+import { commandDisplayText, commandOutputTail, executionBodyHasContent, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName } from "./workspace.js";
 import { appendAnsiOutput, renderAnsiOutput } from "./ansi-output.js";
 import { diffLineStats, renderFileChanges, unifiedDiffChanges } from "./diff-output.js";
 import { clipboardImageFiles, clipboardImageName, isMobileComposer, messageWithAttachments, resizeComposerInput } from "./composer.js";
@@ -1514,7 +1514,12 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
     entry.body.classList.remove("live-output-truncated");
   }
   const isFileChange = entry.item.type === "fileChange";
-  const hasBody = incrementalOutput ? entry.ansiStream.renderedLength > 0 : Boolean(presentation.body);
+  const hasBody = executionBodyHasContent({
+    incrementalOutput,
+    ansiStream: entry.ansiStream,
+    pendingBody: entry.pendingBody,
+    body: presentation.body,
+  });
   entry.body.hidden = isFileChange || !hasBody;
   entry.root.classList.toggle("empty", !isFileChange && !hasBody);
   entry.root.classList.toggle("diff-preview-entry", isFileChange);
@@ -3255,6 +3260,7 @@ function openEventStream() {
     interrupted = false;
   });
   stream.addEventListener("error", () => {
+    if (!interrupted) invalidateCachedThreadHistories();
     interrupted = true;
   });
   stream.addEventListener("server", (event) => {
@@ -3269,6 +3275,14 @@ function openEventStream() {
   });
   state.eventStream = stream;
   return stream;
+}
+
+function invalidateCachedThreadHistories() {
+  for (const [projectId, threads] of state.threads) {
+    state.threads.set(projectId, threads.map((thread) => (
+      isLocalThreadId(thread.id) ? thread : invalidateThreadHistory(thread)
+    )));
+  }
 }
 
 function waitForEventStream() {

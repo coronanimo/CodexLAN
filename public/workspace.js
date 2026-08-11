@@ -88,6 +88,11 @@ export function hasCurrentThreadHistory(thread) {
   return Boolean(syncedAt) && (!updatedAt || syncedAt >= updatedAt);
 }
 
+export function invalidateThreadHistory(thread) {
+  if (!thread?.history || !Array.isArray(thread.turns)) return thread;
+  return { ...thread, historyLive: false, syncedUpdatedAt: null };
+}
+
 export function newThreadSettings({ projectSettings = {}, currentThread = null, projectId = null, models = [] } = {}) {
   const currentBelongsToProject = currentThread?.runtime?.projectId === projectId;
   const inherited = currentBelongsToProject ? currentThread?.settings || {} : {};

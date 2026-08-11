@@ -14,6 +14,12 @@ export function commandOutputTail(previous, appended, limit = MAX_LIVE_COMMAND_O
   };
 }
 
+export function executionBodyHasContent({ incrementalOutput = false, ansiStream = null, pendingBody = "", body = "" } = {}) {
+  return incrementalOutput
+    ? Boolean(ansiStream?.renderedLength || pendingBody)
+    : Boolean(body);
+}
+
 export function commandDisplayText(value) {
   const command = String(value || "").trim();
   const shell = command.match(/^(?:"[^"\r\n]*\b(?:pwsh|powershell)(?:\.exe)?"|[^\r\n]*?\b(?:pwsh|powershell)(?:\.exe)?)(?:\s+|$)([\s\S]*)$/i);
