@@ -84,8 +84,7 @@
               </button>
               <div id="account-menu" class="topbar-menu account-menu" hidden>
                 <button id="refresh-workspace" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a7 7 0 1 0 1 6M19 3v5h-5"/></svg><span>刷新工作台</span></button>
-                <button id="open-global-settings" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h5M13 7h7M4 12h9M17 12h3M4 17h2M10 17h10"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>工作台配置</span></button>
-                <button id="open-settings" class="quiet-button account-service-row" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg><span>服务地址</span><small id="server-status" class="status-dot account-connection-status" aria-label="正在连接服务"></small></button>
+                <button id="open-global-settings" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h5M13 7h7M4 12h9M17 12h3M4 17h2M10 17h10"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>设置</span></button>
                 <div class="account-menu-divider"></div>
                 <button id="manage-users" class="quiet-button" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6"/></svg><span>管理成员账号</span></button>
                 <button id="change-display-name" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M3 21v-2a5 5 0 0 1 5-5h2M15 18l5-5M17 11l2 2"/></svg><span>修改显示名称</span></button>
@@ -209,14 +208,6 @@
       </form>
     </dialog>
 
-    <dialog id="connection-dialog" class="project-dialog connection-dialog">
-      <form method="dialog">
-        <div class="dialog-heading"><div><span>Android APK</span><h2>连接地址</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
-        <p>打开地址后使用自己的账号登录。请只在可信的专用局域网中使用。</p>
-        <code id="connection-address">—</code>
-      </form>
-    </dialog>
-
     <dialog id="project-manager-dialog" class="project-manager-dialog">
       <form method="dialog">
         <div class="dialog-heading"><div><span>项目管理</span><h2>本机项目目录</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
@@ -226,26 +217,37 @@
       </form>
     </dialog>
 
-    <dialog id="global-config-dialog" class="global-config-dialog">
+    <dialog id="global-config-dialog" class="global-config-dialog settings-dialog">
       <form method="dialog">
-        <div class="dialog-heading"><div><span>工作台配置</span><h2>刷新与聊天配置</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
-        <section class="config-card">
-          <div><strong>工作台</strong><p>局域网连接与当前账号的本地显示偏好。</p></div>
-          <label>自动刷新<select id="refresh-interval"><option value="0">关闭（只手动刷新）</option><option value="15">每 15 秒</option><option value="30">每 30 秒</option><option value="60">每分钟</option></select></label>
-          <div class="connection-readout"><span>服务地址</span><code id="global-connection-address">—</code></div>
-          <button id="refresh-from-config" class="quiet-button" type="button">立即刷新</button>
-        </section>
-        <section class="config-card thread-execution-card">
-          <div><strong>当前聊天执行配置</strong><p id="config-thread-name">请先选择聊天。</p></div>
-          <div class="model-controls config-model-controls">
-            <label>模型<select id="model-select"></select></label>
-            <label>推理深度<select id="effort-select"></select></label>
-            <label id="tier-field">速度档位<select id="tier-select"></select></label>
-            <label>思路摘要<select id="summary-select"><option value="auto">自动</option><option value="concise">简洁</option><option value="detailed">详细</option><option value="none">关闭</option></select></label>
+        <div class="dialog-heading"><div><span>CodexLAN</span><h2>设置</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
+        <section class="settings-section connection-settings-section">
+          <div class="settings-section-heading">
+            <div><strong>连接</strong><p>当前浏览器正在访问的 CodexLAN 服务。</p></div>
+            <span class="settings-connection-state"><small id="server-status" class="status-dot settings-status-dot" aria-label="正在连接服务"></small><strong id="server-status-label">正在连接</strong></span>
           </div>
-          <p id="tier-description" class="tier-description"></p>
-          <p class="config-note">每个聊天独立保存。修改后只影响这个聊天随后启动的任务，不改变其他聊天或正在运行的任务。</p>
+          <div class="settings-address-row"><code id="global-connection-address">—</code><span class="settings-address-actions"><button id="copy-connection-address" class="quiet-button" type="button">复制</button><button id="change-connection-address" class="quiet-button" type="button" hidden>更改</button></span></div>
+          <p class="settings-help">其他设备只应在可信的专用局域网中使用这个地址。</p>
         </section>
+        <section class="settings-section preference-settings-section">
+          <div class="settings-section-heading"><div><strong>本机偏好</strong><p>只对当前账号和这台浏览器生效。</p></div></div>
+          <label class="settings-control-row settings-toggle-row">
+            <span><strong>后台完成提醒</strong><small id="completion-notification-description">任务在后台结束时提醒我。</small></span>
+            <input id="completion-notifications" type="checkbox" aria-describedby="completion-notification-description">
+          </label>
+          <label class="settings-control-row settings-select-row">
+            <span><strong>发送快捷键</strong><small>另一种组合键始终用于换行。</small></span>
+            <select id="send-shortcut"><option value="enter">Enter 发送</option><option value="ctrl-enter">Ctrl+Enter 发送</option></select>
+          </label>
+        </section>
+        <section class="settings-section thread-settings-section">
+          <div class="settings-section-heading"><div><strong>当前聊天</strong><p id="config-thread-name">请先选择聊天。</p></div></div>
+          <label class="settings-control-row settings-select-row">
+            <span><strong>思路摘要</strong><small>控制回答前显示的推理摘要详细程度。</small></span>
+            <select id="summary-select"><option value="auto">自动</option><option value="concise">简洁</option><option value="detailed">详细</option><option value="none">关闭</option></select>
+          </label>
+          <p class="config-note">该项按聊天独立保存，只影响随后启动的任务。</p>
+        </section>
+        <div class="dialog-actions settings-dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">完成</button></div>
       </form>
     </dialog>
 

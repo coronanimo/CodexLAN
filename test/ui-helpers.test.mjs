@@ -109,6 +109,9 @@ test("keeps IME and mobile Enter keys inside the prompt", () => {
   assert.equal(shouldSubmitPromptFromKeyboard({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 229 }), false);
   assert.equal(shouldSubmitPromptFromKeyboard({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13 }, { mobile: true }), false);
   assert.equal(shouldSubmitPromptFromKeyboard({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13 }), true);
+  assert.equal(shouldSubmitPromptFromKeyboard({ key: "Enter", shiftKey: false, ctrlKey: true, keyCode: 13 }), false);
+  assert.equal(shouldSubmitPromptFromKeyboard({ key: "Enter", shiftKey: false, keyCode: 13 }, { shortcut: "ctrl-enter" }), false);
+  assert.equal(shouldSubmitPromptFromKeyboard({ key: "Enter", shiftKey: false, ctrlKey: true, keyCode: 13 }, { shortcut: "ctrl-enter" }), true);
   assert.equal(isMobileComposer({ userAgent: "Mozilla/5.0 (Linux; Android 15) Mobile" }), true);
 });
 

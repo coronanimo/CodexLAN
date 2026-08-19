@@ -51,7 +51,9 @@ html.android-shell, html.android-shell body { overscroll-behavior: none; }
   .run-strip { right: 0; width: calc(100vw - 18px); max-height: min(52dvh, 360px); padding: 7px; }
   .global-activity { top: 56px; }
   .model-controls { width: 100%; justify-content: start; margin-top: 13px; overflow-x: hidden; flex-wrap: wrap; padding-bottom: 2px; }
-  .config-model-controls { grid-template-columns: minmax(0, 1fr); }
+  .settings-control-row { align-items: start; }
+  .settings-select-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; }
+  .settings-select-row select { width: 100%; }
   .conversation { padding: 11px 15px 20px; }
   .jump-latest { right: 15px; bottom: 10px; }
   .message { max-width: 100%; }

@@ -74,12 +74,7 @@ const ui = {
   conversationStage: $(".conversation-stage"),
   jumpLatest: $("#jump-latest"),
   queuePanel: $("#queue-panel"),
-  model: $("#model-select"),
-  effort: $("#effort-select"),
-  tier: $("#tier-select"),
   summary: $("#summary-select"),
-  tierField: $("#tier-field"),
-  tierDescription: $("#tier-description"),
   composerModel: $("#composer-model-select"),
   composerEffort: $("#composer-effort-select"),
   composerTier: $("#composer-tier-select"),
@@ -99,9 +94,9 @@ const ui = {
   composerAttachments: $("#composer-attachments"),
   activity: $("#activity"),
   serverStatus: $("#server-status"),
-  openSettings: $("#open-settings"),
-  connectionDialog: $("#connection-dialog"),
-  connectionAddress: $("#connection-address"),
+  serverStatusLabel: $("#server-status-label"),
+  copyConnectionAddress: $("#copy-connection-address"),
+  changeConnectionAddress: $("#change-connection-address"),
   projectManagerDialog: $("#project-manager-dialog"),
   projectManagerList: $("#project-manager-list"),
   newProjectFromManager: $("#new-project-from-manager"),
@@ -146,10 +141,11 @@ const ui = {
   userPassword: $("#user-password"),
   userPasswordConfirm: $("#user-password-confirm"),
   userFormError: $("#user-form-error"),
-  refreshInterval: $("#refresh-interval"),
-  refreshFromConfig: $("#refresh-from-config"),
   globalConnectionAddress: $("#global-connection-address"),
   configThreadName: $("#config-thread-name"),
+  completionNotifications: $("#completion-notifications"),
+  completionNotificationDescription: $("#completion-notification-description"),
+  sendShortcut: $("#send-shortcut"),
   projectDialog: $("#project-dialog"),
   projectForm: $("#project-form"),
   projectKicker: $("#project-dialog-kicker"),
@@ -237,7 +233,6 @@ const state = {
   editingQueueItemId: null,
   mode: "queue",
   runStripOpen: false,
-  refreshTimer: null,
   workspaceRefreshPromise: null,
   materializingThread: false,
   submittingMessage: false,
@@ -270,6 +265,9 @@ const state = {
   workspaceRoot: null,
   sidebarView: "projects",
   sidebarOrder: "original",
+  completionNotificationsEnabled: false,
+  backgroundCompletionCount: 0,
+  sendShortcut: "enter",
 };
 
 const layout = createWorkbenchLayout({ ui, state, renderRunStrip, renderRecentThreads });
@@ -281,7 +279,12 @@ const {
   closeTopbarOverlays,
 } = layout;
 const platformEntry = await import(isMobileComposer(navigator) ? "./mobile.js" : "./desktop.js");
-const platform = platformEntry.bindPlatformInteractions({ ui, cancelScrollCommand, closeTopbarOverlays });
+const platform = platformEntry.bindPlatformInteractions({
+  ui,
+  cancelScrollCommand,
+  closeTopbarOverlays,
+  getSubmitShortcut: () => state.sendShortcut,
+});
 const { closeSidebar } = platform;
 const compactSelects = bindCompactSelects();
 
@@ -330,12 +333,10 @@ async function enterWorkspace(session) {
   ui.authShell.hidden = true;
   ui.app.hidden = false;
   renderAccount();
-  ui.connectionAddress.textContent = location.origin;
   ui.globalConnectionAddress.textContent = location.origin;
-  ui.refreshInterval.value = localStorage.getItem(userStorageKey("refresh-seconds")) || "0";
+  initializeLocalPreferences();
   await refreshWorkspace({ quiet: true });
   state.booted = true;
-  configureAutoRefresh();
 }
 
 function showAuth(setupRequired, message = "") {
@@ -968,15 +969,12 @@ function renderSettings() {
   const thread = currentThread();
   const settings = thread?.settings || {};
   const selectedModel = selectedModelForThread(thread);
-  fillOptions(ui.model, state.models, (model) => model.displayName || model.id, selectedModel?.id, "当前模型不可用");
   fillOptions(ui.composerModel, state.models, compactModelLabel, selectedModel?.id, "没有可用模型");
   const efforts = selectedModel?.supportedReasoningEfforts || [];
   const selectedEffort = settings.effort || selectedModel?.defaultReasoningEffort || efforts[0]?.reasoningEffort;
-  fillOptions(ui.effort, efforts, (effort) => reasoningLabel(effort.reasoningEffort), selectedEffort, "默认");
   fillCompactEffortOptions(ui.composerEffort, efforts, selectedEffort);
   const tiers = selectedModel?.serviceTiers || [];
   const selectedTier = settings.serviceTier || "";
-  fillTierOptions(ui.tier, tiers, selectedTier);
   fillCompactTierOptions(ui.composerTier, tiers, selectedTier);
   ui.summary.value = ["auto", "concise", "detailed", "none"].includes(settings.summary) ? settings.summary : "detailed";
   const planAvailable = state.collaborationModes.some((entry) => entry.mode === "plan");
@@ -986,24 +984,14 @@ function renderSettings() {
   ui.planMode.setAttribute("aria-pressed", String(planActive));
   ui.planMode.setAttribute("aria-label", planActive ? "退出规划模式" : "进入规划模式");
   ui.planMode.title = planActive ? "退出规划模式" : "进入规划模式；也可输入 /plan";
-  ui.tierField.hidden = !selectedModel;
   const disabled = !thread || !state.models.length;
-  ui.model.disabled = disabled;
   ui.composerModel.disabled = disabled;
-  ui.effort.disabled = disabled || !efforts.length;
   ui.composerEffort.disabled = disabled || !efforts.length;
-  ui.tier.disabled = disabled || !tiers.length;
   ui.composerTier.disabled = disabled || !tiers.length;
   compactSelects.refresh();
   ui.summary.disabled = !thread;
   ui.planMode.disabled = !thread || isActiveThreadRuntime(currentRuntime());
-  ui.configThreadName.textContent = thread ? `当前聊天：${threadDisplayName(thread)}` : "请先选择聊天。";
-  const selectedTierEntry = tiers.find((tier) => tier.id === selectedTier);
-  ui.tierDescription.textContent = selectedTierEntry
-    ? `当前速度档位：${serviceTierLabel(selectedTierEntry)}。`
-    : tiers.length
-      ? "标准（默认）：未请求加速服务档位。"
-      : "该模型不提供可选速度档位。";
+  ui.configThreadName.textContent = thread ? threadDisplayName(thread) : "请先选择聊天。";
 }
 
 function selectedModelForThread(thread) {
@@ -1023,15 +1011,6 @@ function fillOptions(select, entries, label, selectedId, emptyLabel) {
   for (const entry of entries) {
     const value = entry.id || entry.reasoningEffort;
     const option = new Option(label(entry), value, false, value === selectedId);
-    select.append(option);
-  }
-}
-
-function fillTierOptions(select, tiers, selectedId) {
-  select.replaceChildren();
-  select.append(new Option("标准（默认）", "", false, !selectedId));
-  for (const tier of tiers) {
-    const option = new Option(serviceTierLabel(tier), tier.id, false, tier.id === selectedId);
     select.append(option);
   }
 }
@@ -3799,6 +3778,7 @@ function handleCodexEvent(threadId, event) {
       completeExecutionGroup(params.turn?.id, params.turn?.status || "completed", params.turn);
       updateComposer();
     }
+    notifyTurnCompletion(projectId, threadId, params.turn);
     reconcileCompletedThread(projectId, threadId).catch(showError);
     renderRunStrip();
     return;
@@ -4061,22 +4041,25 @@ async function saveSettings(overrides = {}, { quiet = false } = {}) {
   const project = currentProject();
   const thread = currentThread();
   if (!project || !thread) return;
-  const modelId = Object.hasOwn(overrides, "model") ? overrides.model : ui.model.value;
+  const currentSettings = thread.settings || {};
+  const modelId = Object.hasOwn(overrides, "model")
+    ? overrides.model
+    : currentSettings.model || selectedModelForThread(thread)?.id || null;
   const model = state.models.find((entry) => entry.id === modelId);
   const efforts = model?.supportedReasoningEfforts || [];
   const tiers = model?.serviceTiers || [];
-  const effortValue = Object.hasOwn(overrides, "effort") ? overrides.effort : (Object.hasOwn(overrides, "model") ? thread.settings?.effort : ui.effort.value);
-  const tierValue = Object.hasOwn(overrides, "serviceTier") ? overrides.serviceTier : (Object.hasOwn(overrides, "model") ? thread.settings?.serviceTier : ui.tier.value);
+  const effortValue = Object.hasOwn(overrides, "effort") ? overrides.effort : currentSettings.effort;
+  const tierValue = Object.hasOwn(overrides, "serviceTier") ? overrides.serviceTier : currentSettings.serviceTier;
   const effort = efforts.some((entry) => entry.reasoningEffort === effortValue) ? effortValue : (model?.defaultReasoningEffort || efforts[0]?.reasoningEffort);
   const serviceTier = tiers.some((entry) => entry.id === tierValue) ? tierValue : "";
   const settings = {
     model: modelId || null,
     effort: effort || null,
     serviceTier: serviceTier || null,
-    summary: (Object.hasOwn(overrides, "summary") ? overrides.summary : ui.summary.value) || "detailed",
+    summary: (Object.hasOwn(overrides, "summary") ? overrides.summary : currentSettings.summary) || "detailed",
     collaborationMode: Object.hasOwn(overrides, "collaborationMode")
       ? overrides.collaborationMode
-      : thread.settings?.collaborationMode || "default",
+      : currentSettings.collaborationMode || "default",
   };
   if (isLocalThreadId(thread.id)) {
     updateThreadInState(project.id, { ...thread, settings });
@@ -4172,31 +4155,6 @@ async function restoreSelectionAfterRefresh(projectId, rememberedThreadId, previ
   renderCurrentThread();
 }
 
-function configureAutoRefresh() {
-  clearTimeout(state.refreshTimer);
-  state.refreshTimer = null;
-  const seconds = Number(ui.refreshInterval.value);
-  localStorage.setItem(userStorageKey("refresh-seconds"), String(seconds));
-  scheduleAutoRefresh();
-}
-
-function scheduleAutoRefresh(delayMs = null) {
-  clearTimeout(state.refreshTimer);
-  state.refreshTimer = null;
-  const seconds = Number(ui.refreshInterval.value);
-  if (!state.booted || document.hidden || !Number.isFinite(seconds) || seconds <= 0) return;
-  state.refreshTimer = setTimeout(async () => {
-    state.refreshTimer = null;
-    try {
-      await refreshWorkspace({ quiet: true });
-    } catch (error) {
-      showError(error);
-    } finally {
-      scheduleAutoRefresh();
-    }
-  }, delayMs === null ? seconds * 1000 : Math.max(0, delayMs));
-}
-
 function scheduleResume(delay = 120) {
   if (!state.booted || document.hidden) return;
   clearTimeout(state.resumeTimer);
@@ -4271,7 +4229,77 @@ function openGlobalSettings() {
   closeTopbarOverlays();
   closeSidebar();
   renderSettings();
+  renderLocalPreferences();
   ui.globalConfigDialog.showModal();
+}
+
+function initializeLocalPreferences() {
+  state.sendShortcut = localStorage.getItem(userStorageKey("send-shortcut")) === "ctrl-enter" ? "ctrl-enter" : "enter";
+  state.completionNotificationsEnabled = localStorage.getItem(userStorageKey("completion-notifications")) === "true";
+  renderLocalPreferences();
+}
+
+function renderLocalPreferences() {
+  ui.sendShortcut.value = state.sendShortcut;
+  ui.completionNotifications.checked = state.completionNotificationsEnabled;
+  ui.changeConnectionAddress.hidden = !window.CodexAndroid?.openConnectionSettings;
+  const systemNotificationsReady = "Notification" in window && Notification.permission === "granted";
+  ui.completionNotificationDescription.textContent = !state.completionNotificationsEnabled
+    ? "任务在后台结束时提醒我。"
+    : systemNotificationsReady
+      ? "发送系统通知，并在页签标题标出完成任务。"
+      : "系统通知不可用时，仍会在页签标题标出完成任务。";
+}
+
+function saveSendShortcut() {
+  state.sendShortcut = ui.sendShortcut.value === "ctrl-enter" ? "ctrl-enter" : "enter";
+  localStorage.setItem(userStorageKey("send-shortcut"), state.sendShortcut);
+}
+
+async function saveCompletionNotificationPreference() {
+  state.completionNotificationsEnabled = ui.completionNotifications.checked;
+  localStorage.setItem(userStorageKey("completion-notifications"), String(state.completionNotificationsEnabled));
+  if (state.completionNotificationsEnabled
+    && window.isSecureContext
+    && "Notification" in window
+    && Notification.permission === "default") {
+    try {
+      await Notification.requestPermission();
+    } catch {
+      // The tab-title reminder remains available when the browser rejects system notifications.
+    }
+  }
+  renderLocalPreferences();
+}
+
+function notifyTurnCompletion(projectId, threadId, turn) {
+  if (!state.completionNotificationsEnabled || !document.hidden) return;
+  state.backgroundCompletionCount += 1;
+  document.title = `(${state.backgroundCompletionCount}) CodexLAN`;
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const project = state.projects.find((entry) => entry.id === projectId);
+  const thread = findThread(projectId, threadId);
+  const status = turn?.status || "completed";
+  const title = status === "failed" ? "任务执行失败" : status === "interrupted" ? "任务已停止" : "任务已完成";
+  const body = [project?.name, thread ? threadDisplayName(thread) : null].filter(Boolean).join(" · ");
+  try {
+    const notification = new Notification(title, {
+      body,
+      tag: `codexlan-turn-${turn?.id || threadId}`,
+    });
+    notification.addEventListener("click", () => {
+      window.focus();
+      notification.close();
+    });
+  } catch {
+    // Browser and WebView support varies; the tab-title reminder is the fallback.
+  }
+}
+
+function clearBackgroundCompletionIndicator() {
+  if (!state.backgroundCompletionCount) return;
+  state.backgroundCompletionCount = 0;
+  document.title = "CodexLAN";
 }
 
 function openProjectManager() {
@@ -4504,6 +4532,7 @@ function setServerStatus(online, text) {
   ui.serverStatus.textContent = "";
   ui.serverStatus.setAttribute("aria-label", text);
   ui.serverStatus.title = text;
+  ui.serverStatusLabel.textContent = text;
   updateComposer();
 }
 
@@ -4990,15 +5019,14 @@ ui.visualizationDialog.addEventListener("click", (event) => {
   if (event.target === ui.visualizationDialog) ui.visualizationDialog.close();
 });
 ui.conversation.addEventListener("scroll", updateJumpLatest, { passive: true });
-ui.model.addEventListener("change", () => saveSettings({ model: ui.model.value }));
-ui.effort.addEventListener("change", () => saveSettings({ effort: ui.effort.value }));
-ui.tier.addEventListener("change", () => saveSettings({ serviceTier: ui.tier.value }));
 ui.summary.addEventListener("change", () => saveSettings({ summary: ui.summary.value }));
 ui.composerModel.addEventListener("change", () => saveSettings({ model: ui.composerModel.value }));
 ui.composerEffort.addEventListener("change", () => saveSettings({ effort: ui.composerEffort.value }));
 ui.composerTier.addEventListener("change", () => saveSettings({ serviceTier: ui.composerTier.value }));
-ui.refreshInterval.addEventListener("change", configureAutoRefresh);
-ui.refreshFromConfig.addEventListener("click", () => refreshWorkspace());
+ui.copyConnectionAddress.addEventListener("click", () => copyWithFeedback(ui.copyConnectionAddress, location.origin));
+ui.changeConnectionAddress.addEventListener("click", () => window.CodexAndroid?.openConnectionSettings?.());
+ui.completionNotifications.addEventListener("change", () => { void saveCompletionNotificationPreference(); });
+ui.sendShortcut.addEventListener("change", saveSendShortcut);
 ui.projectForm.addEventListener("submit", saveProject);
 ui.projectRenameForm.addEventListener("submit", saveProjectRename);
 ui.deleteProject.addEventListener("click", deleteCurrentProject);
@@ -5019,29 +5047,23 @@ for (const dialog of document.querySelectorAll("dialog")) {
   });
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") {
-    clearTimeout(state.refreshTimer);
-    state.refreshTimer = null;
-    stopEventStream({ interrupted: true });
-    return;
-  }
+  if (document.visibilityState === "hidden") return;
+  clearBackgroundCompletionIndicator();
   ensureEventStream();
   scheduleResume(0);
-  scheduleAutoRefresh(0);
 });
 window.addEventListener("pageshow", (event) => {
   if (event.persisted) {
     restartEventStream();
     scheduleResume(0);
-    scheduleAutoRefresh(0);
   }
 });
 window.addEventListener("online", () => {
   restartEventStream();
   scheduleResume(0);
-  scheduleAutoRefresh(0);
 });
 window.addEventListener("focus", () => {
+  clearBackgroundCompletionIndicator();
   if (eventStreamNeedsRestart({
     readyState: state.eventStream?.readyState,
     openState: EventSource.OPEN,
@@ -5053,7 +5075,6 @@ window.addEventListener("focus", () => {
 window.addEventListener("codex-native-resume", () => {
   restartEventStream();
   scheduleResume(0);
-  scheduleAutoRefresh(0);
 });
 document.addEventListener("click", (event) => {
   if (!ui.sidebarSortWrap.contains(event.target)) closeSidebarSortMenu();
@@ -5062,7 +5083,3 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeSidebarSortMenu();
 });
 layout.bind();
-ui.openSettings.addEventListener("click", () => {
-  if (window.CodexAndroid?.openConnectionSettings) window.CodexAndroid.openConnectionSettings();
-  else ui.connectionDialog.showModal();
-});

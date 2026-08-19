@@ -34,10 +34,11 @@ export function messageWithAttachments(text, attachments) {
   return [body, references].filter(Boolean).join("\n");
 }
 
-export function shouldSubmitPromptFromKeyboard(event, { compositionActive = false, mobile = false } = {}) {
+export function shouldSubmitPromptFromKeyboard(event, { compositionActive = false, mobile = false, shortcut = "enter" } = {}) {
   if (event.key !== "Enter" || event.shiftKey) return false;
   if (mobile || compositionActive || event.isComposing || event.keyCode === 229) return false;
-  return true;
+  const modified = Boolean(event.ctrlKey || event.metaKey);
+  return shortcut === "ctrl-enter" ? modified : !modified;
 }
 
 export function isMobileComposer(navigatorLike = {}) {

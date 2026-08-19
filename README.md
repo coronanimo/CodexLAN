@@ -146,4 +146,8 @@ npm run check
 
 More detail is available in [Architecture](docs/ARCHITECTURE.md), [Deployment](docs/DEPLOYMENT.md), [Development](docs/DEVELOPMENT.md), and [Troubleshooting](docs/TROUBLESHOOTING.md). User-visible changes are recorded in the [changelog](docs/CHANGELOG.md), and known work is tracked in [TODO](docs/TODO.md).
 
+## Community
+
+- [LINUX DO](https://linux.do/)
+
 CodexLAN is available under the [MIT License](LICENSE).

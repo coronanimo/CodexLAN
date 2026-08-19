@@ -130,11 +130,6 @@
 .sidebar-account-wrap .account-menu .quiet-button:hover { color: var(--sb-text); background: var(--sb-panel-muted); }
 .sidebar-account-wrap .account-menu .quiet-button svg { width: 15px; height: 15px; fill: none; stroke: var(--sb-muted); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .sidebar-account-wrap .account-menu .quiet-button span { font-size: 11px; font-weight: 600; }
-.sidebar-account-wrap .account-menu .account-service-row { grid-template-columns: 18px minmax(0, 1fr) 9px; }
-.account-connection-status { display: block; width: 9px; height: 9px; overflow: visible; }
-.account-connection-status::before { margin-right: 0; background: var(--sb-cobalt); }
-.account-connection-status.online::before { background: var(--sb-status); }
-.account-connection-status.offline::before { background: var(--sb-danger); }
 .sidebar button:focus-visible { outline: 2px solid var(--sb-cobalt); outline-offset: 1px; }
 
 @media (max-height: 620px) {

@@ -19,6 +19,7 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 - Self-service display-name editing without changing the login identifier.
 - Secure previews for Codex-generated interactive HTML visualizations.
 - Android sharing for Markdown and generated PDF documents, with a read-only cache-backed file provider.
+- Per-browser background completion reminders and configurable desktop send shortcuts.
 
 ### Changed
 
@@ -37,6 +38,7 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 - User-facing copy refers to the Windows machine as the server computer rather than the retired Host product name.
 - Loopback and LAN access now share one listener and one port instead of running two HTTP servers.
 - File previews expose reliable copy and share actions; Android routes these through native clipboard, document, browser, and print capabilities when appropriate.
+- Connection details and durable preferences now share one compact settings surface; redundant refresh and execution controls were removed.
 
 ### Fixed
 
@@ -48,6 +50,7 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 - Dynamic terminal colors, composer sizing, usage meters, and KaTeX layout now comply with the application's Content Security Policy.
 - Foreground resumes, background throttling, and silent SSE connections recover without leaving long-running conversations visually frozen.
 - Stop requests return promptly while Goal pausing and queue recovery finish independently, with stale-turn protection and bounded App Server timeouts.
+- Hiding the browser no longer deliberately closes its event stream, so background turns can continue updating and report completion.
 
 ## 0.6.11 - Imported production baseline
 

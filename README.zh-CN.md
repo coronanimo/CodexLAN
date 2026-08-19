@@ -149,4 +149,8 @@ npm run check
 
 更多说明见[架构](docs/ARCHITECTURE.md)、[部署](docs/DEPLOYMENT.md)、[开发](docs/DEVELOPMENT.md)和[故障排查](docs/TROUBLESHOOTING.md)。用户可见的变化记录在[变更日志](docs/CHANGELOG.md)，已知事项记录在[待办事项](docs/TODO.md)。
 
+## 友情链接
+
+- [LINUX DO](https://linux.do/)
+
 CodexLAN 使用 [MIT License](LICENSE)。

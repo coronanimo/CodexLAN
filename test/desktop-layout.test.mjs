@@ -66,8 +66,8 @@ test("account strip carries adaptive rate limits while workspace tools stay insi
   const appJs = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(html, /id="open-account-menu"[\s\S]*id="account-limits" class="sidebar-account-limits"[\s\S]*id="account-menu"/);
   assert.doesNotMatch(html, /id="account-menu"[\s\S]*id="account-limits"/);
-  assert.match(html, /id="open-settings" class="quiet-button account-service-row"[\s\S]*id="server-status" class="status-dot account-connection-status"/);
-  assert.match(html, /id="account-menu"[\s\S]*id="refresh-workspace"[\s\S]*id="open-global-settings"[\s\S]*id="open-settings"/);
+  assert.match(html, /id="account-menu"[\s\S]*id="refresh-workspace"[\s\S]*id="open-global-settings"[\s\S]*<span>设置<\/span>/);
+  assert.doesNotMatch(html, /id="open-settings"|account-service-row|account-connection-status/);
   assert.doesNotMatch(html, /class="sidebar-tool-grid"/);
   assert.match(sidebarCss, /\.sidebar-account-limits\s*\{[^}]*display:\s*flex;[^}]*flex:\s*0 0 auto;/s);
   assert.doesNotMatch(sidebarCss, /\.sidebar-account-limits > span::before\s*\{[^}]*width:\s*var\(--usage\)/s);
@@ -75,6 +75,22 @@ test("account strip carries adaptive rate limits while workspace tools stay insi
   assert.match(sidebarCss, /\.project-item\.active, \.thread-item\.active\s*\{[^}]*box-shadow:\s*inset 0 0 0 1px/s);
   assert.doesNotMatch(appJs, /classList\.toggle\("single", visible\.length === 1\)/);
   assert.match(appJs, /serverStatus\.setAttribute\("aria-label", text\)/);
+});
+
+test("settings keep one connection surface and only durable preferences", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const appJs = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(html, /id="global-config-dialog"[\s\S]*id="server-status"[\s\S]*id="global-connection-address"[\s\S]*id="copy-connection-address"/);
+  assert.match(html, /id="completion-notifications"[\s\S]*id="send-shortcut"[\s\S]*id="summary-select"/);
+  assert.match(html, /id="change-connection-address"[^>]*hidden/);
+  assert.doesNotMatch(html, /id="connection-dialog"|id="refresh-interval"|id="refresh-from-config"|id="model-select"|id="effort-select"|id="tier-select"/);
+  assert.doesNotMatch(appJs, /configureAutoRefresh|scheduleAutoRefresh|refreshTimer/);
+  const visibilityHandler = appJs.match(/document\.addEventListener\("visibilitychange",[\s\S]*?\n\}\);/)?.[0] || "";
+  assert.doesNotMatch(visibilityHandler, /stopEventStream/);
+  assert.match(visibilityHandler, /ensureEventStream\(\)/);
+  assert.match(appJs, /Notification\.requestPermission\(\)/);
+  assert.match(appJs, /notifyTurnCompletion\(projectId, threadId, params\.turn\)/);
+  assert.match(appJs, /serverStatusLabel\.textContent = text/);
 });
 
 test("users can change only their own display name from the account menu", async () => {

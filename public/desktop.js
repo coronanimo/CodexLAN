@@ -1,11 +1,11 @@
 import { shouldSubmitPromptFromKeyboard } from "./composer.js";
 
-export function bindPlatformInteractions({ ui, cancelScrollCommand }) {
+export function bindPlatformInteractions({ ui, cancelScrollCommand, getSubmitShortcut = () => "enter" }) {
   let compositionActive = false;
   ui.prompt.addEventListener("compositionstart", () => { compositionActive = true; });
   ui.prompt.addEventListener("compositionend", () => { compositionActive = false; });
   ui.prompt.addEventListener("keydown", (event) => {
-    if (!shouldSubmitPromptFromKeyboard(event, { compositionActive })) return;
+    if (!shouldSubmitPromptFromKeyboard(event, { compositionActive, shortcut: getSubmitShortcut() })) return;
     event.preventDefault();
     ui.composer.requestSubmit();
   });
