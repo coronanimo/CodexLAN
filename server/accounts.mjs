@@ -40,7 +40,16 @@ export function registerAccounts(application, { auth, store, onSessionsRevoked }
 
   application.use("/api", async (request, response, next) => {
     const identity = await auth.authenticate(request);
-    if (!identity) throw httpError(401, "登录已失效，请重新登录。");
+    if (!identity) {
+      if (isBrowserDownloadNavigation(request)) {
+        response.writeHead(302, {
+          Location: `/?download=${encodeURIComponent(request.originalUrl)}`,
+          "Cache-Control": "no-store",
+        });
+        return response.end();
+      }
+      throw httpError(401, "登录已失效，请重新登录。");
+    }
     if (["POST", "PATCH", "PUT", "DELETE"].includes(request.method)) requireCsrf(request, identity);
     request.identity = identity;
     next();
@@ -50,6 +59,12 @@ export function registerAccounts(application, { auth, store, onSessionsRevoked }
     await auth.destroySession(request.identity.token);
     clearSessionCookie(request, response, auth.cookieName);
     json(response, 200, { ok: true });
+  });
+
+  application.patch("/api/auth/profile", async (request, response) => {
+    const body = await readJson(request);
+    const updated = await store.updateUser(request.identity.user.id, { displayName: body.displayName });
+    json(response, 200, { user: updated });
   });
 
   application.post("/api/auth/password", async (request, response) => {
@@ -95,6 +110,16 @@ export function registerAccounts(application, { auth, store, onSessionsRevoked }
     onSessionsRevoked(request.params.userId);
     json(response, 200, { user: updated });
   });
+}
+
+function isBrowserDownloadNavigation(request) {
+  if (request.method !== "GET") return false;
+  const path = request.codexUrl.pathname;
+  const downloadPath = /^\/api\/projects\/[0-9a-f-]+\/files\/download$/i.test(path)
+    || path === "/api/admin/files/download";
+  if (!downloadPath) return false;
+  return String(request.headers["sec-fetch-mode"] || "").toLowerCase() === "navigate"
+    || String(request.headers.accept || "").toLowerCase().includes("text/html");
 }
 
 export function requireAdmin(user) {

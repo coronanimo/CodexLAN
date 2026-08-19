@@ -3,9 +3,14 @@ export function bindPlatformInteractions({ ui, cancelScrollCommand, closeTopbarO
 
   function applyViewport() {
     viewportFrame = 0;
-    const height = Number(window.visualViewport?.height || window.innerHeight);
+    const viewport = window.visualViewport;
+    const height = Number(viewport?.height || window.innerHeight);
+    const top = Number(viewport?.offsetTop || 0);
     if (Number.isFinite(height) && height > 0) {
       document.documentElement.style.setProperty("--app-viewport-height", `${Math.round(height)}px`);
+    }
+    if (Number.isFinite(top) && top >= 0) {
+      document.documentElement.style.setProperty("--app-viewport-top", `${Math.round(top)}px`);
     }
   }
 

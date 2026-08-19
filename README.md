@@ -37,11 +37,11 @@ Queue follow-up tasks while a turn is running, send guidance without restarting,
 
 ### Visible execution
 
-See reasoning summaries, commands, incremental output, elapsed time, context consumption, account limits, structured plans, and live file diffs. The interface makes it possible to tell whether work is progressing, blocked on a command, or changing the wrong files.
+See reasoning summaries, commands, incremental output, elapsed time, context consumption, account limits, structured plans, and live file diffs. Returning to the foreground restores the live connection, and a watchdog replaces silent event streams. The interface makes it possible to tell whether work is progressing, blocked on a command, or changing the wrong files.
 
 ### One local working environment
 
-Repositories, local data, shells, development tools, credentials, and Codex history stay on the Windows computer. The browser can send attachments, paste images, preview files, and download results without creating a second development environment.
+Repositories, local data, shells, development tools, credentials, and Codex history stay on the Windows computer. The browser can send attachments, paste images, preview files, and download results without creating a second development environment. The Android client can also share conversations as Markdown or PDF.
 
 ### Supervised background operation
 

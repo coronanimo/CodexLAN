@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandExecutionSnapshot, commandOutputTail, executionItemText } from "../public/execution-events.js";
 import { timestampMilliseconds } from "../public/elapsed-time.js";
 import { isActiveThreadStatus } from "../public/workspace.js";
@@ -16,6 +19,7 @@ import {
 const COMMAND_OUTPUT_FLUSH_DELAY = 100;
 const MAX_LIVE_COMMAND_OUTPUT = 16 * 1024;
 const MAX_HISTORY_TOOL_DETAIL = 16 * 1024;
+const MAX_VISUALIZATION_BYTES = 5 * 1024 * 1024;
 
 export function createConversations({ store, codex }) {
   const eventClients = new Set();
@@ -289,6 +293,24 @@ export function createConversations({ store, codex }) {
         history: { hasMore: history.hasMore, before: history.before, totalTurns: history.totalTurns },
       });
     });
+
+    application.get("/api/threads/:threadId/visualization", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = validateId(request.params.threadId, "threadId");
+      const projectId = validateId(request.codexUrl.searchParams.get("projectId"), "项目 ID");
+      await store.requireThreadOwner(threadId, user.id, projectId);
+      const filePath = await visualizationFilePath(request.codexUrl.searchParams.get("path"));
+      const details = await stat(filePath);
+      if (!details.isFile()) throw httpError(400, "可视化路径不是文件。");
+      if (details.size > MAX_VISUALIZATION_BYTES) throw httpError(413, "可视化文件不能超过 5 MB。");
+      const contents = await readFile(filePath);
+      response.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src data: blob: https:; font-src data: https:; connect-src https://cdn.jsdelivr.net; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+      });
+      response.end(visualizationDocument(contents.toString("utf8")));
+    });
   
     application.patch("/api/threads/:threadId", async (request, response) => {
       const user = request.identity.user;
@@ -440,7 +462,7 @@ export function createConversations({ store, codex }) {
         clientUserMessageId: messageId,
         expectedTurnId: validateId(body.expectedTurnId, "expectedTurnId"),
         input: [{ type: "text", text }],
-      });
+      }, { timeoutMs: 10_000 });
       json(response, 202, {
         turnId: result.turnId || body.expectedTurnId,
         item: { id: messageId, type: "userMessage", content: [{ type: "text", text }], clientPending: true },
@@ -453,18 +475,31 @@ export function createConversations({ store, codex }) {
       const body = await readJson(request);
       const project = await store.getProject(body.projectId, user.id);
       await store.requireThreadOwner(threadId, user.id, project.id);
-      const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
-      let pausedGoal = null;
-      if (isActiveGoal(goal)) {
-        const result = await codex.request("thread/goal/set", { threadId, status: "paused" });
-        pausedGoal = result.goal;
-        threadGoals.set(threadId, pausedGoal);
+      const turnId = validateId(body.turnId, "turnId");
+      const runtime = threadState.get(threadId);
+      if (runtime?.activeTurnId && runtime.activeTurnId !== turnId) {
+        throw httpError(409, "当前执行任务已经变化，请刷新后重试。");
       }
-      await codex.request("turn/interrupt", { threadId, turnId: validateId(body.turnId, "turnId") });
-      const pendingAdvance = queueAdvances.get(threadId);
-      if (pendingAdvance) await pendingAdvance;
-      await advanceQueue(threadId);
-      json(response, 200, { ok: true, goalPaused: Boolean(pausedGoal), ...(pausedGoal ? { goal: pausedGoal } : {}) });
+      const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
+      const goalPauseRequested = isActiveGoal(goal);
+      const interruptRequest = codex.request("turn/interrupt", { threadId, turnId }, { timeoutMs: 8_000 });
+      const goalPauseRequest = goalPauseRequested
+        ? codex.request("thread/goal/set", { threadId, status: "paused" }, { timeoutMs: 8_000 }).then((result) => {
+            threadGoals.set(threadId, result.goal);
+            return result.goal;
+          }).catch((error) => {
+            process.stderr.write(`[web] 当前任务已请求停止，但目标暂停失败 (${threadId})：${error.message}\n`);
+            broadcast(threadId, { method: "error", params: { threadId, message: `当前任务已请求停止，但目标暂停失败：${error.message}` } });
+            return null;
+          })
+        : Promise.resolve(null);
+      await interruptRequest;
+      void goalPauseRequest.finally(() => {
+        void advanceQueue(threadId).catch((error) => {
+          process.stderr.write(`[web] 停止任务后的队列恢复失败 (${threadId})：${error.message}\n`);
+        });
+      });
+      json(response, 202, { ok: true, turnId, goalPauseRequested });
     });
 
     application.post("/api/threads/:threadId/compact", async (request, response) => {
@@ -754,7 +789,7 @@ export function createConversations({ store, codex }) {
         clientUserMessageId: item.id,
         expectedTurnId,
         input: [{ type: "text", text: item.text }],
-      });
+      }, { timeoutMs: 10_000 });
       await store.completeQueueItem(threadId, itemId);
       const snapshot = await store.getQueueSnapshot(threadId);
       broadcastQueue(threadId);
@@ -958,7 +993,11 @@ export function createConversations({ store, codex }) {
     void sendInitialWorkspaceState(response, user.id).catch((error) => {
       process.stderr.write(`[web] 无法同步实时工作区状态：${error.message}\n`);
     });
-    const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 25_000);
+    const heartbeat = setInterval(() => {
+      if (!response.writableEnded && !response.destroyed) {
+        response.write(`event: heartbeat\ndata: ${Date.now()}\n\n`);
+      }
+    }, 25_000);
     response.on("close", () => {
       clearInterval(heartbeat);
       clearTimeout(expiryTimer);
@@ -1118,4 +1157,29 @@ export function createConversations({ store, codex }) {
     registerRoutes,
     validateSettings,
   };
+}
+
+async function visualizationFilePath(value) {
+  if (typeof value !== "string" || !value.trim() || !isAbsolute(value.trim())) throw httpError(400, "可视化路径无效。");
+  const extension = extname(value.trim()).toLowerCase();
+  if (extension !== ".html" && extension !== ".htm") throw httpError(400, "可视化文件必须是 HTML。");
+  let temporaryRoot;
+  let filePath;
+  try {
+    temporaryRoot = await realpath(tmpdir());
+    filePath = await realpath(resolve(value.trim()));
+  } catch (error) {
+    if (error.code === "ENOENT") throw httpError(404, "可视化文件不存在或已经清理。");
+    throw error;
+  }
+  const relativePath = relative(temporaryRoot, filePath);
+  const firstSegment = relativePath.split(sep)[0];
+  if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath) || !/^codex-[^\\/]+$/i.test(firstSegment)) {
+    throw httpError(403, "只能查看 Codex 生成的临时可视化文件。");
+  }
+  return filePath;
+}
+
+function visualizationDocument(contents) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/visualization.css"></head><body>${contents}</body></html>`;
 }

@@ -16,7 +16,7 @@ The application ID is `com.hushiwei.codexlan`. It is a different application fro
 2. Set `JAVA_HOME` and either `ANDROID_HOME` or `sdk.dir` in an ignored `local.properties` file.
 3. From this `android/` directory, run `gradlew.bat clean assembleDebug lintDebug` on Windows, or `./gradlew clean assembleDebug lintDebug` on macOS/Linux. Android Studio may run the same pinned Gradle project if preferred.
 
-The checked-in wrapper pins Gradle 8.9 and verifies the distribution checksum. The debug APK is generated under `app/build/outputs/apk/debug/`. Without signing variables, `assembleRelease` produces `app-release-unsigned.apk`. A signed build requires all four variables below.
+The checked-in wrapper pins Gradle 8.9 and verifies the distribution checksum. APKs are generated below `app/build/outputs/apk/` with names such as `CodexLAN-0.8.0-debug.apk` and `CodexLAN-0.8.0-release.apk`. A signed release build requires all four variables below.
 
 ```text
 CODEXLAN_ANDROID_KEYSTORE
@@ -25,7 +25,7 @@ CODEXLAN_ANDROID_KEY_ALIAS
 CODEXLAN_ANDROID_KEY_PASSWORD
 ```
 
-Build output, local SDK paths, signing keys, and passwords must not be committed. Verify the resulting `app-release.apk` and its certificate identity with `apksigner` before publication. The project still needs its permanent release key and protected publication environment described in [RELEASES.md](../docs/RELEASES.md).
+Build output, local SDK paths, signing keys, and passwords must not be committed. Verify the resulting release APK and its certificate identity with `apksigner` before publication. The project still needs its permanent release key and protected publication environment described in [RELEASES.md](../docs/RELEASES.md).
 
 The project contains Java bytecode and Android resources with no native `.so` libraries. One APK therefore supports `arm64-v8a`, `armeabi-v7a`, `x86`, and `x86_64` devices. Adding native libraries will require a new ABI packaging decision.
 
@@ -34,6 +34,8 @@ The app requires Android 8.0/API 26 or newer. The small translucent native contr
 ### Mobile attachments
 
 The shared web composer remains the only editing surface. Android presents a native choice between photos/screenshots and files. Android 13 and later use the system Photo Picker for images; Android 8 through 12 use the system document provider with an image filter. CodexLAN is also an Android share target for one or multiple files, which are added to the existing composer and remain pending until the user sends the message.
+
+Conversation previews use Android's native clipboard and share surfaces when available. A conversation can be shared as a Markdown file or rendered locally into a PDF; generated files are exposed through a read-only, cache-backed content provider and are not added to the project workspace.
 
 ## 简体中文
 
@@ -49,7 +51,7 @@ The shared web composer remains the only editing surface. Android presents a nat
 2. 设置 `JAVA_HOME`，并设置 `ANDROID_HOME`，或者在不提交的 `local.properties` 中填写 `sdk.dir`。
 3. 在本 `android/` 目录运行 Windows 命令 `gradlew.bat clean assembleDebug lintDebug`；macOS/Linux 使用 `./gradlew clean assembleDebug lintDebug`。需要图形界面时也可以用 Android Studio 打开同一套工程。
 
-仓库内的 Wrapper 固定使用 Gradle 8.9，并校验发行包 SHA-256。调试 APK 生成在 `app/build/outputs/apk/debug/`。没有签名变量时，`assembleRelease` 生成 `app-release-unsigned.apk`；签名构建需要同时提供以下四项。
+仓库内的 Wrapper 固定使用 Gradle 8.9，并校验发行包 SHA-256。APK 生成在 `app/build/outputs/apk/` 下，文件名类似 `CodexLAN-0.8.0-debug.apk` 和 `CodexLAN-0.8.0-release.apk`。发布签名构建需要同时提供以下四项。
 
 ```text
 CODEXLAN_ANDROID_KEYSTORE
@@ -58,7 +60,7 @@ CODEXLAN_ANDROID_KEY_ALIAS
 CODEXLAN_ANDROID_KEY_PASSWORD
 ```
 
-构建产物、本机 SDK 路径、签名密钥和密码都不能提交。发布前必须用 `apksigner` 校验 `app-release.apk` 及其证书身份。项目仍需建立 [RELEASES.md](../docs/RELEASES.md) 所述的永久发布密钥和受保护发布环境。
+构建产物、本机 SDK 路径、签名密钥和密码都不能提交。发布前必须用 `apksigner` 校验生成的 release APK 及其证书身份。项目仍需建立 [RELEASES.md](../docs/RELEASES.md) 所述的永久发布密钥和受保护发布环境。
 
 当前工程只有 Java 字节码和 Android 资源，没有原生 `.so`。一个 APK 可以支持 `arm64-v8a`、`armeabi-v7a`、`x86` 和 `x86_64` 设备；以后加入原生库时需要重新确定 ABI 打包方式。
 
@@ -67,3 +69,5 @@ CODEXLAN_ANDROID_KEY_PASSWORD
 ### 移动附件
 
 移动端仍然只使用共用网页输入框，不另做一套原生编辑器。点击附件后，Android 会明确提供“照片和截图”和“文件”：Android 13 及以上使用系统 Photo Picker，Android 8 至 12 使用带图片筛选的系统文件选择器。CodexLAN 同时支持接收 Android 的单文件和多文件分享；从系统分享进入的截图或文件会添加到现有输入框，仍由用户决定何时发送。
+
+对话预览会优先使用 Android 原生剪贴板和分享界面。对话可以分享为 Markdown 文件，也可以在本机渲染成 PDF；生成文件只通过只读的缓存文件提供器交给目标应用，不会写入项目目录。

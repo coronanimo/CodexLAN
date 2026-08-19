@@ -21,19 +21,19 @@ The Node service owns the App Server process, serves the web interface, applies 
 
 ### Web client
 
-The browser application is plain HTML, CSS, and JavaScript with no build step. `public/app.js` coordinates the application while smaller modules own reusable behavior. Desktop and mobile use the same state and product components; `desktop.css` and `mobile.css` provide different layouts.
+The browser application is plain HTML, CSS, and JavaScript with no build step. `public/app.js` coordinates the application while smaller modules own reusable behavior. Shared styles are split by responsibility into workspace, content, execution, composer, dialog, and sidebar files; `desktop.css` and `mobile.css` contain only platform-specific layout rules.
 
-The client receives live thread updates through SSE. It reconnects after navigation or network interruption and rebuilds the visible execution state from server snapshots and subsequent events.
+The client receives live thread updates through SSE. It pauses the stream while hidden, reconnects when the page returns to the foreground, detects silent streams with a watchdog, and rebuilds visible execution state from server snapshots and subsequent events.
 
 ### Android client
 
-The Android project is a WebView shell. Native code owns server selection, refresh, system file picking, downloads, and the offline control menu. Conversation and project features remain in the shared web client.
+The Android project is a WebView shell. Native code owns server selection, refresh, system file picking, downloads, clipboard fallback, document sharing, PDF generation, and the offline control menu. Conversation and project features remain in the shared web client.
 
 ## Data ownership
 
 Codex conversation history belongs to Codex. CodexLAN associates a thread with a project by matching the thread's canonical working directory to the project directory.
 
-CodexLAN stores web accounts, sessions, projects, queues, thread settings, access order, and runtime metadata in `workspace-state.json`. Project files remain in their project directories. Sent attachments are stored below each project's `.codexlan/attachments/` directory.
+CodexLAN stores web accounts, display names, sessions, projects, queues, thread settings, per-user access order, and runtime metadata in `workspace-state.json`. Project files remain in their project directories. Sent attachments are stored below each project's `.codexlan/attachments/` directory.
 
 The Node service stores its state below the configured repository-local `data/` directory. `workspaceRoot` defines the shared multi-user workspace boundary. Automatically managed user projects live below `<workspaceRoot>/<username>/`; every project record retains its individual absolute path.
 
@@ -49,7 +49,7 @@ Authenticated writes require a session cookie, a same-origin request, and the se
 
 The local workbench remains available when Codex is missing, signed out, or reconnecting. `/api/health` reports the Node service; `/api/ready` reports App Server readiness.
 
-The loopback and LAN listeners have separate state. A missing private address or occupied LAN port disables LAN access without taking down the local workbench.
+Loopback and the selected private-LAN address share one listener and one configured port. Requests received through an address outside that allowlist are rejected.
 
 One Node service owns one App Server child process. Restarting the Node service also replaces that child process; reconnecting Codex can restart only the child while leaving the web service running.
 

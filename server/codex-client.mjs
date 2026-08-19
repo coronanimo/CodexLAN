@@ -142,14 +142,15 @@ export class AppServerClient {
     this.handleFailure(child, new Error(message));
   }
 
-  rawRequest(method, params) {
+  rawRequest(method, params, { timeoutMs = 60_000 } = {}) {
     if (!this.process?.stdin?.writable) return Promise.reject(new Error("Codex App Server 不可用。"));
     const id = this.nextId++;
+    const requestTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 60_000;
     return new Promise((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        rejectRequest(new Error(`Codex 在 60 秒内未响应 ${method}。`));
-      }, 60_000);
+        rejectRequest(new Error(`Codex 在 ${Math.ceil(requestTimeoutMs / 1000)} 秒内未响应 ${method}。`));
+      }, requestTimeoutMs);
       this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
       this.process.stdin.write(`${JSON.stringify({ method, id, params })}\n`);
     });
@@ -169,13 +170,13 @@ export class AppServerClient {
     this.process.stdin.write(`${JSON.stringify({ id, error: { code, message } })}\n`);
   }
 
-  async request(method, params) {
+  async request(method, params, options) {
     if (this.state !== "ready") {
       if (this.startPromise) await this.startPromise;
       if (this.state === "login_required") throw new Error(this.error);
       else throw new Error(this.state === "failed" ? "Codex App Server 自动恢复失败，请查看服务日志。" : "Codex App Server 正在恢复，请稍后重试。");
     }
-    return this.rawRequest(method, params);
+    return this.rawRequest(method, params, options);
   }
 
   async ensureLoaded(threadId, project) {

@@ -1,11 +1,25 @@
-:root { --app-viewport-height: 100dvh; }
+:root { --app-viewport-height: 100dvh; --app-viewport-top: 0px; }
 html.android-shell, html.android-shell body { overscroll-behavior: none; }
 
   .markdown-preview-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
+  .image-preview-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
+  .image-preview-header { gap: 8px; padding: calc(9px + env(safe-area-inset-top)) 9px 9px 13px; }
+  .image-preview-heading code { max-width: 48vw; }
+  .image-preview-actions { gap: 4px; }
+  .image-preview-actions .quiet-button { padding: 7px; font-size: 10px; }
+  .image-preview-stage { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
+  .visualization-dialog { inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; }
+  .visualization-header { min-height: 46px; padding: calc(6px + env(safe-area-inset-top)) 7px 6px 11px; }
+  .visualization-heading { gap: 8px; }
+  .visualization-heading > span { width: 22px; height: 22px; border-radius: 6px; font-size: 12px; }
+  .visualization-heading h2 { max-width: calc(100vw - 90px); font-size: 12px; }
+  .visualization-stage { padding: 0 0 env(safe-area-inset-bottom); background: var(--surface-control); }
+  .visualization-frame { border: 0; border-radius: 0; }
   .markdown-preview-header { gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 10px 10px 14px; }
-  .markdown-preview-heading code { max-width: 58vw; }
-  .markdown-preview-actions .quiet-button { padding: 7px 8px; }
-  .markdown-preview-scroll { padding: 0; background: #fff; }
+  .markdown-preview-heading code { max-width: 34vw; }
+  .markdown-preview-actions { gap: 4px; }
+  .markdown-preview-actions .quiet-button { padding: 7px 6px; font-size: 10px; }
+  .markdown-preview-scroll { padding: 0; background: var(--surface); }
   .markdown-document { min-height: 100%; border: 0; border-radius: 0; padding: 24px 18px calc(30px + env(safe-area-inset-bottom)); box-shadow: none; font-size: 14px; }
   .source-document { min-height: 100%; border: 0; border-radius: 0; box-shadow: none; }
   .source-document pre { padding: 20px 16px calc(28px + env(safe-area-inset-bottom)); font-size: 11px; }
@@ -13,9 +27,9 @@ html.android-shell, html.android-shell body { overscroll-behavior: none; }
   .diff-document .diff-path { min-width: 100vw; padding: 8px 10px; }
   .diff-document .diff-line { padding: 0 10px; }
   .workspace-shell { display: block; height: var(--app-viewport-height); }
-  .sidebar { position: fixed; top: 0; left: 0; z-index: 5; width: min(290px, 84vw); height: var(--app-viewport-height); transform: translateX(-105%); transition: transform .2s ease; box-shadow: 13px 0 35px #10213d16; }
+  .sidebar { position: fixed; top: var(--app-viewport-top); left: 0; z-index: 5; width: min(290px, 84vw); height: var(--app-viewport-height); transform: translateX(-105%); transition: transform .2s ease; box-shadow: 13px 0 35px #10213d16; }
   .sidebar.open { transform: translateX(0); }
-  .sidebar-scrim { position: fixed; inset: 0; z-index: 4; display: block; border: 0; padding: 0; background: #10213d38; opacity: 0; pointer-events: none; transition: opacity .2s ease; backdrop-filter: blur(1.5px); }
+  .sidebar-scrim { position: fixed; top: var(--app-viewport-top); right: 0; bottom: auto; left: 0; z-index: 4; display: block; height: var(--app-viewport-height); border: 0; padding: 0; background: #10213d38; opacity: 0; pointer-events: none; transition: opacity .2s ease; backdrop-filter: blur(1.5px); }
   .sidebar-scrim.open { opacity: 1; pointer-events: auto; }
   .mobile-only { display: inline-grid; }
   .workbench { width: 100%; height: var(--app-viewport-height); min-height: 0; }
@@ -41,7 +55,11 @@ html.android-shell, html.android-shell body { overscroll-behavior: none; }
   .conversation { padding: 11px 15px 20px; }
   .jump-latest { right: 15px; bottom: 10px; }
   .message { max-width: 100%; }
+  .visualization-card { grid-template-columns: 40px minmax(0, 1fr) auto; gap: 9px; padding: 9px; }
+  .visualization-mark { width: 40px; height: 40px; }
+  .visualization-card-action { padding: 5px 6px; font-size: 10px; }
   .icon-copy-button { width: 28px; height: 28px; }
+  .mobile-message-action { display: inline-grid; min-height: 28px; place-items: center; }
   .execution-copy-button { top: 2px; right: 5px; }
   .user-input-card { gap: 12px; margin: 3px 0 15px; padding: 12px; }
   .user-input-heading { display: grid; gap: 2px; }

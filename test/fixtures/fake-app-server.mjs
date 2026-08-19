@@ -113,7 +113,11 @@ input.on("line", (line) => {
       process.stdout.write(`${JSON.stringify({ id: message.id, error: { message: error.message } })}\n`);
     }
   };
-  const delay = message.method === "turn/steer" ? Number(process.env.CODEX_TEST_STEER_DELAY_MS || 0) : 0;
+  const delay = message.method === "turn/steer"
+    ? Number(process.env.CODEX_TEST_STEER_DELAY_MS || 0)
+    : message.method === "thread/goal/set" && message.params?.status === "paused"
+      ? Number(process.env.CODEX_TEST_GOAL_PAUSE_DELAY_MS || 0)
+      : 0;
   if (delay > 0) setTimeout(respond, delay);
   else respond();
 });

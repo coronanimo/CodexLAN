@@ -3,10 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#f5f8fc">
+    <meta name="theme-color" content="#f5f7fa">
     <title>CodexLAN</title>
     <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.16.22">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/workspace.css">
+    <link rel="stylesheet" href="/content.css">
+    <link rel="stylesheet" href="/execution.css">
+    <link rel="stylesheet" href="/composer.css">
+    <link rel="stylesheet" href="/dialogs.css">
+    <link rel="stylesheet" href="/sidebar.css">
     <link rel="stylesheet" href="/desktop.css" media="(min-width: 761px)">
     <link rel="stylesheet" href="/mobile.css" media="(max-width: 760px)">
   </head>
@@ -42,41 +48,53 @@
     <div id="app" class="workspace-shell" hidden>
       <aside id="sidebar" class="sidebar" aria-label="项目和聊天">
         <div class="sidebar-brand">
-          <span class="brand-mark">C</span>
-          <div><strong>CodexLAN</strong><span>工作台</span></div>
+          <span class="brand-mark" aria-hidden="true"><span>C</span><i>L</i></span>
+          <strong class="sidebar-wordmark">Codex<span>LAN</span></strong>
           <button id="close-sidebar" class="icon-button mobile-only" type="button" aria-label="关闭项目面板">×</button>
         </div>
-        <section class="sidebar-section projects-section">
-          <div class="section-heading"><span>项目</span><span class="section-actions"><button id="add-project" class="text-button" type="button">新建</button><button id="manage-projects-side" class="text-button" type="button">管理</button></span></div>
-          <div id="project-list" class="project-list"></div>
-        </section>
-        <section class="sidebar-section chats-section">
-          <div class="section-heading"><span>聊天</span><button id="new-thread" class="text-button" type="button">新建</button></div>
-          <div id="thread-list" class="thread-list"></div>
-        </section>
-        <section class="sidebar-tools" aria-label="工作台与账号">
-          <div class="sidebar-tool-grid">
-            <button id="refresh-workspace" class="sidebar-tool-button" type="button"><span aria-hidden="true">↻</span><strong>刷新页面</strong></button>
-            <button id="open-global-settings" class="sidebar-tool-button" type="button"><span aria-hidden="true">⚙</span><strong>聊天配置</strong></button>
+        <nav class="sidebar-navigation-controls" aria-label="侧边栏显示方式">
+          <div class="sidebar-control-row" role="group" aria-label="组织方式"><div class="sidebar-segmented"><button id="sidebar-view-projects" type="button" aria-label="按项目组织" title="按项目组织" aria-pressed="true">项目</button><button id="sidebar-view-recent" type="button" aria-label="按最近对话组织" title="按最近对话组织" aria-pressed="false">最近对话</button></div></div>
+          <div id="sidebar-sort-wrap" class="sidebar-sort-wrap">
+            <button id="sidebar-sort-trigger" class="sidebar-sort-trigger" type="button" aria-label="排序方式：原始顺序" aria-controls="sidebar-sort-menu" aria-expanded="false" title="排序方式"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h11M7 12h8M7 17h5M4 4v16m0 0-2-2m2 2 2-2"/></svg></button>
+            <div id="sidebar-sort-menu" class="sidebar-sort-menu" role="menu" hidden><span>排序方式</span><button id="sidebar-order-original" type="button" role="menuitemradio" aria-checked="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><strong>原始顺序</strong></button><button id="sidebar-order-recent" type="button" role="menuitemradio" aria-checked="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><strong>最近使用</strong></button></div>
           </div>
-          <div id="account-menu-wrap" class="sidebar-account-wrap">
-            <button id="open-account-menu" class="sidebar-account-button" type="button" aria-label="用户属性与账号菜单" aria-controls="account-menu" aria-expanded="false">
-              <span id="account-avatar" class="sidebar-account-avatar">我</span>
-              <span class="sidebar-account-copy"><strong id="account-display-name">—</strong><small id="account-username">—</small></span>
-              <span id="account-limits" class="sidebar-account-limits" aria-label="Codex 使用限额" hidden>
-                <span id="account-limit-five-hour"></span>
-                <span id="account-limit-week"></span>
-              </span>
-              <span class="sidebar-account-chevron" aria-hidden="true">›</span>
-            </button>
-            <div id="account-menu" class="topbar-menu account-menu" hidden>
-              <button id="manage-users" class="quiet-button" type="button" hidden>管理成员账号</button>
-              <button id="change-password" class="quiet-button" type="button">修改我的密码</button>
-              <button id="logout" class="quiet-button" type="button">退出登录</button>
+        </nav>
+        <div class="sidebar-navigation-body">
+          <section id="projects-section" class="sidebar-section projects-section">
+            <div class="section-heading"><span>项目</span><span class="section-actions"><button id="add-project" class="text-button" type="button">新建</button><button id="manage-projects-side" class="text-button" type="button">管理</button></span></div>
+            <div id="project-list" class="project-list"></div>
+          </section>
+          <section class="sidebar-section chats-section">
+            <div class="section-heading"><span id="sidebar-thread-heading">聊天</span><button id="new-thread" class="text-button" type="button">新建</button></div>
+            <div id="thread-list" class="thread-list"></div>
+          </section>
+        </div>
+        <div class="sidebar-dock">
+          <section class="sidebar-tools" aria-label="账号与工作台操作">
+            <div id="account-menu-wrap" class="sidebar-account-wrap">
+              <button id="open-account-menu" class="sidebar-account-button" type="button" aria-label="用户属性与账号菜单" aria-controls="account-menu" aria-expanded="false">
+                <span id="account-avatar" class="sidebar-account-avatar">我</span>
+                <span class="sidebar-account-copy">
+                  <strong id="account-display-name">—</strong>
+                  <span class="sidebar-account-meta">
+                    <small id="account-username">—</small>
+                    <span id="account-limits" class="sidebar-account-limits" aria-label="Codex 使用限额" hidden><span id="account-limit-five-hour"></span><span id="account-limit-week"></span></span>
+                  </span>
+                </span>
+              </button>
+              <div id="account-menu" class="topbar-menu account-menu" hidden>
+                <button id="refresh-workspace" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a7 7 0 1 0 1 6M19 3v5h-5"/></svg><span>刷新工作台</span></button>
+                <button id="open-global-settings" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h5M13 7h7M4 12h9M17 12h3M4 17h2M10 17h10"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>工作台配置</span></button>
+                <button id="open-settings" class="quiet-button account-service-row" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg><span>服务地址</span><small id="server-status" class="status-dot account-connection-status" aria-label="正在连接服务"></small></button>
+                <div class="account-menu-divider"></div>
+                <button id="manage-users" class="quiet-button" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6"/></svg><span>管理成员账号</span></button>
+                <button id="change-display-name" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M3 21v-2a5 5 0 0 1 5-5h2M15 18l5-5M17 11l2 2"/></svg><span>修改显示名称</span></button>
+                <button id="change-password" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span>修改密码</span></button>
+                <button id="logout" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/></svg><span>退出登录</span></button>
+              </div>
             </div>
-          </div>
-        </section>
-        <footer class="sidebar-footer"><span id="server-status" class="status-dot">正在连接服务</span><button id="open-settings" class="text-button" type="button">服务地址</button></footer>
+          </section>
+        </div>
       </aside>
 
       <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="收起项目和聊天侧边栏" tabindex="-1"></button>
@@ -255,6 +273,16 @@
       </form>
     </dialog>
 
+    <dialog id="display-name-dialog" class="thread-dialog display-name-dialog">
+      <form id="display-name-form">
+        <div class="dialog-heading"><div><span>个人资料</span><h2>修改显示名称</h2></div><button id="close-display-name-dialog" class="icon-button" type="button" aria-label="关闭">×</button></div>
+        <p class="dialog-intro">登录用户名不会改变。</p>
+        <label>显示名称<input id="profile-display-name" autocomplete="name" maxlength="40" required></label>
+        <p id="display-name-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><span></span><span></span><button id="cancel-display-name" type="button" class="quiet-button">取消</button><button id="save-display-name" type="submit" class="primary-button">保存名称</button></div>
+      </form>
+    </dialog>
+
     <dialog id="password-dialog" class="thread-dialog password-dialog">
       <form id="password-form" method="dialog">
         <div class="dialog-heading"><div><span>账号安全</span><h2>修改我的密码</h2></div><button id="close-password-dialog" class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
@@ -317,6 +345,8 @@
             <code id="markdown-preview-path"></code>
           </div>
           <div class="markdown-preview-actions">
+            <button id="copy-markdown-preview" class="quiet-button preview-text-action" type="button" disabled>复制</button>
+            <button id="share-markdown-preview" class="quiet-button preview-text-action" type="button" disabled>分享</button>
             <a id="markdown-preview-download" class="quiet-button" href="#">下载 ↓</a>
             <button id="close-markdown-preview" class="icon-button" type="button" aria-label="关闭预览">×</button>
           </div>
@@ -324,6 +354,39 @@
         <div class="markdown-preview-scroll">
           <p id="markdown-preview-status" class="markdown-preview-status" role="status">正在读取文档…</p>
           <article id="markdown-preview-body" class="markdown-document" tabindex="-1" hidden></article>
+        </div>
+      </section>
+    </dialog>
+
+    <dialog id="image-preview-dialog" class="image-preview-dialog" aria-labelledby="image-preview-name">
+      <section class="image-preview-shell">
+        <header class="image-preview-header">
+          <div class="image-preview-heading">
+            <span>图片预览</span>
+            <h2 id="image-preview-name">图片</h2>
+            <code id="image-preview-path"></code>
+          </div>
+          <div class="image-preview-actions">
+            <a id="image-preview-download" class="quiet-button" href="#">浏览器打开 ↗</a>
+            <button id="close-image-preview" class="icon-button" type="button" aria-label="关闭图片预览">×</button>
+          </div>
+        </header>
+        <div class="image-preview-stage"><img id="image-preview-image" alt=""></div>
+      </section>
+    </dialog>
+
+    <dialog id="visualization-dialog" class="visualization-dialog" aria-labelledby="visualization-name">
+      <section class="visualization-shell">
+        <header class="visualization-header">
+          <div class="visualization-heading">
+            <span aria-hidden="true">▥</span>
+            <h2 id="visualization-name">可视化</h2>
+          </div>
+          <button id="close-visualization" class="icon-button" type="button" aria-label="关闭交互图表">×</button>
+        </header>
+        <div class="visualization-stage">
+          <p id="visualization-status" class="visualization-status" role="status">正在载入图表…</p>
+          <iframe id="visualization-frame" title="交互图表" sandbox="allow-scripts" referrerpolicy="no-referrer" hidden></iframe>
         </div>
       </section>
     </dialog>

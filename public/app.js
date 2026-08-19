@@ -3,13 +3,15 @@ import { renderMarkdownDocument } from "./markdown-preview.js";
 import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
 import { commandDisplayText, commandOutputTail, executionBodyHasContent, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName } from "./workspace.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName } from "./workspace.js";
 import { appendAnsiOutput, renderAnsiOutput } from "./ansi-output.js";
 import { diffLineStats, renderFileChanges, unifiedDiffChanges } from "./diff-output.js";
 import { clipboardImageFiles, clipboardImageName, isMobileComposer, messageWithAttachments, resizeComposerInput } from "./composer.js";
 import { createTurnPlanView, planShortcut, updateTurnPlanView } from "./plan.js";
 import { goalPresentation, goalShortcut, isActiveGoal } from "./goal.js";
 import { createWorkbenchLayout } from "./layout.js";
+import { copyTextToClipboard, fileChangesText, isPreviewableImage, openDownloadExternally, printableMarkdownHtml, shareMarkdown } from "./mobile-actions.js";
+import { EVENT_STREAM_WATCHDOG_INTERVAL_MS, eventStreamNeedsRestart } from "./event-stream.js";
 
 const $ = (selector) => document.querySelector(selector);
 const MAX_RENDERED_COMMAND_OUTPUT = 16_000;
@@ -38,6 +40,15 @@ const ui = {
   closeSidebar: $("#close-sidebar"),
   projectList: $("#project-list"),
   threadList: $("#thread-list"),
+  projectsSection: $("#projects-section"),
+  sidebarThreadHeading: $("#sidebar-thread-heading"),
+  sidebarViewProjects: $("#sidebar-view-projects"),
+  sidebarViewRecent: $("#sidebar-view-recent"),
+  sidebarSortWrap: $("#sidebar-sort-wrap"),
+  sidebarSortTrigger: $("#sidebar-sort-trigger"),
+  sidebarSortMenu: $("#sidebar-sort-menu"),
+  sidebarOrderOriginal: $("#sidebar-order-original"),
+  sidebarOrderRecent: $("#sidebar-order-recent"),
   desktopProjectName: $("#desktop-project-name"),
   addProject: $("#add-project"),
   manageProjectsSide: $("#manage-projects-side"),
@@ -105,8 +116,16 @@ const ui = {
   accountLimitFiveHour: $("#account-limit-five-hour"),
   accountLimitWeek: $("#account-limit-week"),
   manageUsers: $("#manage-users"),
+  changeDisplayName: $("#change-display-name"),
   changePassword: $("#change-password"),
   logout: $("#logout"),
+  displayNameDialog: $("#display-name-dialog"),
+  displayNameForm: $("#display-name-form"),
+  profileDisplayName: $("#profile-display-name"),
+  displayNameError: $("#display-name-error"),
+  closeDisplayNameDialog: $("#close-display-name-dialog"),
+  cancelDisplayName: $("#cancel-display-name"),
+  saveDisplayName: $("#save-display-name"),
   passwordDialog: $("#password-dialog"),
   passwordForm: $("#password-form"),
   closePasswordDialog: $("#close-password-dialog"),
@@ -175,7 +194,20 @@ const ui = {
   markdownPreviewStatus: $("#markdown-preview-status"),
   markdownPreviewBody: $("#markdown-preview-body"),
   markdownPreviewDownload: $("#markdown-preview-download"),
+  copyMarkdownPreview: $("#copy-markdown-preview"),
+  shareMarkdownPreview: $("#share-markdown-preview"),
   closeMarkdownPreview: $("#close-markdown-preview"),
+  imagePreviewDialog: $("#image-preview-dialog"),
+  imagePreviewName: $("#image-preview-name"),
+  imagePreviewPath: $("#image-preview-path"),
+  imagePreviewImage: $("#image-preview-image"),
+  imagePreviewDownload: $("#image-preview-download"),
+  closeImagePreview: $("#close-image-preview"),
+  visualizationDialog: $("#visualization-dialog"),
+  visualizationName: $("#visualization-name"),
+  visualizationStatus: $("#visualization-status"),
+  visualizationFrame: $("#visualization-frame"),
+  closeVisualization: $("#close-visualization"),
   messageTemplate: $("#message-template"),
   queueItemTemplate: $("#queue-item-template"),
 };
@@ -217,6 +249,9 @@ const state = {
   scrollCommandUntil: 0,
   renderingConversation: false,
   eventStream: null,
+  eventStreamLastActivityAt: 0,
+  eventStreamInterrupted: false,
+  eventStreamWatchdogTimer: null,
   messageElements: new Map(),
   executionGroups: new Map(),
   executionIdleTimers: new Map(),
@@ -233,6 +268,8 @@ const state = {
   codexReady: false,
   codexStatusTimer: null,
   workspaceRoot: null,
+  sidebarView: "projects",
+  sidebarOrder: "original",
 };
 
 const layout = createWorkbenchLayout({ ui, state, renderRunStrip, renderRecentThreads });
@@ -262,13 +299,34 @@ async function boot() {
   const response = await fetch("/api/auth/session");
   const body = await response.json().catch(() => ({}));
   if (!response.ok) return showAuth(Boolean(body.setupRequired), body.error || "请登录后继续。");
+  const download = pendingBrowserDownload();
+  if (download) {
+    location.replace(download);
+    return;
+  }
   await enterWorkspace(body);
+}
+
+function pendingBrowserDownload() {
+  const value = new URLSearchParams(location.search).get("download");
+  if (!value) return null;
+  try {
+    const target = new URL(value, location.origin);
+    if (target.origin !== location.origin || target.hash) return null;
+    const allowed = /^\/api\/projects\/[0-9a-f-]+\/files\/download$/i.test(target.pathname)
+      || target.pathname === "/api/admin/files/download";
+    return allowed ? `${target.pathname}${target.search}` : null;
+  } catch {
+    return null;
+  }
 }
 
 async function enterWorkspace(session) {
   state.user = session.user;
   state.csrfToken = session.csrfToken;
   state.selectedProjectId = localStorage.getItem(userStorageKey("project")) || null;
+  state.sidebarView = localStorage.getItem(userStorageKey("sidebar-view")) === "recent" ? "recent" : "projects";
+  state.sidebarOrder = localStorage.getItem(userStorageKey("sidebar-order")) === "recent" ? "recent" : "original";
   ui.authShell.hidden = true;
   ui.app.hidden = false;
   renderAccount();
@@ -276,8 +334,8 @@ async function enterWorkspace(session) {
   ui.globalConnectionAddress.textContent = location.origin;
   ui.refreshInterval.value = localStorage.getItem(userStorageKey("refresh-seconds")) || "0";
   await refreshWorkspace({ quiet: true });
-  configureAutoRefresh();
   state.booted = true;
+  configureAutoRefresh();
 }
 
 function showAuth(setupRequired, message = "") {
@@ -354,7 +412,6 @@ function renderAccountLimits() {
   for (const [element, label, limit] of visible) {
     const percent = Math.round(limit.usedPercent);
     element.textContent = `${label} ${percent}%`;
-    element.style.setProperty("--usage", `${percent}%`);
     const reset = limit.resetsAt ? new Date(limit.resetsAt * 1000).toLocaleString() : "未知";
     element.title = `${label === "5H" ? "5 小时" : "每周"}限额已使用 ${percent}%，重置时间：${reset}`;
   }
@@ -392,7 +449,8 @@ async function refreshProjectThreads(projectId) {
   const project = state.projects.find((entry) => entry.id === projectId);
   if (project?.available === false) {
     state.threads.set(projectId, []);
-    if (projectId === state.selectedProjectId) renderThreads();
+    if (projectId === state.selectedProjectId || state.sidebarView === "recent") renderThreads();
+    else if (state.sidebarOrder === "recent") renderProjects();
     return [];
   }
   const baselineThreads = [...(state.threads.get(projectId) || [])];
@@ -408,7 +466,8 @@ async function refreshProjectThreads(projectId) {
   });
   for (const threadId of merged.removedThreadIds) forgetClientThread(threadId);
   state.threads.set(projectId, threads);
-  if (projectId === state.selectedProjectId) renderThreads();
+  if (projectId === state.selectedProjectId || state.sidebarView === "recent") renderThreads();
+  else if (state.sidebarOrder === "recent") renderProjects();
   renderRunStrip();
   return threads;
 }
@@ -701,7 +760,7 @@ function turnWithMetrics(turn) {
 
 function renderProjects() {
   ui.projectList.replaceChildren();
-  for (const project of state.projects) {
+  for (const project of sidebarProjectEntries(state.projects, state.threads, state.sidebarOrder)) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "project-item";
@@ -725,28 +784,38 @@ function renderProjects() {
 
 function renderThreads() {
   ui.threadList.replaceChildren();
+  renderSidebarControls();
+  if (state.sidebarOrder === "recent") renderProjects();
   const project = currentProject();
   if (!project) return;
-  if (project.available === false) {
+  const crossProject = state.sidebarView === "recent";
+  ui.projectsSection.hidden = crossProject;
+  ui.sidebarThreadHeading.textContent = crossProject ? "最近对话" : "聊天";
+  if (!crossProject && project.available === false) {
     const unavailable = document.createElement("p");
     unavailable.className = "sidebar-empty error";
     unavailable.textContent = "项目目录当前不可用";
     ui.threadList.append(unavailable);
     return;
   }
-  const threads = state.threads.get(project.id) || [];
-  if (!threads.length) {
+  const entries = sidebarThreadEntries(state.projects, state.threads, {
+    view: state.sidebarView,
+    order: state.sidebarOrder,
+    projectId: project.id,
+  });
+  if (!entries.length) {
     const empty = document.createElement("p");
     empty.className = "sidebar-empty";
-    empty.textContent = "这个项目还没有聊天";
+    empty.textContent = crossProject ? "还没有可显示的对话" : "这个项目还没有聊天";
     ui.threadList.append(empty);
     renderRecentThreads();
     return;
   }
-  for (const thread of threads) {
+  for (const { project: threadProject, thread } of entries) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "thread-item";
+    if (crossProject) button.classList.add("cross-project");
     if (thread.id === state.selectedThreadId) button.classList.add("active");
     if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
     if (isActiveThreadRuntime(thread.runtime)) button.classList.add("running");
@@ -755,15 +824,49 @@ function renderThreads() {
     title.textContent = threadDisplayName(thread);
     const details = document.createElement("small");
     const queueCount = thread.queueCount || 0;
-    if (thread.id === state.threadSelectionTargetId) details.textContent = "打开中…";
+    if (crossProject) details.textContent = thread.id === state.threadSelectionTargetId ? `${threadProject.name} · 打开中…` : threadProject.name;
+    else if (thread.id === state.threadSelectionTargetId) details.textContent = "打开中…";
     else if (isActiveThreadRuntime(thread.runtime)) setElapsedDisplay(details, "执行中", thread.runtime);
     else if (isActiveGoal(thread.goal)) details.textContent = "目标续跑中";
     else details.textContent = queueCount ? `队列 ${queueCount}` : "空闲";
     button.append(title, details);
-    button.addEventListener("click", () => selectThread(thread.id).catch(showError));
+    button.addEventListener("click", () => {
+      if (threadProject.id === state.selectedProjectId) return selectThread(thread.id).catch(showError);
+      return selectProject(threadProject.id, { threadId: thread.id }).catch(showError);
+    });
     ui.threadList.append(button);
   }
   renderRecentThreads();
+}
+
+function renderSidebarControls() {
+  ui.sidebarViewProjects.setAttribute("aria-pressed", String(state.sidebarView === "projects"));
+  ui.sidebarViewRecent.setAttribute("aria-pressed", String(state.sidebarView === "recent"));
+  ui.sidebarOrderOriginal.setAttribute("aria-checked", String(state.sidebarOrder === "original"));
+  ui.sidebarOrderRecent.setAttribute("aria-checked", String(state.sidebarOrder === "recent"));
+  ui.sidebarSortTrigger.setAttribute("aria-label", `排序方式：${state.sidebarOrder === "recent" ? "最近使用" : "原始顺序"}`);
+}
+
+function closeSidebarSortMenu() {
+  ui.sidebarSortMenu.hidden = true;
+  ui.sidebarSortTrigger.setAttribute("aria-expanded", "false");
+}
+
+function toggleSidebarSortMenu() {
+  const opening = ui.sidebarSortMenu.hidden;
+  closeAccountMenu();
+  ui.sidebarSortMenu.hidden = !opening;
+  ui.sidebarSortTrigger.setAttribute("aria-expanded", String(opening));
+}
+
+function setSidebarNavigation(view, order) {
+  if (view) state.sidebarView = view;
+  if (order) state.sidebarOrder = order;
+  closeSidebarSortMenu();
+  localStorage.setItem(userStorageKey("sidebar-view"), state.sidebarView);
+  localStorage.setItem(userStorageKey("sidebar-order"), state.sidebarOrder);
+  renderProjects();
+  renderThreads();
 }
 
 function renderRecentThreads() {
@@ -1460,9 +1563,13 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
     entry = { root, kind, title, status, body, item: {}, autoOpened: false, commandBatch, pendingBody: null };
     if (commandBatch) commandBatch.items.add(entry);
     summary.addEventListener("click", (event) => {
-      if (entry.item.type !== "fileChange") return;
-      event.preventDefault();
-      openFileChangePreview(entry.item);
+      if (entry.item.type === "fileChange") {
+        event.preventDefault();
+        openFileChangePreview(entry.item);
+      } else if (entry.item.type === "imageView" && entry.item.path) {
+        event.preventDefault();
+        openImagePreview(entry.item.path);
+      }
     });
     root.addEventListener("toggle", () => {
       if (root.open) renderDeferredExecutionBody(entry);
@@ -1471,6 +1578,7 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
   }
   const previousItem = entry.item;
   entry.item = { ...previousItem, ...item };
+  entry.root.classList.toggle("image-preview-entry", entry.item.type === "imageView" && Boolean(entry.item.path));
   for (const key of ["startedAt", "completedAt", "durationMs"]) {
     if ((entry.item[key] === null || entry.item[key] === undefined) && previousItem[key] !== null && previousItem[key] !== undefined) {
       entry.item[key] = previousItem[key];
@@ -1998,25 +2106,7 @@ async function copyWithFeedback(button, value) {
 }
 
 async function writeClipboardText(text) {
-  if (window.isSecureContext && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const source = document.createElement("textarea");
-  source.className = "clipboard-source";
-  source.value = text;
-  source.readOnly = true;
-  document.body.append(source);
-  let copied = false;
-  try {
-    source.focus({ preventScroll: true });
-    source.select();
-    source.setSelectionRange(0, source.value.length);
-    copied = document.execCommand("copy");
-  } finally {
-    source.remove();
-  }
-  if (!copied) throw new Error("浏览器拒绝访问剪贴板");
+  return copyTextToClipboard(text);
 }
 
 function renderEmptyConversation() {
@@ -2056,6 +2146,18 @@ function addMessage(id, label, text, kind, timestamp = null) {
   if (kind === "assistant") {
     const actions = document.createElement("div");
     actions.className = "message-actions";
+    const pdfButton = messageActionButton("PDF", "将回答转为 PDF");
+    pdfButton.classList.add("mobile-message-action");
+    pdfButton.addEventListener("click", () => {
+      try {
+        printAnswer(entry);
+      } catch (error) {
+        showError(error);
+      }
+    });
+    const shareButton = messageActionButton("分享", "分享到其他应用");
+    shareButton.classList.add("mobile-message-action");
+    shareButton.addEventListener("click", () => shareAnswer(entry).catch(showError));
     const copyButton = document.createElement("button");
     copyButton.className = "copy-text-button icon-copy-button";
     copyButton.type = "button";
@@ -2063,7 +2165,7 @@ function addMessage(id, label, text, kind, timestamp = null) {
     copyButton.title = "复制原文";
     copyButton.setAttribute("aria-label", "复制最终回答的 Markdown 原文");
     copyButton.addEventListener("click", () => copyWithFeedback(copyButton, entry.rawText));
-    actions.append(copyButton);
+    actions.append(pdfButton, shareButton, copyButton);
     root.append(actions);
     entry.actions = actions;
     entry.copyButton = copyButton;
@@ -2072,6 +2174,52 @@ function addMessage(id, label, text, kind, timestamp = null) {
   renderMessageContent(entry, text);
   state.messageElements.set(id, entry);
   return entry;
+}
+
+function messageActionButton(label, ariaLabel) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-action-button";
+  button.textContent = label;
+  button.setAttribute("aria-label", ariaLabel);
+  button.title = ariaLabel;
+  return button;
+}
+
+function answerDocumentTitle() {
+  const name = threadDisplayName(currentThread());
+  return name === "未命名聊天" ? "CodexLAN 回答" : name;
+}
+
+function printAnswer(entry) {
+  const title = answerDocumentTitle();
+  const html = printableMarkdownHtml(title, entry.body.innerHTML);
+  if (typeof window.CodexAndroid?.printMarkdown === "function") {
+    window.CodexAndroid.printMarkdown(title, html);
+    showActivity("已打开 PDF 保存界面。", false);
+    return;
+  }
+  const printable = window.open("", "_blank");
+  if (!printable) throw new Error("浏览器阻止了 PDF 窗口，请允许弹出窗口后重试。");
+  printable.opener = null;
+  printable.document.open();
+  printable.document.write(html);
+  printable.document.close();
+  window.setTimeout(() => {
+    printable.focus();
+    printable.print();
+  }, 50);
+}
+
+async function shareAnswer(entry) {
+  const title = answerDocumentTitle();
+  const route = await shareMarkdown({ title, text: entry.rawText, documentHtml: printableMarkdownHtml(title, entry.body.innerHTML) });
+  if (route) {
+    showActivity(route === "android-choice" ? "请选择分享格式。" : route === "android-pdf" ? "正在生成 PDF…" : "已打开系统分享面板。", false);
+    return;
+  }
+  await navigator.clipboard.writeText(entry.rawText);
+  showActivity("当前浏览器不支持系统分享，回答已复制。", false);
 }
 
 function setMessageTimestamp(entry, timestamp) {
@@ -2174,6 +2322,16 @@ function renderMessageContent(entry, value) {
   entry.root.classList.toggle("markdown-output", Boolean(formatted.text) && !formatted.isJson);
   entry.files?.remove();
   entry.files = null;
+  entry.visualizations?.remove();
+  entry.visualizations = null;
+  if (presentation.visualizations.length && currentProject()) {
+    const list = document.createElement("div");
+    list.className = "message-visualizations";
+    list.setAttribute("aria-label", "交互图表");
+    for (const visualization of presentation.visualizations) list.append(visualizationCard(visualization));
+    entry.root.append(list);
+    entry.visualizations = list;
+  }
   if (!presentation.files.length || !currentProject()) {
     if (entry.actions) entry.root.append(entry.actions);
     followNewContent();
@@ -2189,17 +2347,86 @@ function renderMessageContent(entry, value) {
   followNewContent();
 }
 
+function visualizationCard(visualization) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "visualization-card";
+  button.setAttribute("aria-label", `打开交互图表：${visualization.title}`);
+  const mark = document.createElement("span");
+  mark.className = "visualization-mark";
+  mark.setAttribute("aria-hidden", "true");
+  mark.innerHTML = '<svg viewBox="0 0 32 32"><path d="M5 24V14m7 10V8m7 16V12m7 12V5"/><path d="m5 10 7-4 7 3 7-6"/></svg>';
+  const copy = document.createElement("span");
+  copy.className = "visualization-card-copy";
+  const title = document.createElement("strong");
+  title.textContent = visualization.title;
+  const meta = document.createElement("small");
+  meta.textContent = "可缩放、可悬停查看数据";
+  copy.append(title, meta);
+  const action = document.createElement("span");
+  action.className = "visualization-card-action";
+  action.textContent = "打开 ↗";
+  button.append(mark, copy, action);
+  button.addEventListener("click", () => openVisualization(visualization).catch(showError));
+  return button;
+}
+
+let visualizationRequest = 0;
+
+async function openVisualization(visualization) {
+  const request = ++visualizationRequest;
+  ui.visualizationName.textContent = visualization.title;
+  ui.visualizationStatus.textContent = "正在载入图表…";
+  ui.visualizationStatus.className = "visualization-status";
+  ui.visualizationStatus.hidden = false;
+  ui.visualizationFrame.hidden = true;
+  ui.visualizationFrame.removeAttribute("src");
+  ui.visualizationDialog.classList.toggle("wide", visualization.mode === "wide");
+  if (!ui.visualizationDialog.open) ui.visualizationDialog.showModal();
+  ui.visualizationFrame.onload = () => {
+    if (request !== visualizationRequest || !ui.visualizationDialog.open) return;
+    ui.visualizationFrame.hidden = false;
+    ui.visualizationStatus.hidden = true;
+  };
+  ui.visualizationFrame.src = visualizationUrl(visualization.path);
+}
+
+function visualizationUrl(path) {
+  return `/api/threads/${encodeURIComponent(state.selectedThreadId)}/visualization?projectId=${encodeURIComponent(state.selectedProjectId)}&path=${encodeURIComponent(path)}`;
+}
+
 function downloadCard(file) {
   const url = localFileUrl(file.path, file.name);
   const previewKind = textPreviewKind(file.name);
+  if (isPreviewableImage(file.name)) return imageFileCard(file, url);
   if (previewKind) return previewFileCard(file, url, previewKind);
   const link = document.createElement("a");
   link.className = "file-download";
   link.href = url;
   link.setAttribute("aria-label", `下载 ${file.name}`);
   link.append(fileCardContent(file, "下载 ↓"));
-  link.addEventListener("click", () => showActivity(`正在下载 ${file.name}`, false));
+  bindDownloadLink(link, file.name);
   return link;
+}
+
+function imageFileCard(file, url) {
+  const card = document.createElement("div");
+  card.className = "markdown-file-card";
+  const preview = document.createElement("button");
+  preview.type = "button";
+  preview.className = "file-download file-preview-trigger";
+  preview.setAttribute("aria-label", `预览 ${file.name}`);
+  preview.append(fileCardContent(file, "预览"));
+  preview.addEventListener("click", () => openImagePreview(file.path, file.name, url));
+  const download = document.createElement("a");
+  download.className = "file-download-direct";
+  download.href = url;
+  download.setAttribute("aria-label", `用浏览器打开 ${file.name}`);
+  download.title = "用浏览器打开";
+  download.textContent = "↗";
+  bindDownloadLink(download, file.name);
+  card.append(preview, download);
+  return card;
 }
 
 function previewFileCard(file, url, previewKind) {
@@ -2217,9 +2444,33 @@ function previewFileCard(file, url, previewKind) {
   download.setAttribute("aria-label", `下载 ${file.name}`);
   download.title = "下载原文件";
   download.textContent = "↓";
-  download.addEventListener("click", () => showActivity(`正在下载 ${file.name}`, false));
+  bindDownloadLink(download, file.name);
   card.append(preview, download);
   return card;
+}
+
+function bindDownloadLink(link, fileName) {
+  link.addEventListener("click", (event) => {
+    const url = new URL(link.href, location.href).href;
+    const external = openDownloadExternally(url);
+    if (external) event.preventDefault();
+    showActivity(external ? `请选择 ${fileName} 的下载方式` : `正在下载 ${fileName}`, false);
+  });
+}
+
+function openImagePreview(path, name = "", url = "") {
+  const fileName = name || String(path || "").split(/[\\/]/).filter(Boolean).pop() || "图片";
+  const source = url || localFileUrl(path, fileName);
+  ui.imagePreviewName.textContent = fileName;
+  ui.imagePreviewPath.textContent = path;
+  ui.imagePreviewImage.src = source;
+  ui.imagePreviewImage.alt = fileName;
+  ui.imagePreviewDownload.href = source;
+  ui.imagePreviewDownload.onclick = (event) => {
+    const external = openDownloadExternally(new URL(source, location.href).href);
+    if (external) event.preventDefault();
+  };
+  if (!ui.imagePreviewDialog.open) ui.imagePreviewDialog.showModal();
 }
 
 function fileCardContent(file, actionLabel) {
@@ -2256,9 +2507,22 @@ function localFileUrl(path, name) {
 }
 
 let markdownPreviewRequest = 0;
+let markdownPreviewValue = null;
+
+function setMarkdownPreviewValue(title, text, bodyHtml = "") {
+  const documentTitle = String(title || "文件预览");
+  markdownPreviewValue = text ? {
+    title: documentTitle,
+    text: String(text),
+    documentHtml: printableMarkdownHtml(documentTitle, bodyHtml),
+  } : null;
+  ui.copyMarkdownPreview.disabled = !markdownPreviewValue;
+  ui.shareMarkdownPreview.disabled = !markdownPreviewValue;
+}
 
 async function openTextPreview(file, url, previewKind) {
   const request = ++markdownPreviewRequest;
+  setMarkdownPreviewValue("", "");
   ui.filePreviewKicker.textContent = previewKind === "markdown" ? "Markdown 预览" : previewKind === "json" ? "JSON 预览" : previewKind === "code" ? "代码预览" : "文本预览";
   ui.markdownPreviewName.textContent = file.name;
   ui.markdownPreviewPath.textContent = file.path;
@@ -2283,6 +2547,7 @@ async function openTextPreview(file, url, previewKind) {
     } else {
       renderSourceDocument(ui.markdownPreviewBody, contents, previewKind);
     }
+    setMarkdownPreviewValue(file.name, contents, ui.markdownPreviewBody.innerHTML);
     ui.markdownPreviewStatus.hidden = true;
     ui.markdownPreviewBody.hidden = false;
     ui.markdownPreviewBody.focus({ preventScroll: true });
@@ -2297,14 +2562,16 @@ function openFileChangePreview(item) {
   markdownPreviewRequest += 1;
   const changes = item.changes || [];
   const count = changes.length;
+  const title = count ? `${count} 个文件的修改` : "文件修改";
   ui.filePreviewKicker.textContent = "Diff 预览";
-  ui.markdownPreviewName.textContent = count ? `${count} 个文件的修改` : "文件修改";
+  ui.markdownPreviewName.textContent = title;
   ui.markdownPreviewPath.textContent = changes.map((change) => change.path).filter(Boolean).join(" · ") || "完整 diff";
   ui.markdownPreviewDownload.hidden = true;
   ui.markdownPreviewStatus.hidden = true;
   ui.markdownPreviewBody.hidden = false;
   ui.markdownPreviewBody.className = "diff-document";
   renderFileChanges(ui.markdownPreviewBody, changes);
+  setMarkdownPreviewValue(title, fileChangesText(changes), ui.markdownPreviewBody.innerHTML);
   if (!ui.markdownPreviewDialog.open) ui.markdownPreviewDialog.showModal();
   ui.markdownPreviewBody.focus({ preventScroll: true });
 }
@@ -2748,7 +3015,7 @@ async function submitPrompt(event) {
       if (!activeTurnId) throw new Error("当前没有可引导的执行任务。");
       const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/steer`, { method: "POST", body: { projectId: project.id, expectedTurnId: activeTurnId, text } });
       acceptGuideMessage(thread.id, result.turnId, result.item);
-      showActivity("引导已插入当前任务。", false);
+      showActivity("引导已送达；正在运行的命令结束后会处理。", false);
     } else {
       const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue`, { method: "POST", body: { projectId: project.id, text } });
       applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
@@ -3017,16 +3284,29 @@ async function stopCurrentTurn() {
     const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/interrupt`, {
       method: "POST",
       body: { projectId: project.id, turnId: activeTurnId },
-      timeoutMs: 8000,
+      timeoutMs: 10000,
     });
-    if (result.goal) applyThreadGoal(thread.id, result.goal);
-    showActivity(result.goalPaused ? "目标已暂停，当前任务已停止。" : "已请求停止当前任务。", false);
+    showActivity(result.goalPauseRequested ? "停止命令已送达，正在停止任务并暂停目标…" : "停止命令已送达，正在等待任务退出…", false);
+    const stopped = await waitForTurnToStop(project.id, thread.id, activeTurnId);
+    showActivity(stopped ? "当前任务已停止。" : "停止命令已送达，但任务仍显示运行；请再次停止。", !stopped);
   } catch (error) {
     showError(error);
   } finally {
     state.stoppingTurn = false;
     if (state.selectedThreadId === thread.id) updateComposer();
   }
+}
+
+async function waitForTurnToStop(projectId, threadId, turnId) {
+  for (const delay of [0, 300, 700, 1200, 2000, 3000]) {
+    if (delay) await new Promise((resolveWait) => setTimeout(resolveWait, delay));
+    try {
+      await refreshProjectThreads(projectId);
+    } catch {}
+    const runtime = findThread(projectId, threadId)?.runtime;
+    if (!isActiveThreadRuntime(runtime) || runtime.activeTurnId !== turnId) return true;
+  }
+  return false;
 }
 
 async function compactCurrentThread() {
@@ -3175,7 +3455,7 @@ async function guideQueueItem(itemId) {
     acceptGuideMessage(thread.id, result.turnId, result.item);
     renderThreads();
     renderRunStrip();
-    showActivity("排队任务已转入当前信息流。", false);
+    showActivity("引导已送达；正在运行的命令结束后会处理。", false);
   } catch (error) {
     showError(error);
   } finally {
@@ -3247,33 +3527,88 @@ async function removeQueue(itemId) {
   }
 }
 
+function markEventStreamActivity(stream) {
+  if (state.eventStream === stream) state.eventStreamLastActivityAt = Date.now();
+}
+
+function stopEventStream({ interrupted = false } = {}) {
+  const stream = state.eventStream;
+  if (interrupted) {
+    if (!state.eventStreamInterrupted) invalidateCachedThreadHistories();
+    state.eventStreamInterrupted = true;
+  }
+  state.eventStream = null;
+  state.eventStreamLastActivityAt = 0;
+  stream?.close();
+}
+
+function scheduleEventStreamWatchdog() {
+  clearTimeout(state.eventStreamWatchdogTimer);
+  state.eventStreamWatchdogTimer = null;
+  if (!state.user) return;
+  state.eventStreamWatchdogTimer = setTimeout(() => {
+    state.eventStreamWatchdogTimer = null;
+    if (!document.hidden && eventStreamNeedsRestart({
+      readyState: state.eventStream?.readyState,
+      openState: EventSource.OPEN,
+      closedState: EventSource.CLOSED,
+      lastActivityAt: state.eventStreamLastActivityAt,
+    })) {
+      restartEventStream();
+    }
+    scheduleEventStreamWatchdog();
+  }, EVENT_STREAM_WATCHDOG_INTERVAL_MS);
+}
+
+function restartEventStream() {
+  if (!state.user || document.hidden) return null;
+  stopEventStream({ interrupted: true });
+  return openEventStream();
+}
+
+async function reconcileEventStreamInterruption() {
+  if (!state.eventStreamInterrupted) return;
+  const threadId = state.selectedThreadId;
+  state.eventStreamInterrupted = false;
+  if (!threadId || isLocalThreadId(threadId)) return;
+  try {
+    await reconcileInterruptedThread(threadId);
+  } catch (error) {
+    state.eventStreamInterrupted = true;
+    throw error;
+  }
+}
+
 function openEventStream() {
   const existing = state.eventStream;
   if (existing && existing.readyState !== EventSource.CLOSED) return existing;
   state.eventStream = null;
   const stream = new EventSource("/api/events");
-  let interrupted = false;
+  state.eventStream = stream;
+  markEventStreamActivity(stream);
   stream.addEventListener("open", () => {
-    if (interrupted && state.selectedThreadId && !isLocalThreadId(state.selectedThreadId)) {
-      reconcileInterruptedThread(state.selectedThreadId).catch(showError);
-    }
-    interrupted = false;
+    markEventStreamActivity(stream);
+    reconcileEventStreamInterruption().catch(showError);
   });
   stream.addEventListener("error", () => {
-    if (!interrupted) invalidateCachedThreadHistories();
-    interrupted = true;
+    if (state.eventStream !== stream) return;
+    if (!state.eventStreamInterrupted) invalidateCachedThreadHistories();
+    state.eventStreamInterrupted = true;
   });
+  stream.addEventListener("heartbeat", () => markEventStreamActivity(stream));
   stream.addEventListener("server", (event) => {
+    markEventStreamActivity(stream);
     const data = safeJson(event.data);
     applyCodexStatus(data);
     if (data?.status === "ready") scheduleResume(0);
   });
   stream.addEventListener("codex", (event) => {
+    markEventStreamActivity(stream);
     const data = safeJson(event.data);
     const threadId = data?.params?.threadId;
     if (threadId) handleCodexEvent(threadId, data);
   });
-  state.eventStream = stream;
+  scheduleEventStreamWatchdog();
   return stream;
 }
 
@@ -3838,14 +4173,28 @@ async function restoreSelectionAfterRefresh(projectId, rememberedThreadId, previ
 }
 
 function configureAutoRefresh() {
-  clearInterval(state.refreshTimer);
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = null;
   const seconds = Number(ui.refreshInterval.value);
   localStorage.setItem(userStorageKey("refresh-seconds"), String(seconds));
-  if (Number.isFinite(seconds) && seconds > 0) {
-    state.refreshTimer = setInterval(() => {
-      refreshWorkspace({ quiet: true }).catch(showError);
-    }, seconds * 1000);
-  }
+  scheduleAutoRefresh();
+}
+
+function scheduleAutoRefresh(delayMs = null) {
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = null;
+  const seconds = Number(ui.refreshInterval.value);
+  if (!state.booted || document.hidden || !Number.isFinite(seconds) || seconds <= 0) return;
+  state.refreshTimer = setTimeout(async () => {
+    state.refreshTimer = null;
+    try {
+      await refreshWorkspace({ quiet: true });
+    } catch (error) {
+      showError(error);
+    } finally {
+      scheduleAutoRefresh();
+    }
+  }, delayMs === null ? seconds * 1000 : Math.max(0, delayMs));
 }
 
 function scheduleResume(delay = 120) {
@@ -4152,7 +4501,9 @@ function setServerStatus(online, text) {
   state.codexReady = online;
   ui.serverStatus.classList.toggle("online", online);
   ui.serverStatus.classList.toggle("offline", !online);
-  ui.serverStatus.textContent = text;
+  ui.serverStatus.textContent = "";
+  ui.serverStatus.setAttribute("aria-label", text);
+  ui.serverStatus.title = text;
   updateComposer();
 }
 
@@ -4235,6 +4586,41 @@ function renderAccount() {
   ui.accountUsername.textContent = `@${user.username}`;
   ui.manageUsers.hidden = user.role !== "admin";
   if (user.mustChangePassword) openPasswordDialog(true);
+}
+
+function openDisplayNameDialog() {
+  closeAccountMenu();
+  closeSidebar();
+  ui.displayNameForm.reset();
+  ui.profileDisplayName.value = state.user?.displayName || "";
+  ui.displayNameError.textContent = "";
+  ui.displayNameDialog.showModal();
+  setTimeout(() => {
+    ui.profileDisplayName.focus();
+    ui.profileDisplayName.select();
+  }, 0);
+}
+
+async function saveDisplayName(event) {
+  event.preventDefault();
+  ui.displayNameError.textContent = "";
+  ui.saveDisplayName.disabled = true;
+  ui.saveDisplayName.textContent = "保存中…";
+  try {
+    const result = await api("/api/auth/profile", {
+      method: "PATCH",
+      body: { displayName: ui.profileDisplayName.value.trim() },
+    });
+    state.user = result.user;
+    renderAccount();
+    ui.displayNameDialog.close();
+    showActivity("显示名称已更新。", false);
+  } catch (error) {
+    ui.displayNameError.textContent = error.message;
+  } finally {
+    ui.saveDisplayName.disabled = false;
+    ui.saveDisplayName.textContent = "保存名称";
+  }
 }
 
 function openPasswordDialog(required = false) {
@@ -4492,6 +4878,7 @@ async function authRequest(path, body) {
 ui.loginForm.addEventListener("submit", submitLogin);
 ui.setupForm.addEventListener("submit", submitSetup);
 ui.manageUsers.addEventListener("click", openUserManager);
+ui.changeDisplayName.addEventListener("click", openDisplayNameDialog);
 ui.changePassword.addEventListener("click", () => openPasswordDialog(false));
 ui.logout.addEventListener("click", async () => {
   try {
@@ -4501,6 +4888,9 @@ ui.logout.addEventListener("click", async () => {
   }
 });
 ui.passwordForm.addEventListener("submit", saveMyPassword);
+ui.displayNameForm.addEventListener("submit", saveDisplayName);
+ui.closeDisplayNameDialog.addEventListener("click", () => ui.displayNameDialog.close());
+ui.cancelDisplayName.addEventListener("click", () => ui.displayNameDialog.close());
 ui.passwordDialog.addEventListener("cancel", (event) => {
   if (state.user?.mustChangePassword) event.preventDefault();
 });
@@ -4547,6 +4937,11 @@ ui.prompt.addEventListener("input", () => {
   updateComposer();
 });
 ui.stop.addEventListener("click", stopCurrentTurn);
+ui.sidebarViewProjects.addEventListener("click", () => setSidebarNavigation("projects"));
+ui.sidebarViewRecent.addEventListener("click", () => setSidebarNavigation("recent"));
+ui.sidebarSortTrigger.addEventListener("click", toggleSidebarSortMenu);
+ui.sidebarOrderOriginal.addEventListener("click", () => setSidebarNavigation(null, "original"));
+ui.sidebarOrderRecent.addEventListener("click", () => setSidebarNavigation(null, "recent"));
 ui.renameThread.addEventListener("click", () => { closeThreadMenu(); openThreadDialog(); });
 ui.compactThread.addEventListener("click", compactCurrentThread);
 ui.deleteThread.addEventListener("click", () => { closeThreadMenu(); deleteCurrentThread(); });
@@ -4554,12 +4949,45 @@ ui.threadForm.addEventListener("submit", saveThreadName);
 ui.queueEditForm.addEventListener("submit", saveQueueEdit);
 ui.jumpLatest.addEventListener("click", () => scrollToLatest());
 ui.closeMarkdownPreview.addEventListener("click", () => ui.markdownPreviewDialog.close());
+ui.copyMarkdownPreview.addEventListener("click", () => {
+  copyWithFeedback(ui.copyMarkdownPreview, markdownPreviewValue?.text || "");
+});
+ui.shareMarkdownPreview.addEventListener("click", () => {
+  if (!markdownPreviewValue) return;
+  shareMarkdown(markdownPreviewValue).then((route) => {
+    if (route) showActivity(route === "android-choice" ? "请选择分享格式。" : route === "android-pdf" ? "正在生成 PDF…" : "已打开系统分享面板。", false);
+    else showActivity("当前浏览器不支持系统分享，请使用复制。", true);
+  }).catch(showError);
+});
 ui.markdownPreviewDialog.addEventListener("close", () => {
   markdownPreviewRequest += 1;
+  setMarkdownPreviewValue("", "");
   ui.markdownPreviewBody.replaceChildren();
 });
 ui.markdownPreviewDialog.addEventListener("click", (event) => {
   if (event.target === ui.markdownPreviewDialog) ui.markdownPreviewDialog.close();
+});
+ui.markdownPreviewDownload.addEventListener("click", (event) => {
+  const external = openDownloadExternally(new URL(ui.markdownPreviewDownload.href, location.href).href);
+  if (external) event.preventDefault();
+});
+ui.closeImagePreview.addEventListener("click", () => ui.imagePreviewDialog.close());
+ui.imagePreviewDialog.addEventListener("close", () => {
+  ui.imagePreviewImage.removeAttribute("src");
+  ui.imagePreviewImage.alt = "";
+});
+ui.imagePreviewDialog.addEventListener("click", (event) => {
+  if (event.target === ui.imagePreviewDialog) ui.imagePreviewDialog.close();
+});
+ui.closeVisualization.addEventListener("click", () => ui.visualizationDialog.close());
+ui.visualizationDialog.addEventListener("close", () => {
+  visualizationRequest += 1;
+  ui.visualizationFrame.onload = null;
+  ui.visualizationFrame.removeAttribute("src");
+  ui.visualizationFrame.hidden = true;
+});
+ui.visualizationDialog.addEventListener("click", (event) => {
+  if (event.target === ui.visualizationDialog) ui.visualizationDialog.close();
 });
 ui.conversation.addEventListener("scroll", updateJumpLatest, { passive: true });
 ui.model.addEventListener("change", () => saveSettings({ model: ui.model.value }));
@@ -4591,14 +5019,48 @@ for (const dialog of document.querySelectorAll("dialog")) {
   });
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") scheduleResume(0);
+  if (document.visibilityState === "hidden") {
+    clearTimeout(state.refreshTimer);
+    state.refreshTimer = null;
+    stopEventStream({ interrupted: true });
+    return;
+  }
+  ensureEventStream();
+  scheduleResume(0);
+  scheduleAutoRefresh(0);
 });
 window.addEventListener("pageshow", (event) => {
-  if (event.persisted) scheduleResume(0);
+  if (event.persisted) {
+    restartEventStream();
+    scheduleResume(0);
+    scheduleAutoRefresh(0);
+  }
 });
-window.addEventListener("online", () => scheduleResume(0));
-window.addEventListener("focus", () => scheduleResume());
-window.addEventListener("codex-native-resume", () => scheduleResume(0));
+window.addEventListener("online", () => {
+  restartEventStream();
+  scheduleResume(0);
+  scheduleAutoRefresh(0);
+});
+window.addEventListener("focus", () => {
+  if (eventStreamNeedsRestart({
+    readyState: state.eventStream?.readyState,
+    openState: EventSource.OPEN,
+    closedState: EventSource.CLOSED,
+    lastActivityAt: state.eventStreamLastActivityAt,
+  })) restartEventStream();
+  scheduleResume();
+});
+window.addEventListener("codex-native-resume", () => {
+  restartEventStream();
+  scheduleResume(0);
+  scheduleAutoRefresh(0);
+});
+document.addEventListener("click", (event) => {
+  if (!ui.sidebarSortWrap.contains(event.target)) closeSidebarSortMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeSidebarSortMenu();
+});
 layout.bind();
 ui.openSettings.addEventListener("click", () => {
   if (window.CodexAndroid?.openConnectionSettings) window.CodexAndroid.openConnectionSettings();

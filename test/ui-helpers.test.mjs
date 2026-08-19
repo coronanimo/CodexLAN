@@ -4,12 +4,85 @@ import assert from "node:assert/strict";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "../public/elapsed-time.js";
 import { downloadableFiles, projectForLocalFile, textPreviewKind } from "../public/file-downloads.js";
 import { MAX_LIVE_COMMAND_OUTPUT, MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandDisplayText, commandExecutionSnapshot, commandOutputTail, executionBodyHasContent, executionItemDuration, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "../public/execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeListedThread, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, threadDisplayName, threadStatusValue } from "../public/workspace.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeListedThread, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName, threadStatusValue } from "../public/workspace.js";
 import { createAnsiOutputState, parseAnsiOutput, parseAnsiOutputChunk } from "../public/ansi-output.js";
 import { diffLineKind, diffLineStats, textLineCount, unifiedDiffChanges } from "../public/diff-output.js";
 import { isMobileComposer, shouldSubmitPromptFromKeyboard } from "../public/composer.js";
+import { copyTextToClipboard, fileChangesText, isPreviewableImage, openDownloadExternally, printableMarkdownHtml, shareMarkdown } from "../public/mobile-actions.js";
 import { plainInlineMarkdown } from "../public/text-format.js";
 import { planShortcut, turnPlanPresentation, turnPlanSnapshot } from "../public/plan.js";
+import { EVENT_STREAM_STALE_AFTER_MS, eventStreamNeedsRestart } from "../public/event-stream.js";
+
+test("restarts closed and silent event streams without replacing a healthy connection", () => {
+  const now = 1_000_000;
+  assert.equal(eventStreamNeedsRestart({ readyState: 1, lastActivityAt: now - 1_000, now }), false);
+  assert.equal(eventStreamNeedsRestart({ readyState: 2, lastActivityAt: now, now }), true);
+  assert.equal(eventStreamNeedsRestart({ readyState: 0, lastActivityAt: now - EVENT_STREAM_STALE_AFTER_MS - 1, now }), true);
+  assert.equal(eventStreamNeedsRestart({ readyState: 0, lastActivityAt: now - 1_000, now }), false);
+});
+
+test("sidebar supports project and cross-project views in original or recent order", () => {
+  const projects = [{ id: "a" }, { id: "b" }];
+  const threads = new Map([
+    ["a", [{ id: "a1", updatedAt: 10 }, { id: "a2", accessedAt: 40 }]],
+    ["b", [{ id: "b1", accessedAt: 30 }, { id: "b2", updatedAt: 20 }]],
+  ]);
+  assert.deepEqual(sidebarThreadEntries(projects, threads, { view: "projects", order: "original", projectId: "a" }).map((entry) => entry.thread.id), ["a1", "a2"]);
+  assert.deepEqual(sidebarThreadEntries(projects, threads, { view: "projects", order: "recent", projectId: "a" }).map((entry) => entry.thread.id), ["a2", "a1"]);
+  assert.deepEqual(sidebarThreadEntries(projects, threads, { view: "recent", order: "original" }).map((entry) => entry.thread.id), ["a1", "a2", "b1", "b2"]);
+  assert.deepEqual(sidebarThreadEntries(projects, threads, { view: "recent", order: "recent" }).map((entry) => entry.thread.id), ["a2", "b1", "b2", "a1"]);
+  assert.deepEqual(sidebarProjectEntries(projects, threads, "original").map((entry) => entry.id), ["a", "b"]);
+  assert.deepEqual(sidebarProjectEntries(projects, threads, "recent").map((entry) => entry.id), ["a", "b"]);
+});
+
+test("falls back to selection copy when clipboard permission is denied", async () => {
+  const calls = [];
+  const source = {
+    value: "",
+    focus: () => calls.push("focus-source"),
+    select: () => calls.push("select"),
+    setSelectionRange: (start, end) => calls.push(["range", start, end]),
+    remove: () => calls.push("remove"),
+  };
+  const documentObject = {
+    activeElement: { focus: () => calls.push("restore-focus") },
+    body: { append: (element) => calls.push(["append", element.value]) },
+    createElement: (tag) => {
+      assert.equal(tag, "textarea");
+      return source;
+    },
+    execCommand: (command) => {
+      calls.push(["command", command]);
+      return true;
+    },
+  };
+  const route = await copyTextToClipboard("预览正文", {
+    bridge: {},
+    navigatorObject: { clipboard: { writeText: async () => { throw new Error("denied"); } } },
+    documentObject,
+  });
+  assert.equal(route, "legacy-copy");
+  assert.deepEqual(calls, [
+    ["append", "预览正文"],
+    "focus-source",
+    "select",
+    ["range", 0, 4],
+    ["command", "copy"],
+    "remove",
+    "restore-focus",
+  ]);
+});
+
+test("uses the Android clipboard bridge before browser clipboard APIs", async () => {
+  const calls = [];
+  const route = await copyTextToClipboard("预览正文", {
+    bridge: { copyText: (value) => calls.push(["android", value]) },
+    navigatorObject: { clipboard: { writeText: async () => calls.push(["browser"]) } },
+    documentObject: {},
+  });
+  assert.equal(route, "android");
+  assert.deepEqual(calls, [["android", "预览正文"]]);
+});
 
 test("uses one runtime definition for status-only and turn-id activity", () => {
   assert.equal(threadStatusValue({ type: "inProgress" }), "inprogress");
@@ -211,6 +284,7 @@ test("removes line and column suffixes from Windows file links before previewing
   assert.deepEqual(downloadableFiles("[app.js](C:/Workspace/sample/public/app.js:376)"), {
     text: "app.js",
     files: [{ path: "C:/Workspace/sample/public/app.js", name: "app.js", label: "app.js" }],
+    visualizations: [],
   });
   assert.deepEqual(downloadableFiles("[worker.mjs](<F:/GPT Server/worker.mjs:12:8>)").files[0], {
     path: "F:/GPT Server/worker.mjs",
@@ -227,11 +301,27 @@ test("turns Codex file citation directives into downloadable files", () => {
       name: "从数据资产到可执行多因子模型_教材.docx",
       label: "从数据资产到可执行多因子模型_教材.docx",
     }],
+    visualizations: [],
   });
   assert.deepEqual(downloadableFiles('文件已生成。\n\n:codex-file-citation{purpose="output" path=\'C:\\Exports\\report.docx\' name="教材"}'), {
     text: "文件已生成。",
     files: [{ path: "C:\\Exports\\report.docx", name: "report.docx", label: "教材" }],
+    visualizations: [],
   });
+});
+
+test("turns Codex visualize directives into interactive visualization references", () => {
+  assert.deepEqual(downloadableFiles('visualize{"path":"C:\\Users\\Shiwei\\AppData\\Local\\Temp\\codex-chart\\chart.html","mode":"wide","title":"期限结构"}\n\n结论'), {
+    text: "结论",
+    files: [],
+    visualizations: [{
+      path: "C:\\Users\\Shiwei\\AppData\\Local\\Temp\\codex-chart\\chart.html",
+      name: "chart.html",
+      title: "期限结构",
+      mode: "wide",
+    }],
+  });
+  assert.equal(downloadableFiles('visualize{"path":"C:\\Temp\\chart.txt","title":"坏引用"}').visualizations.length, 0);
 });
 
 test("uses the project that actually contains a linked local file", () => {
@@ -636,6 +726,57 @@ test("calculates current context window usage from the latest model call", () =>
     last: { totalTokens: 25_840 },
     modelContextWindow: 258_400,
   }), { usedTokens: 25_840, contextWindow: 258_400, usedPercent: 10 });
+});
+
+test("builds a self-contained printable Markdown document", () => {
+  const html = printableMarkdownHtml("研究 <结论>", "<h1>结论</h1><p>可打印</p>");
+  assert.match(html, /<title>研究 &lt;结论&gt;<\/title>/);
+  assert.match(html, /<article><h1>结论<\/h1><p>可打印<\/p><\/article>/);
+  assert.match(html, /@page/);
+  assert.doesNotMatch(html, /<title>研究 <结论>/);
+});
+
+test("routes mobile sharing and downloads through native bridges with web fallbacks", async () => {
+  const calls = [];
+  const bridge = {
+    shareDocument: (...arguments_) => calls.push(["share-document", ...arguments_]),
+    openExternalDownload: (...arguments_) => calls.push(["download", ...arguments_]),
+  };
+  assert.equal(await shareMarkdown({ title: "回答", text: "正文", documentHtml: "<html>回答</html>", bridge, navigatorObject: {} }), "android-choice");
+  assert.equal(openDownloadExternally("http://workspace/file", bridge), true);
+  assert.deepEqual(calls, [
+    ["share-document", "回答", "正文", "<html>回答</html>"],
+    ["download", "http://workspace/file"],
+  ]);
+
+  let shared;
+  assert.equal(await shareMarkdown({
+    title: "回答",
+    text: "正文",
+    bridge: {},
+    navigatorObject: { share: async (payload) => { shared = payload; } },
+  }), "web");
+  assert.deepEqual(shared, { title: "回答", text: "正文" });
+  await assert.rejects(
+    shareMarkdown({ title: "回答", text: "正文", bridge: { shareText() {} }, navigatorObject: {} }),
+    /不支持 PDF 分享/,
+  );
+  assert.equal(await shareMarkdown({ bridge: {}, navigatorObject: {} }), null);
+  assert.equal(openDownloadExternally("http://workspace/file", {}), false);
+});
+
+test("recognizes image files supported by the preview surface", () => {
+  assert.equal(isPreviewableImage("chart.PNG"), true);
+  assert.equal(isPreviewableImage("result.webp"), true);
+  assert.equal(isPreviewableImage("report.pdf"), false);
+});
+
+test("keeps file paths and raw diffs when sharing a change preview", () => {
+  assert.equal(fileChangesText([
+    { path: "public/app.js", diff: "@@ -1 +1 @@\n-old\n+new" },
+    { path: "README.md", diff: "+说明" },
+  ]), "### public/app.js\n\n```diff\n@@ -1 +1 @@\n-old\n+new\n```\n\n### README.md\n\n```diff\n+说明\n```");
+  assert.equal(fileChangesText([]), "");
 });
 
 test("selects 5-hour and weekly Codex rate-limit windows", () => {

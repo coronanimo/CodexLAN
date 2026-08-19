@@ -8,3 +8,9 @@ test("all dialog cancel controls bypass required-field validation", async () => 
   assert.ok(cancelButtons.length > 2);
   assert.ok(cancelButtons.every((button) => button.includes("formnovalidate")));
 });
+
+test("file preview exposes copy and share actions", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="copy-markdown-preview"[^>]*disabled/);
+  assert.match(html, /id="share-markdown-preview"[^>]*disabled/);
+});

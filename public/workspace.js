@@ -30,6 +30,36 @@ export function recentThreadEntries(projects, threadsByProject, limit = 6) {
   return entries.slice(0, Math.max(0, limit));
 }
 
+export function sidebarThreadEntries(projects, threadsByProject, { view = "projects", order = "original", projectId = null } = {}) {
+  const projectEntries = (projects || []).map((project, projectIndex) => ({ project, projectIndex }));
+  const entries = [];
+  for (const { project, projectIndex } of projectEntries) {
+    if (view === "projects" && project.id !== projectId) continue;
+    for (const [threadIndex, thread] of (threadsByProject.get(project.id) || []).entries()) {
+      entries.push({ project, thread, projectIndex, threadIndex });
+    }
+  }
+  if (order === "recent") {
+    entries.sort((left, right) => threadActivityTime(right.thread) - threadActivityTime(left.thread)
+      || left.projectIndex - right.projectIndex
+      || left.threadIndex - right.threadIndex);
+  }
+  return entries;
+}
+
+export function sidebarProjectEntries(projects, threadsByProject, order = "original") {
+  const entries = (projects || []).map((project, projectIndex) => {
+    const activity = Math.max(0, ...(threadsByProject.get(project.id) || []).map(threadActivityTime));
+    return { project, projectIndex, activity };
+  });
+  if (order === "recent") entries.sort((left, right) => right.activity - left.activity || left.projectIndex - right.projectIndex);
+  return entries.map(({ project }) => project);
+}
+
+function threadActivityTime(thread) {
+  return timestampMilliseconds(thread?.accessedAt) || timestampMilliseconds(thread?.updatedAt) || 0;
+}
+
 export function mergeListedThread(existing, listed) {
   if (!existing) return listed;
   const { turns: listedTurns, ...summary } = listed;

@@ -1,5 +1,6 @@
 export function downloadableFiles(value) {
   const files = [];
+  const visualizations = [];
   const seen = new Set();
   const collect = (target, label) => {
     const path = localFileTarget(target);
@@ -14,6 +15,12 @@ export function downloadableFiles(value) {
     return file;
   };
   let text = String(value || "");
+  text = text.replace(/visualize([^\r\n]+)/g, (match, descriptor) => {
+    const visualization = visualizationDescriptor(descriptor);
+    if (!visualization) return match;
+    visualizations.push(visualization);
+    return "";
+  });
   text = text.replace(/:codex-file-citation\{([^}\r\n]*)\}/g, (match, attributes) => {
     const path = directiveAttribute(attributes, "path");
     const label = directiveAttribute(attributes, "label") || directiveAttribute(attributes, "name");
@@ -21,7 +28,33 @@ export function downloadableFiles(value) {
   });
   text = text.replace(/\[([^\]\r\n]{1,160})\]\(\s*<?([^\)\r\n]+?)>?\s*\)/g, (match, label, target) => collect(target, label) ? label : match);
   text = text.replace(/<((?:file:\/\/\/|\/?[a-z]:[\\/])[^>\r\n]+)>/gi, (match, target) => collect(target, "")?.name || match);
-  return { text: text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), files };
+  return { text: text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), files, visualizations };
+}
+
+function visualizationDescriptor(value) {
+  let descriptor;
+  try {
+    descriptor = JSON.parse(value);
+  } catch {
+    descriptor = Object.fromEntries([...String(value).matchAll(/"(path|title|mode)"\s*:\s*"((?:\\.|[^"\\])*)"/g)]
+      .map((match) => [match[1], decodedDirectiveString(match[2])]));
+  }
+  const path = localFileTarget(descriptor?.path);
+  if (!path || !/\.html?$/i.test(path)) return null;
+  return {
+    path,
+    name: fileNameFromPath(path),
+    title: String(descriptor.title || "交互图表").trim() || "交互图表",
+    mode: descriptor.mode === "wide" ? "wide" : "standard",
+  };
+}
+
+function decodedDirectiveString(value) {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return String(value).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
 }
 
 function directiveAttribute(attributes, name) {

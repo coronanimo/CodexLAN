@@ -33,6 +33,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       CODEX_TEST_APP_SERVER: fixturePath,
       CODEX_TEST_TRACE_FILE: traceFile,
       CODEX_TEST_STEER_DELAY_MS: "75",
+      CODEX_TEST_GOAL_PAUSE_DELAY_MS: "250",
       CODEX_TEST_USER_MESSAGE_DELAY_MS: "500",
       CODEX_TEST_OUTPUT_BURST: "400",
       CODEX_TEST_MCP_RESULT_BYTES: String(64 * 1024),
@@ -165,6 +166,23 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     });
     assert.equal(createdThread.status, 201);
     const threadId = createdThread.body.thread.id;
+    const visualizationFile = join(temporaryRoot, "chart.html");
+    await writeFile(visualizationFile, "<div id=\"chart\">interactive</div>", "utf8");
+    const visualizationPath = `/api/threads/${threadId}/visualization?projectId=${createdProject.body.project.id}&path=${encodeURIComponent(visualizationFile)}`;
+    const visualization = await fetch(`${origin}${visualizationPath}`, { headers: { Cookie: adminCookie } });
+    assert.equal(visualization.status, 200);
+    assert.match(visualization.headers.get("content-security-policy") || "", /frame-ancestors 'self'/);
+    assert.match(visualization.headers.get("content-security-policy") || "", /https:\/\/cdn\.jsdelivr\.net/);
+    const visualizationHtml = await visualization.text();
+    assert.match(visualizationHtml, /<div id="chart">interactive<\/div>/);
+    assert.match(visualizationHtml, /<link rel="stylesheet" href="\/visualization\.css">/);
+    const visualizationStyles = await fetch(`${origin}/visualization.css`);
+    assert.equal(visualizationStyles.status, 200);
+    assert.match(await visualizationStyles.text(), /--viz-series-1/);
+    const anonymousVisualization = await fetch(`${origin}${visualizationPath}`);
+    assert.equal(anonymousVisualization.status, 401);
+    const invalidVisualization = await request(origin, `/api/threads/${threadId}/visualization?projectId=${createdProject.body.project.id}&path=${encodeURIComponent(outsideFile)}`, { cookie: adminCookie });
+    assert.equal(invalidVisualization.status, 400);
 
     const renamedThread = await request(origin, `/api/threads/${threadId}`, {
       method: "PATCH",
@@ -419,9 +437,15 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       csrf: adminCsrf,
       body: { projectId: createdProject.body.project.id, turnId: activeAfterRecovery.body.runtime.activeTurnId },
     });
-    assert.equal(stoppedGoal.status, 200);
-    assert.equal(stoppedGoal.body.goalPaused, true);
-    assert.equal(stoppedGoal.body.goal.status, "paused");
+    assert.equal(stoppedGoal.status, 202);
+    assert.equal(stoppedGoal.body.goalPauseRequested, true);
+    const stopTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    const interruptIndex = stopTrace.findIndex((entry) => entry.method === "turn/interrupt"
+      && entry.params.turnId === activeAfterRecovery.body.runtime.activeTurnId);
+    const pauseIndex = stopTrace.findIndex((entry) => entry.method === "thread/goal/set"
+      && entry.params.threadId === threadId && entry.params.status === "paused");
+    assert.ok(interruptIndex >= 0);
+    assert.ok(pauseIndex > interruptIndex);
     const stoppedGoalEvents = await readSseUntil(stoppedGoalSse.body.getReader(), (contents) => (
       contents.includes(`\"id\":\"${queuedBehindGoal.body.item.id}\",\"type\":\"userMessage\"`)
         && contents.includes(clearedQueue)
@@ -481,6 +505,16 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(projects.body.projects.some((project) => project.id === createdProject.body.project.id), true);
     const adjacentSecret = join(dirname(createdProject.body.project.path), "outside-secret.txt");
     await writeFile(adjacentSecret, "must-not-leak", "utf8");
+    const adminDownloadPath = `/api/admin/files/download?path=${encodeURIComponent(outsideFile)}`;
+    const browserDownloadLogin = await fetch(`${origin}${adminDownloadPath}`, {
+      headers: { Accept: "text/html,application/xhtml+xml" },
+      redirect: "manual",
+    });
+    assert.equal(browserDownloadLogin.status, 302);
+    assert.equal(browserDownloadLogin.headers.get("location"), `/?download=${encodeURIComponent(adminDownloadPath)}`);
+    const authenticatedBrowserDownload = await fetch(`${origin}${adminDownloadPath}`, { headers: { Cookie: adminCookie } });
+    assert.equal(authenticatedBrowserDownload.status, 200);
+    assert.equal(await authenticatedBrowserDownload.text(), "must-not-leak");
     const traversal = await request(origin, `/api/projects/${createdProject.body.project.id}/files/download?path=${encodeURIComponent("../outside-secret.txt")}`, { cookie: adminCookie });
     assert.equal(traversal.status, 403);
     assert.doesNotMatch(JSON.stringify(traversal.body), /must-not-leak/);
@@ -532,6 +566,28 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(memberLogin.status, 200);
     const memberCookie = sessionCookie(memberLogin.response);
     const memberCsrf = memberLogin.body.csrfToken;
+
+    const rejectedProfileWithoutCsrf = await request(origin, "/api/auth/profile", {
+      method: "PATCH",
+      cookie: memberCookie,
+      body: { displayName: "Desk Trader" },
+    });
+    assert.equal(rejectedProfileWithoutCsrf.status, 403);
+
+    const updatedProfile = await request(origin, "/api/auth/profile", {
+      method: "PATCH",
+      cookie: memberCookie,
+      csrf: memberCsrf,
+      body: { displayName: "Desk Trader", username: "cannot-change", role: "admin" },
+    });
+    assert.equal(updatedProfile.status, 200);
+    assert.equal(updatedProfile.body.user.displayName, "Desk Trader");
+    assert.equal(updatedProfile.body.user.username, "member");
+    assert.equal(updatedProfile.body.user.id, member.body.user.id);
+    assert.equal(updatedProfile.body.user.role, "member");
+
+    const refreshedMemberSession = await request(origin, "/api/auth/session", { cookie: memberCookie });
+    assert.equal(refreshedMemberSession.body.user.displayName, "Desk Trader");
 
     const memberProject = await request(origin, "/api/projects", {
       method: "POST",

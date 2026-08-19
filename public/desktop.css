@@ -1,6 +1,7 @@
 .workspace-shell {
   display: grid;
-  height: 100%;
+  height: 100dvh;
+  min-height: 0;
   grid-template-columns: 270px minmax(0, 1fr);
 }
 
@@ -19,7 +20,9 @@
   --content-gutter: max(26px, calc((100% - 1128px) / 2));
   --topbar-gutter: max(14px, calc((100% - 1152px) / 2));
   width: 100%;
-  height: 100%;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto) minmax(0, auto);
 }
 
 .topbar {
@@ -99,11 +102,13 @@
 
 .queue-panel {
   width: min(560px, calc(100% - 52px));
+  min-height: 0;
   max-height: min(22dvh, 180px);
   margin: 0 auto 8px;
 }
 
 .composer-zone {
+  min-height: 0;
   padding: 9px var(--content-gutter) calc(14px + env(safe-area-inset-bottom));
 }
 

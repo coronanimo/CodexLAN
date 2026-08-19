@@ -5,14 +5,19 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.DownloadManager;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Picture;
 import android.graphics.Typeface;
+import android.graphics.pdf.PdfDocument;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -54,6 +59,9 @@ import android.window.OnBackInvokedDispatcher;
 import org.json.JSONArray;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 
@@ -70,6 +78,7 @@ public final class MainActivity extends Activity {
     private FrameLayout appRoot;
     private FrameLayout workspaceContainer;
     private WebView webView;
+    private WebView printWebView;
     private LinearLayout controlDock;
     private LinearLayout controlMenu;
     private ControlOrbView controlOrbButton;
@@ -131,6 +140,21 @@ public final class MainActivity extends Activity {
     protected void onPause() {
         if (webView != null) webView.onPause();
         super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        cancelConnectionTimeout();
+        if (printWebView != null) {
+            releasePrintableDocument(printWebView);
+        }
+        if (webView != null) {
+            webView.removeJavascriptInterface("CodexAndroid");
+            webView.stopLoading();
+            webView.destroy();
+            webView = null;
+        }
+        super.onDestroy();
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -746,6 +770,235 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void openExternalDownload(String url) {
+        if (!isCurrentWorkspaceUrl(url)) {
+            Toast.makeText(this, "已阻止非当前工作台的下载地址", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            intent.addCategory(Intent.CATEGORY_BROWSABLE);
+            startActivity(Intent.createChooser(intent, "选择浏览器下载"));
+        } catch (ActivityNotFoundException error) {
+            Toast.makeText(this, "没有可打开下载链接的浏览器", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void shareText(String title, String contents) {
+        String text = contents == null ? "" : contents;
+        if (text.trim().isEmpty()) {
+            Toast.makeText(this, "没有可分享的内容", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (text.length() > 500_000) {
+            Toast.makeText(this, "内容过长，请先转为 PDF 后分享", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent share = new Intent(Intent.ACTION_SEND);
+        share.setType("text/plain");
+        share.putExtra(Intent.EXTRA_SUBJECT, normalizedDocumentTitle(title));
+        share.putExtra(Intent.EXTRA_TEXT, text);
+        try {
+            startActivity(Intent.createChooser(share, "分享对话内容"));
+        } catch (ActivityNotFoundException error) {
+            Toast.makeText(this, "没有可接收文本的应用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void printMarkdown(String title, String documentHtml) {
+        loadPrintableDocument(title, documentHtml, (view, documentTitle) -> {
+            PrintManager manager = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+            if (manager == null) {
+                Toast.makeText(MainActivity.this, "系统打印服务不可用", Toast.LENGTH_SHORT).show();
+                releasePrintableDocument(view);
+                return;
+            }
+            PrintDocumentAdapter adapter = view.createPrintDocumentAdapter(documentTitle);
+            manager.print(documentTitle, adapter, null);
+        });
+    }
+
+    private void shareMarkdownAsPdf(String title, String documentHtml) {
+        Toast.makeText(this, "正在生成 PDF…", Toast.LENGTH_SHORT).show();
+        loadPrintableDocument(title, documentHtml, this::writeAndSharePdf);
+    }
+
+    private void shareDocument(String title, String markdown, String documentHtml) {
+        String contents = markdown == null ? "" : markdown;
+        if (contents.trim().isEmpty()) {
+            Toast.makeText(this, "没有可分享的内容", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("选择分享格式")
+            .setItems(new String[] { "PDF 文件", "Markdown 文件" }, (dialog, which) -> {
+                if (which == 0) shareMarkdownAsPdf(title, documentHtml);
+                else shareMarkdownFile(title, contents);
+            })
+            .setNegativeButton("取消", null)
+            .show();
+    }
+
+    private void shareMarkdownFile(String title, String contents) {
+        File file = null;
+        try {
+            file = createSharedFile(title, "shared-markdown", ".md");
+            try (FileOutputStream output = new FileOutputStream(file)) {
+                output.write(contents.getBytes(StandardCharsets.UTF_8));
+            }
+            shareFile(title, file, "text/markdown", "分享 Markdown");
+        } catch (IOException error) {
+            if (file != null) file.delete();
+            Toast.makeText(this, "Markdown 文件生成失败：" + error.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void loadPrintableDocument(String title, String documentHtml, PrintableDocumentReady callback) {
+        String html = documentHtml == null ? "" : documentHtml;
+        if (html.trim().isEmpty()) {
+            Toast.makeText(this, "没有可转换的内容", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (html.length() > 2_000_000) {
+            Toast.makeText(this, "内容过长，无法生成 PDF", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (printWebView != null) {
+            releasePrintableDocument(printWebView);
+        }
+        printWebView = new WebView(this);
+        printWebView.setBackgroundColor(Color.WHITE);
+        printWebView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        printWebView.getSettings().setJavaScriptEnabled(false);
+        printWebView.getSettings().setAllowFileAccess(false);
+        printWebView.getSettings().setAllowContentAccess(false);
+        printWebView.setWebViewClient(new WebViewClient() {
+            private boolean documentReady;
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                if (documentReady || view != printWebView) return;
+                documentReady = true;
+                view.postVisualStateCallback(SystemClock.uptimeMillis(), new WebView.VisualStateCallback() {
+                    @Override
+                    public void onComplete(long requestId) {
+                        if (view != printWebView) return;
+                        view.postDelayed(() -> {
+                            if (view == printWebView) callback.onReady(view, normalizedDocumentTitle(title));
+                        }, 80);
+                    }
+                });
+            }
+        });
+        workspaceContainer.addView(printWebView, 0, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ));
+        String address = preferences.getString(ADDRESS_KEY, "");
+        String baseUrl = isWorkspaceAddress(address) ? normalizeAddress(address) + "/" : null;
+        printWebView.loadDataWithBaseURL(baseUrl, html, "text/html", "UTF-8", null);
+    }
+
+    private void writeAndSharePdf(WebView view, String title) {
+        final int pageWidth = 595;
+        final int pageHeight = 842;
+        final int margin = 42;
+        Picture picture = view.capturePicture();
+        final int sourceWidth = picture.getWidth();
+        final int sourceHeight = picture.getHeight();
+        if (sourceWidth <= 0 || sourceHeight <= 0) {
+            releasePrintableDocument(view);
+            Toast.makeText(this, "PDF 页面尚未渲染，请重试", Toast.LENGTH_LONG).show();
+            return;
+        }
+        final float scale = (float) (pageWidth - margin * 2) / sourceWidth;
+        final float sourcePageHeight = (pageHeight - margin * 2) / scale;
+        int pageCount = Math.max(1, (int) Math.ceil(sourceHeight / sourcePageHeight));
+        if (pageCount > 100) {
+            releasePrintableDocument(view);
+            Toast.makeText(this, "内容超过 100 页，无法直接分享 PDF", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        File file = null;
+        PdfDocument document = new PdfDocument();
+        try {
+            file = createSharedFile(title, "shared-pdf", ".pdf");
+            for (int pageNumber = 0; pageNumber < pageCount; pageNumber += 1) {
+                PdfDocument.PageInfo info = new PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber + 1).create();
+                PdfDocument.Page page = document.startPage(info);
+                page.getCanvas().drawColor(Color.WHITE);
+                page.getCanvas().save();
+                page.getCanvas().translate(margin, margin);
+                page.getCanvas().clipRect(0, 0, pageWidth - margin * 2, pageHeight - margin * 2);
+                page.getCanvas().scale(scale, scale);
+                page.getCanvas().translate(0, -pageNumber * sourcePageHeight);
+                picture.draw(page.getCanvas());
+                page.getCanvas().restore();
+                document.finishPage(page);
+            }
+            try (FileOutputStream output = new FileOutputStream(file)) {
+                document.writeTo(output);
+            }
+            releasePrintableDocument(view);
+            shareFile(title, file, "application/pdf", "分享 PDF");
+        } catch (IOException | RuntimeException error) {
+            if (file != null) file.delete();
+            releasePrintableDocument(view);
+            Toast.makeText(this, "PDF 生成失败：" + error.getMessage(), Toast.LENGTH_LONG).show();
+        } finally {
+            document.close();
+        }
+    }
+
+    private File createSharedFile(String title, String directoryName, String extension) throws IOException {
+        File directory = new File(getCacheDir(), directoryName);
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("Cannot create PDF cache");
+        long cutoff = System.currentTimeMillis() - 86_400_000L;
+        File[] existing = directory.listFiles();
+        if (existing != null) {
+            for (File file : existing) if (file.lastModified() < cutoff) file.delete();
+        }
+        String safeTitle = normalizedDocumentTitle(title).replaceAll("[\\\\/:*?\"<>|]+", "-").trim();
+        if (safeTitle.isEmpty()) safeTitle = "CodexLAN 对话";
+        if (safeTitle.length() > 60) safeTitle = safeTitle.substring(0, 60);
+        return new File(directory, safeTitle + "-" + System.currentTimeMillis() + extension);
+    }
+
+    private void shareFile(String title, File file, String mimeType, String chooserTitle) {
+        Uri uri = SharedFileProvider.uriForFile(this, file);
+        Intent share = new Intent(Intent.ACTION_SEND);
+        share.setType(mimeType);
+        share.putExtra(Intent.EXTRA_SUBJECT, normalizedDocumentTitle(title));
+        share.putExtra(Intent.EXTRA_STREAM, uri);
+        share.setClipData(ClipData.newUri(getContentResolver(), file.getName(), uri));
+        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(Intent.createChooser(share, chooserTitle));
+        } catch (ActivityNotFoundException error) {
+            Toast.makeText(this, "没有可接收该文件的应用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void releasePrintableDocument(WebView view) {
+        if (view != printWebView) return;
+        view.stopLoading();
+        if (view.getParent() instanceof ViewGroup parent) parent.removeView(view);
+        view.destroy();
+        printWebView = null;
+    }
+
+    private interface PrintableDocumentReady {
+        void onReady(WebView view, String title);
+    }
+
+    private String normalizedDocumentTitle(String title) {
+        String value = title == null ? "" : title.replaceAll("[\\r\\n\\t]+", " ").trim();
+        if (value.isEmpty()) value = "CodexLAN 对话";
+        return value.length() > 80 ? value.substring(0, 80) : value;
+    }
+
     private String downloadFileName(String url, String contentDisposition, String mimeType) {
         String named = Uri.parse(url).getQueryParameter("name");
         if (named != null && !named.trim().isEmpty()) return new File(named).getName();
@@ -1061,6 +1314,18 @@ public final class MainActivity extends Activity {
 
     private final class AndroidBridge {
         @JavascriptInterface
+        public void copyText(String contents) {
+            runOnUiThread(() -> {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard == null) {
+                    Toast.makeText(MainActivity.this, "系统剪贴板不可用", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                clipboard.setPrimaryClip(ClipData.newPlainText("CodexLAN", contents == null ? "" : contents));
+            });
+        }
+
+        @JavascriptInterface
         public void openConnectionSettings() {
             runOnUiThread(() -> showConnectionEditor(""));
         }
@@ -1073,6 +1338,31 @@ public final class MainActivity extends Activity {
         @JavascriptInterface
         public void hideKeyboard() {
             runOnUiThread(MainActivity.this::hideSoftwareKeyboard);
+        }
+
+        @JavascriptInterface
+        public void shareText(String title, String contents) {
+            runOnUiThread(() -> MainActivity.this.shareText(title, contents));
+        }
+
+        @JavascriptInterface
+        public void shareMarkdownAsPdf(String title, String documentHtml) {
+            runOnUiThread(() -> MainActivity.this.shareMarkdownAsPdf(title, documentHtml));
+        }
+
+        @JavascriptInterface
+        public void shareDocument(String title, String markdown, String documentHtml) {
+            runOnUiThread(() -> MainActivity.this.shareDocument(title, markdown, documentHtml));
+        }
+
+        @JavascriptInterface
+        public void printMarkdown(String title, String documentHtml) {
+            runOnUiThread(() -> MainActivity.this.printMarkdown(title, documentHtml));
+        }
+
+        @JavascriptInterface
+        public void openExternalDownload(String url) {
+            runOnUiThread(() -> MainActivity.this.openExternalDownload(url));
         }
     }
 }
