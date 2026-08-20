@@ -1,6 +1,9 @@
 const TITLE_TIMEOUT_MS = 45_000;
 const MAX_TITLE_LENGTH = 100;
 const MAX_TRANSCRIPT_LENGTH = 8_000;
+const MAX_MANUAL_TRANSCRIPT_TURNS = 6;
+const TITLE_MODEL = "gpt-5.6-luna";
+const TITLE_REASONING_EFFORT = "low";
 
 const TITLE_OUTPUT_SCHEMA = {
   type: "object",
@@ -14,43 +17,55 @@ const TITLE_OUTPUT_SCHEMA = {
 export function createThreadTitleService({ codex }) {
   const jobs = new Map();
 
-  async function suggest({ cwd, turns, settings, collaborationMode, latest = false }) {
+  async function suggest({ cwd, turns, settings, latest = false }) {
     const transcript = titleTranscript(turns, { latest });
-    if (!transcript) throw new Error("聊天还没有可用于命名的消息。");
-    return requestTitle({ cwd, transcript, settings, collaborationMode });
+    if (!transcript) {
+      const error = new Error("聊天消息尚未写入完整历史，请稍后重试。");
+      error.statusCode = 409;
+      throw error;
+    }
+    return requestTitle({ cwd, transcript, settings });
   }
 
-  function schedule({ threadId, cwd, turns, legacyTurns = turns, settings, collaborationMode }) {
+  function schedule({ threadId, cwd, turns, legacyTurns = turns, settings }) {
     if (jobs.has(threadId)) return jobs.get(threadId);
     const transcript = titleTranscript(turns);
     if (!transcript) return Promise.resolve(null);
     const legacyName = legacyFirstMessageName(legacyTurns);
-    const job = generate({ threadId, cwd, transcript, legacyName, settings, collaborationMode })
+    const job = generate({ threadId, cwd, transcript, legacyName, settings })
       .finally(() => jobs.delete(threadId));
     jobs.set(threadId, job);
     return job;
   }
 
-  async function generate({ threadId, cwd, transcript, legacyName, settings, collaborationMode }) {
+  async function generate({ threadId, cwd, transcript, legacyName, settings }) {
     const current = (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
     if (!canReplaceThreadName(current, legacyName)) return current.name.trim();
 
-    const title = await requestTitle({ cwd, transcript, settings, collaborationMode });
+    const title = await requestTitle({ cwd, transcript, settings });
     const latest = (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
     if (!canReplaceThreadName(latest, legacyName)) return latest.name.trim();
     await codex.request("thread/name/set", { threadId, name: title });
     return title;
   }
 
-  async function requestTitle({ cwd, transcript, settings, collaborationMode }) {
+  async function requestTitle({ cwd, transcript, settings }) {
     let helperThreadId;
     let collector;
     try {
+      const titleCollaborationMode = {
+        mode: "default",
+        settings: {
+          model: TITLE_MODEL,
+          reasoning_effort: TITLE_REASONING_EFFORT,
+          developer_instructions: null,
+        },
+      };
       const helper = await codex.request("thread/start", {
         cwd,
         ephemeral: true,
+        model: TITLE_MODEL,
         config: { model_reasoning_summary: "none" },
-        ...(collaborationMode?.settings?.model ? { model: collaborationMode.settings.model } : {}),
         ...(settings?.serviceTier ? { serviceTier: settings.serviceTier } : {}),
       });
       helperThreadId = helper.thread.id;
@@ -59,8 +74,9 @@ export function createThreadTitleService({ codex }) {
         threadId: helperThreadId,
         input: [{ type: "text", text: titlePrompt(transcript) }],
         outputSchema: TITLE_OUTPUT_SCHEMA,
+        effort: TITLE_REASONING_EFFORT,
         summary: "none",
-        ...(collaborationMode ? { collaborationMode } : {}),
+        collaborationMode: titleCollaborationMode,
         ...(settings?.serviceTier ? { serviceTier: settings.serviceTier } : {}),
       });
       const title = normalizeGeneratedTitle(await collector.promise);
@@ -79,7 +95,8 @@ export function createThreadTitleService({ codex }) {
 
 export function titleTranscript(turns, { latest = false } = {}) {
   const candidates = Array.isArray(turns) ? turns : [];
-  for (const turn of latest ? candidates.toReversed() : candidates) {
+  const entries = [];
+  for (const turn of candidates) {
     const items = Array.isArray(turn?.items) ? turn.items : [];
     const user = items.find((item) => item?.type === "userMessage");
     if (!user) continue;
@@ -87,18 +104,38 @@ export function titleTranscript(turns, { latest = false } = {}) {
       .filter((entry) => entry?.type === "text" && typeof entry.text === "string")
       .map((entry) => entry.text.trim())
       .filter(Boolean)
-      .join("\n")
-      .slice(0, MAX_TRANSCRIPT_LENGTH / 2);
+      .join("\n");
     if (!userText) continue;
     const assistantText = items
       .filter((item) => item?.type === "agentMessage" && typeof item.text === "string")
       .map((item) => item.text.trim())
       .filter(Boolean)
-      .at(-1)
-      ?.slice(0, MAX_TRANSCRIPT_LENGTH / 2) || "";
-    return JSON.stringify({ user: userText, assistant: assistantText });
+      .at(-1) || "";
+    entries.push({ user: userText, assistant: assistantText });
   }
-  return "";
+  if (!entries.length) return "";
+  if (!latest) {
+    return JSON.stringify({
+      user: entries[0].user.slice(0, MAX_TRANSCRIPT_LENGTH / 2),
+      assistant: entries[0].assistant.slice(0, MAX_TRANSCRIPT_LENGTH / 2),
+    });
+  }
+  return boundedRecentTranscript(entries.slice(-MAX_MANUAL_TRANSCRIPT_TURNS));
+}
+
+function boundedRecentTranscript(entries) {
+  let characterLimit = Math.floor(MAX_TRANSCRIPT_LENGTH / Math.max(2, entries.length * 2));
+  while (characterLimit >= 32) {
+    const transcript = JSON.stringify({
+      turns: entries.map((entry) => ({
+        user: entry.user.slice(0, characterLimit),
+        assistant: entry.assistant.slice(0, characterLimit),
+      })),
+    });
+    if (transcript.length <= MAX_TRANSCRIPT_LENGTH) return transcript;
+    characterLimit = Math.floor(characterLimit * 0.8);
+  }
+  return JSON.stringify({ turns: entries.map((entry) => ({ user: entry.user.slice(0, 32), assistant: "" })) });
 }
 
 export function shouldGenerateThreadTitle(thread, turns) {

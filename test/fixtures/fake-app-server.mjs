@@ -176,7 +176,7 @@ function completeTurn(threadId, turn, text) {
   if (thread) thread.status = "idle";
   for (const event of [
     { method: "item/completed", params: { threadId, turnId: turn.id, item: agentMessage } },
-    { method: "turn/completed", params: { threadId, turn: copy(turn) } },
+    { method: "turn/completed", params: { threadId, turn: { id: turn.id, status: "completed", items: [agentMessage], itemsView: "summary" } } },
   ]) process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 

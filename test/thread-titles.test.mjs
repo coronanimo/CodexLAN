@@ -17,6 +17,26 @@ test("builds a bounded title transcript from the first user turn", () => {
   }));
 });
 
+test("manual title suggestions use recent conversation context", () => {
+  const recent = titleTranscript([
+    ...turns,
+    {
+      id: "turn-2",
+      items: [
+        { type: "userMessage", content: [{ type: "text", text: "Why is the refresh delayed?" }] },
+        { type: "agentMessage", text: "The completion event contains only a summary.", phase: "final" },
+      ],
+    },
+  ], { latest: true });
+  assert.deepEqual(JSON.parse(recent), {
+    turns: [
+      { user: "## Diagnose **quota** reset timing", assistant: "I found the reset window." },
+      { user: "Why is the refresh delayed?", assistant: "The completion event contains only a summary." },
+    ],
+  });
+  assert.equal(recent.length <= 8_000, true);
+});
+
 test("replaces only an empty name or the legacy first-message title", () => {
   const legacyName = legacyFirstMessageName(turns);
   assert.equal(legacyName, "Diagnose quota reset timing");

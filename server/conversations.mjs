@@ -180,7 +180,7 @@ export function createConversations({ store, codex }) {
     if (message.method === "turn/completed") {
       runtime = updateThreadRuntime(threadId, { projectId, activeTurnId: null, status: "idle", startedAt: null });
       void advanceQueue(threadId);
-      void scheduleThreadTitle(threadId, [message.params.turn], { fullLegacyCheck: true }).catch((error) => {
+      void scheduleThreadTitle(threadId, [], { fullLegacyCheck: true }).catch((error) => {
         process.stderr.write(`[web] 无法自动生成聊天名称 (${threadId})：${error.message}\n`);
       });
     }
@@ -361,12 +361,10 @@ export function createConversations({ store, codex }) {
       await codex.ensureLoaded(threadId, project);
       const thread = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
       const settings = await validateSettings(await store.getThreadSettings(threadId, project.settings));
-      const collaborationMode = await collaborationModeForSettings({ ...settings, collaborationMode: "default" });
       const name = await threadTitles.suggest({
         cwd: project.path,
         turns: thread.turns || [],
         settings,
-        collaborationMode,
         latest: true,
       });
       json(response, 200, { name });
@@ -730,22 +728,22 @@ export function createConversations({ store, codex }) {
   async function scheduleThreadTitle(threadId, turns, { fullLegacyCheck = false } = {}) {
     const projectId = store.threadProjects[threadId];
     if (!projectId) return null;
+    let titleTurns = turns;
     let legacyTurns = turns;
     if (fullLegacyCheck) {
       const canonical = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
       legacyTurns = canonical.turns || turns;
       if (!shouldGenerateThreadTitle(canonical, legacyTurns)) return null;
+      titleTurns = legacyTurns;
     }
     const project = await store.getProject(projectId);
     const settings = await validateSettings(await store.getThreadSettings(threadId, project.settings));
-    const collaborationMode = await collaborationModeForSettings({ ...settings, collaborationMode: "default" });
     return threadTitles.schedule({
       threadId,
       cwd: project.path,
-      turns,
+      turns: titleTurns,
       legacyTurns,
       settings,
-      collaborationMode,
     });
   }
   
@@ -799,6 +797,15 @@ export function createConversations({ store, codex }) {
             item: { id: next.id, type: "userMessage", content: [{ type: "text", text: next.text }], clientPending: true },
           },
         });
+        if (typeof canonicalThread?.name !== "string" || !canonicalThread.name.trim()) {
+          const titleTurn = {
+            id: result.turn.id,
+            items: [{ id: next.id, type: "userMessage", content: [{ type: "text", text: next.text }] }],
+          };
+          void scheduleThreadTitle(threadId, [titleTurn]).catch((error) => {
+            process.stderr.write(`[web] 无法自动生成聊天名称 (${threadId})：${error.message}\n`);
+          });
+        }
         await store.completeQueueItem(threadId, next.id);
         broadcastQueue(threadId);
       } catch (error) {

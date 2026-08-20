@@ -188,7 +188,10 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     });
     assert.equal(queuedForTitle.status, 202);
     const titleEvents = await readSseUntil(autoTitleEvents.body.getReader(), (contents) => (
-      contents.includes('"method":"thread/name/updated"') && contents.includes('"threadName":"Quota reset timing"')
+      contents.includes('"method":"thread/name/updated"')
+      && contents.includes('"threadName":"Quota reset timing"')
+      && contents.includes('"method":"turn/completed"')
+      && contents.includes(`"threadId":"${autoTitleThread.body.thread.id}"`)
     ));
     assert.match(titleEvents, /Quota reset timing/);
     const threadsAfterAutoTitle = await request(origin, `/api/projects/${createdProject.body.project.id}/threads`, { cookie: adminCookie });
@@ -199,10 +202,15 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       csrf: adminCsrf,
       body: { projectId: createdProject.body.project.id },
     });
-    assert.equal(suggestedTitle.status, 200);
+    assert.equal(suggestedTitle.status, 200, `${JSON.stringify(suggestedTitle.body)}\n${errors}`);
     assert.equal(suggestedTitle.body.name, "Quota reset timing");
     const titleTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
-    assert.equal(titleTrace.some((entry) => entry.method === "thread/start" && entry.params.ephemeral === true), true);
+    const titleThreadStart = titleTrace.find((entry) => entry.method === "thread/start" && entry.params.ephemeral === true);
+    assert.equal(titleThreadStart?.params.model, "gpt-5.6-luna");
+    const titleTurnStart = titleTrace.find((entry) => entry.method === "turn/start" && entry.params.outputSchema);
+    assert.equal(titleTurnStart?.params.effort, "low");
+    assert.equal(titleTurnStart?.params.collaborationMode?.settings?.model, "gpt-5.6-luna");
+    assert.equal(titleTurnStart?.params.collaborationMode?.settings?.reasoning_effort, "low");
 
     const visualizationFile = join(temporaryRoot, "chart.html");
     await writeFile(visualizationFile, "<div id=\"chart\">interactive</div>", "utf8");
