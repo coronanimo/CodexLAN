@@ -4,6 +4,23 @@ import { resolve } from "node:path";
 
 const APP_SERVER_MAX_RESTARTS = 6;
 const MAX_LOADED_THREADS = 300;
+const CODEXLAN_DEFAULT_SERVICE_TIER = 'service_tier="default"';
+
+export function appServerLaunch({
+  codexBin,
+  fixture = process.env.CODEX_TEST_APP_SERVER,
+  nodeEnv = process.env.NODE_ENV,
+  nodeExecutable = process.execPath,
+} = {}) {
+  if (!fixture) {
+    return {
+      executable: codexBin || "codex",
+      args: ["-c", CODEXLAN_DEFAULT_SERVICE_TIER, "app-server", "--listen", "stdio://"],
+    };
+  }
+  if (nodeEnv !== "test") throw new Error("CODEX_TEST_APP_SERVER is available only when NODE_ENV=test.");
+  return { executable: nodeExecutable, args: [resolve(fixture)] };
+}
 
 export class AppServerClient {
   constructor({ workspace, appVersion, codexBin }) {
@@ -282,10 +299,7 @@ export class AppServerClient {
   }
 
   appServerLaunch() {
-    const fixture = process.env.CODEX_TEST_APP_SERVER;
-    if (!fixture) return { executable: this.codexBin || "codex", args: ["app-server", "--listen", "stdio://"] };
-    if (process.env.NODE_ENV !== "test") throw new Error("CODEX_TEST_APP_SERVER is available only when NODE_ENV=test.");
-    return { executable: process.execPath, args: [resolve(fixture)] };
+    return appServerLaunch({ codexBin: this.codexBin });
   }
 
   failureMessage(error) {
