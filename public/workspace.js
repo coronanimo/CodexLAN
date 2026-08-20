@@ -6,7 +6,6 @@ export { isActiveThreadStatus, threadStatusValue };
 
 export function threadDisplayName(thread) {
   return (typeof thread?.name === "string" && thread.name.trim())
-    || (typeof thread?.preview === "string" && thread.preview.trim())
     || "未命名聊天";
 }
 

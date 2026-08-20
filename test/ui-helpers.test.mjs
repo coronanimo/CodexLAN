@@ -363,8 +363,8 @@ test("orders recent chats by when the user opened them", () => {
   ]);
 });
 
-test("uses the thread preview when a list entry has no explicit name", () => {
-  assert.equal(threadDisplayName({ name: null, preview: "Goal management" }), "Goal management");
+test("does not use the thread preview as an implicit name", () => {
+  assert.equal(threadDisplayName({ name: null, preview: "Goal management" }), "未命名聊天");
   assert.equal(threadDisplayName({ name: "Renamed chat", preview: "Goal management" }), "Renamed chat");
   assert.equal(threadDisplayName({ name: null, preview: "" }), "未命名聊天");
 });
