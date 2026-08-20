@@ -84,6 +84,8 @@ input.on("line", (line) => {
         const userMessageDelay = Number(process.env.CODEX_TEST_USER_MESSAGE_DELAY_MS || 0);
         if (userMessageDelay > 0) setTimeout(() => emitUserMessage(message.params, result), userMessageDelay);
         else emitUserMessage(message.params, result);
+        if (message.params.outputSchema) emitStructuredTitle(message.params, result);
+        else emitTitleTestCompletion(message.params, result, userMessageDelay);
         emitPlanUpdate(message.params, result);
         emitCommandOutputBurst(message.params, result);
         emitLargeMcpToolCall(message.params, result);
@@ -101,6 +103,12 @@ input.on("line", (line) => {
         process.stdout.write(`${JSON.stringify({
           method: "thread/goal/cleared",
           params: { threadId: message.params.threadId },
+        })}\n`);
+      }
+      if (message.method === "thread/name/set") {
+        process.stdout.write(`${JSON.stringify({
+          method: "thread/name/updated",
+          params: { threadId: message.params.threadId, threadName: message.params.name },
         })}\n`);
       }
       if (message.method === "initialize" && unboundNotificationThread) {
@@ -141,6 +149,35 @@ function emitUserMessage(params, result) {
   for (const method of ["item/started", "item/completed"]) {
     process.stdout.write(`${JSON.stringify({ method, params: { threadId: params.threadId, turnId, item } })}\n`);
   }
+}
+
+function emitStructuredTitle(params, result) {
+  const thread = threads.get(params.threadId);
+  const turn = thread?.turns.find((entry) => entry.id === result?.turn?.id);
+  if (!turn) return;
+  setTimeout(() => completeTurn(params.threadId, turn, JSON.stringify({ title: "Quota reset timing" })), 10);
+}
+
+function emitTitleTestCompletion(params, result, userMessageDelay) {
+  const text = (params.input || []).map((entry) => entry.text || "").join("\n");
+  if (!text.includes("[complete-for-title]")) return;
+  const thread = threads.get(params.threadId);
+  const turn = thread?.turns.find((entry) => entry.id === result?.turn?.id);
+  if (!turn) return;
+  setTimeout(() => completeTurn(params.threadId, turn, "The quota reset behavior is understood."), userMessageDelay + 20);
+}
+
+function completeTurn(threadId, turn, text) {
+  const thread = threads.get(threadId);
+  const agentMessage = { id: randomUUID(), type: "agentMessage", text, phase: "final" };
+  turn.items.push(copy(agentMessage));
+  turn.status = "completed";
+  turn.completedAt = Date.now();
+  if (thread) thread.status = "idle";
+  for (const event of [
+    { method: "item/completed", params: { threadId, turnId: turn.id, item: agentMessage } },
+    { method: "turn/completed", params: { threadId, turn: copy(turn) } },
+  ]) process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
 function emitUserInputRequest(params, result) {

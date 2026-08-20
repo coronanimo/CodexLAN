@@ -110,6 +110,13 @@ const ui = {
   accountLimits: $("#account-limits"),
   accountLimitFiveHour: $("#account-limit-five-hour"),
   accountLimitWeek: $("#account-limit-week"),
+  accountLimitDetails: $("#account-limit-details"),
+  accountLimitDetailFiveHour: $("#account-limit-detail-five-hour"),
+  accountLimitFiveHourUsage: $("#account-limit-five-hour-usage"),
+  accountLimitFiveHourReset: $("#account-limit-five-hour-reset"),
+  accountLimitDetailWeek: $("#account-limit-detail-week"),
+  accountLimitWeekUsage: $("#account-limit-week-usage"),
+  accountLimitWeekReset: $("#account-limit-week-reset"),
   manageUsers: $("#manage-users"),
   changeDisplayName: $("#change-display-name"),
   changePassword: $("#change-password"),
@@ -161,6 +168,7 @@ const ui = {
   threadDialog: $("#thread-dialog"),
   threadForm: $("#thread-form"),
   threadNameInput: $("#thread-name-input"),
+  suggestThreadName: $("#suggest-thread-name"),
   threadFormError: $("#thread-form-error"),
   goalDialog: $("#goal-dialog"),
   goalForm: $("#goal-form"),
@@ -408,6 +416,7 @@ function renderAccountLimits() {
     [ui.accountLimitWeek, "周", limits.weekly],
   ].filter(([, , limit]) => limit);
   ui.accountLimits.hidden = visible.length === 0;
+  ui.accountLimitDetails.hidden = visible.length === 0;
   ui.accountLimitFiveHour.hidden = !limits.fiveHour;
   ui.accountLimitWeek.hidden = !limits.weekly;
   for (const [element, label, limit] of visible) {
@@ -416,6 +425,15 @@ function renderAccountLimits() {
     const reset = limit.resetsAt ? new Date(limit.resetsAt * 1000).toLocaleString() : "未知";
     element.title = `${label === "5H" ? "5 小时" : "每周"}限额已使用 ${percent}%，重置时间：${reset}`;
   }
+  renderAccountLimitDetail(ui.accountLimitDetailFiveHour, ui.accountLimitFiveHourUsage, ui.accountLimitFiveHourReset, limits.fiveHour);
+  renderAccountLimitDetail(ui.accountLimitDetailWeek, ui.accountLimitWeekUsage, ui.accountLimitWeekReset, limits.weekly);
+}
+
+function renderAccountLimitDetail(row, usage, reset, limit) {
+  row.hidden = !limit;
+  if (!limit) return;
+  usage.textContent = `已用 ${Math.round(limit.usedPercent)}%`;
+  reset.textContent = limit.resetsAt ? `重置 ${new Date(limit.resetsAt * 1000).toLocaleString()}` : "重置时间未知";
 }
 
 function rememberThreadTokenUsage(threadId, tokenUsage) {
@@ -2897,7 +2915,7 @@ function nextLocalThreadId() {
   return `local-${Date.now().toString(36)}-${state.localThreadSequence.toString(36)}`;
 }
 
-async function materializeThread(project, draft, firstMessage = "") {
+async function materializeThread(project, draft) {
   if (!project || !draft || !isLocalThreadId(draft.id)) return draft;
   state.materializingThread = true;
   updateComposer();
@@ -2908,7 +2926,6 @@ async function materializeThread(project, draft, firstMessage = "") {
         projectId: project.id,
         settings: draft.settings || {},
         ...(draft.name ? { name: draft.name } : {}),
-        ...(firstMessage ? { firstMessage } : {}),
       },
     });
     const thread = {
@@ -2981,8 +2998,7 @@ async function submitPrompt(event) {
       }
     }
     if (isLocalThreadId(thread.id)) {
-      const firstMessage = [prompt.trim(), ...attachments.map((attachment) => attachment.name)].filter(Boolean).join("\n");
-      thread = await materializeThread(project, thread, firstMessage);
+      thread = await materializeThread(project, thread);
     }
     submittedThreadId = thread.id;
     state.submittingThreadIds.add(thread.id);
@@ -3355,6 +3371,35 @@ async function saveThreadName(event) {
     ui.threadFormError.textContent = error.message;
   } finally {
     submit.disabled = false;
+  }
+}
+
+async function suggestThreadName() {
+  const project = currentProject();
+  const thread = currentThread();
+  if (!thread || !project) return;
+  if (isLocalThreadId(thread.id)) {
+    ui.threadFormError.textContent = "先发送一条消息，才能自动生成聊天名称。";
+    return;
+  }
+  const save = ui.threadForm.querySelector('button[value="default"]');
+  ui.suggestThreadName.disabled = true;
+  save.disabled = true;
+  ui.threadFormError.textContent = "正在生成聊天名称…";
+  try {
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/name/suggest`, {
+      method: "POST",
+      body: { projectId: project.id },
+    });
+    ui.threadNameInput.value = result.name;
+    ui.threadFormError.textContent = "名称已生成，确认后保存。";
+    ui.threadNameInput.focus();
+    ui.threadNameInput.select();
+  } catch (error) {
+    ui.threadFormError.textContent = error.message;
+  } finally {
+    ui.suggestThreadName.disabled = false;
+    save.disabled = false;
   }
 }
 
@@ -3732,7 +3777,8 @@ function handleCodexEvent(threadId, event) {
     return;
   }
   if (event.method === "thread/name/updated") {
-    const name = typeof params.name === "string" ? params.name.trim() : "";
+    const rawName = typeof params.threadName === "string" ? params.threadName : params.name;
+    const name = typeof rawName === "string" ? rawName.trim() : "";
     if (!name) return;
     updateThreadInState(projectId, { ...thread, name });
     if (state.selectedThreadId === threadId) {
@@ -4972,6 +5018,7 @@ ui.sidebarSortTrigger.addEventListener("click", toggleSidebarSortMenu);
 ui.sidebarOrderOriginal.addEventListener("click", () => setSidebarNavigation(null, "original"));
 ui.sidebarOrderRecent.addEventListener("click", () => setSidebarNavigation(null, "recent"));
 ui.renameThread.addEventListener("click", () => { closeThreadMenu(); openThreadDialog(); });
+ui.suggestThreadName.addEventListener("click", suggestThreadName);
 ui.compactThread.addEventListener("click", compactCurrentThread);
 ui.deleteThread.addEventListener("click", () => { closeThreadMenu(); deleteCurrentThread(); });
 ui.threadForm.addEventListener("submit", saveThreadName);

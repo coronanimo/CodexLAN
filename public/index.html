@@ -83,6 +83,18 @@
                 </span>
               </button>
               <div id="account-menu" class="topbar-menu account-menu" hidden>
+                <section id="account-limit-details" class="account-limit-details" aria-label="额度重置时间" hidden>
+                  <div id="account-limit-detail-five-hour" class="account-limit-detail" hidden>
+                    <span>5 小时额度</span>
+                    <strong id="account-limit-five-hour-usage">—</strong>
+                    <small id="account-limit-five-hour-reset">—</small>
+                  </div>
+                  <div id="account-limit-detail-week" class="account-limit-detail" hidden>
+                    <span>每周额度</span>
+                    <strong id="account-limit-week-usage">—</strong>
+                    <small id="account-limit-week-reset">—</small>
+                  </div>
+                </section>
                 <button id="refresh-workspace" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a7 7 0 1 0 1 6M19 3v5h-5"/></svg><span>刷新工作台</span></button>
                 <button id="open-global-settings" class="quiet-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h5M13 7h7M4 12h9M17 12h3M4 17h2M10 17h10"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>设置</span></button>
                 <div class="account-menu-divider"></div>
@@ -256,7 +268,7 @@
         <div class="dialog-heading"><div><span>聊天记录</span><h2>修改聊天名称</h2></div><button class="icon-button" value="cancel" type="submit" formnovalidate aria-label="关闭">×</button></div>
         <label>聊天名称<input id="thread-name-input" maxlength="100" required></label>
         <p id="thread-form-error" class="form-error"></p>
-        <div class="dialog-actions"><span></span><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">保存名称</button></div>
+        <div class="dialog-actions"><button id="suggest-thread-name" type="button" class="quiet-button">自动生成</button><span></span><button value="cancel" type="submit" formnovalidate class="quiet-button">取消</button><button value="default" type="submit" class="primary-button">保存名称</button></div>
       </form>
     </dialog>
 

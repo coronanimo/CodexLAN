@@ -65,7 +65,7 @@ test("account strip carries adaptive rate limits while workspace tools stay insi
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const appJs = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(html, /id="open-account-menu"[\s\S]*id="account-limits" class="sidebar-account-limits"[\s\S]*id="account-menu"/);
-  assert.doesNotMatch(html, /id="account-menu"[\s\S]*id="account-limits"/);
+  assert.match(html, /id="account-menu"[\s\S]*id="account-limit-details"[\s\S]*id="account-limit-five-hour-reset"[\s\S]*id="account-limit-week-reset"/);
   assert.match(html, /id="account-menu"[\s\S]*id="refresh-workspace"[\s\S]*id="open-global-settings"[\s\S]*<span>设置<\/span>/);
   assert.doesNotMatch(html, /id="open-settings"|account-service-row|account-connection-status/);
   assert.doesNotMatch(html, /class="sidebar-tool-grid"/);
@@ -74,6 +74,8 @@ test("account strip carries adaptive rate limits while workspace tools stay insi
   assert.doesNotMatch(html, /class="sidebar-account-chevron"/);
   assert.match(sidebarCss, /\.project-item\.active, \.thread-item\.active\s*\{[^}]*box-shadow:\s*inset 0 0 0 1px/s);
   assert.doesNotMatch(appJs, /classList\.toggle\("single", visible\.length === 1\)/);
+  assert.match(appJs, /reset\.textContent = limit\.resetsAt \? `重置 \$\{new Date\(limit\.resetsAt \* 1000\)\.toLocaleString\(\)\}` : "重置时间未知"/);
+  assert.match(appJs, /typeof params\.threadName === "string" \? params\.threadName : params\.name/);
   assert.match(appJs, /serverStatus\.setAttribute\("aria-label", text\)/);
 });
 

@@ -165,7 +165,45 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       },
     });
     assert.equal(createdThread.status, 201);
+    assert.equal(createdThread.body.thread.name, null);
     const threadId = createdThread.body.thread.id;
+
+    const autoTitleThread = await request(origin, "/api/threads", {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: {
+        projectId: createdProject.body.project.id,
+        settings: { model: "gpt-5.6-sol", effort: "medium", summary: "detailed" },
+      },
+    });
+    assert.equal(autoTitleThread.status, 201);
+    assert.equal(autoTitleThread.body.thread.name, null);
+    const autoTitleEvents = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
+    const queuedForTitle = await request(origin, `/api/threads/${autoTitleThread.body.thread.id}/queue`, {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id, text: "[complete-for-title] Explain quota reset timing" },
+    });
+    assert.equal(queuedForTitle.status, 202);
+    const titleEvents = await readSseUntil(autoTitleEvents.body.getReader(), (contents) => (
+      contents.includes('"method":"thread/name/updated"') && contents.includes('"threadName":"Quota reset timing"')
+    ));
+    assert.match(titleEvents, /Quota reset timing/);
+    const threadsAfterAutoTitle = await request(origin, `/api/projects/${createdProject.body.project.id}/threads`, { cookie: adminCookie });
+    assert.equal(threadsAfterAutoTitle.body.threads.find((thread) => thread.id === autoTitleThread.body.thread.id)?.name, "Quota reset timing");
+    const suggestedTitle = await request(origin, `/api/threads/${autoTitleThread.body.thread.id}/name/suggest`, {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id },
+    });
+    assert.equal(suggestedTitle.status, 200);
+    assert.equal(suggestedTitle.body.name, "Quota reset timing");
+    const titleTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    assert.equal(titleTrace.some((entry) => entry.method === "thread/start" && entry.params.ephemeral === true), true);
+
     const visualizationFile = join(temporaryRoot, "chart.html");
     await writeFile(visualizationFile, "<div id=\"chart\">interactive</div>", "utf8");
     const visualizationPath = `/api/threads/${threadId}/visualization?projectId=${createdProject.body.project.id}&path=${encodeURIComponent(visualizationFile)}`;

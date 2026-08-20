@@ -8,6 +8,7 @@ import { isActiveThreadStatus } from "../public/workspace.js";
 import { turnPlanSnapshot } from "../public/plan.js";
 import { isActiveGoal } from "../public/goal.js";
 import { json, readJson, validateId, validateText } from "./http.mjs";
+import { createThreadTitleService, shouldGenerateThreadTitle } from "./thread-titles.mjs";
 import {
   SESSION_TIMER_MAX_MS,
   cleanSettings,
@@ -22,6 +23,7 @@ const MAX_HISTORY_TOOL_DETAIL = 16 * 1024;
 const MAX_VISUALIZATION_BYTES = 5 * 1024 * 1024;
 
 export function createConversations({ store, codex }) {
+  const threadTitles = createThreadTitleService({ codex });
   const eventClients = new Set();
   const commandOutputBatches = new Map();
   const commandOutputTails = new Map();
@@ -178,6 +180,9 @@ export function createConversations({ store, codex }) {
     if (message.method === "turn/completed") {
       runtime = updateThreadRuntime(threadId, { projectId, activeTurnId: null, status: "idle", startedAt: null });
       void advanceQueue(threadId);
+      void scheduleThreadTitle(threadId, [message.params.turn], { fullLegacyCheck: true }).catch((error) => {
+        process.stderr.write(`[web] 无法自动生成聊天名称 (${threadId})：${error.message}\n`);
+      });
     }
     if (message.method === "thread/status/changed") {
       runtime = updateThreadRuntime(threadId, { projectId, status: message.params.status });
@@ -231,7 +236,7 @@ export function createConversations({ store, codex }) {
       const settings = await validateSettings(body.settings);
       const requestedName = typeof body.name === "string" && body.name.trim()
         ? body.name.trim().slice(0, 100)
-        : threadNameFromFirstMessage(typeof body.firstMessage === "string" ? body.firstMessage.slice(0, 2_000) : "");
+        : null;
       const params = { cwd: project.path, config: { model_reasoning_summary: settings.summary || DEFAULT_REASONING_SUMMARY } };
       if (settings.model) params.model = settings.model;
       if (settings.serviceTier) params.serviceTier = settings.serviceTier;
@@ -239,7 +244,9 @@ export function createConversations({ store, codex }) {
       if (collaborationMode) params.collaborationMode = collaborationMode;
       const result = await codex.request("thread/start", params);
       codex.markThreadLoaded(result.thread.id);
-      if (requestedName) await codex.request("thread/name/set", { threadId: result.thread.id, name: requestedName });
+      if (requestedName) {
+        await codex.request("thread/name/set", { threadId: result.thread.id, name: requestedName });
+      }
       await store.setThreadProject(result.thread.id, project.id);
       const accessedAt = await store.recordThreadAccess(user.id, result.thread.id);
       await store.setThreadSettings(result.thread.id, settings);
@@ -292,6 +299,11 @@ export function createConversations({ store, codex }) {
         tokenUsage: threadTokenUsage.get(threadId) || null,
         history: { hasMore: history.hasMore, before: history.before, totalTurns: history.totalTurns },
       });
+      if (history.turns.length) {
+        void scheduleThreadTitle(threadId, page.allTurns).catch((error) => {
+          process.stderr.write(`[web] 无法补全聊天名称 (${threadId})：${error.message}\n`);
+        });
+      }
     });
 
     application.get("/api/threads/:threadId/visualization", async (request, response) => {
@@ -338,6 +350,26 @@ export function createConversations({ store, codex }) {
       }
       if (!changed) throw httpError(400, "没有需要修改的聊天内容。");
       json(response, 200, { ok: true, ...(name ? { name } : {}), ...(settings ? { settings } : {}) });
+    });
+
+    application.post("/api/threads/:threadId/name/suggest", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = request.params.threadId;
+      const body = await readJson(request);
+      const project = await store.getProject(body.projectId, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      await codex.ensureLoaded(threadId, project);
+      const thread = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
+      const settings = await validateSettings(await store.getThreadSettings(threadId, project.settings));
+      const collaborationMode = await collaborationModeForSettings({ ...settings, collaborationMode: "default" });
+      const name = await threadTitles.suggest({
+        cwd: project.path,
+        turns: thread.turns || [],
+        settings,
+        collaborationMode,
+        latest: true,
+      });
+      json(response, 200, { name });
     });
 
     application.get("/api/threads/:threadId/goal", async (request, response) => {
@@ -694,18 +726,27 @@ export function createConversations({ store, codex }) {
       },
     };
   }
-  
-  function threadNameFromFirstMessage(firstMessage) {
-    const normalized = firstMessage
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-      .replace(/^\s*(?:```\w*|#{1,6}|>|[-*+] |\d+[.)] )\s*/gm, "")
-      .replace(/[`*_~]+/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!normalized) return null;
-    const characters = Array.from(normalized);
-    return characters.length > 40 ? `${characters.slice(0, 39).join("")}…` : normalized;
+
+  async function scheduleThreadTitle(threadId, turns, { fullLegacyCheck = false } = {}) {
+    const projectId = store.threadProjects[threadId];
+    if (!projectId) return null;
+    let legacyTurns = turns;
+    if (fullLegacyCheck) {
+      const canonical = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
+      legacyTurns = canonical.turns || turns;
+      if (!shouldGenerateThreadTitle(canonical, legacyTurns)) return null;
+    }
+    const project = await store.getProject(projectId);
+    const settings = await validateSettings(await store.getThreadSettings(threadId, project.settings));
+    const collaborationMode = await collaborationModeForSettings({ ...settings, collaborationMode: "default" });
+    return threadTitles.schedule({
+      threadId,
+      cwd: project.path,
+      turns,
+      legacyTurns,
+      settings,
+      collaborationMode,
+    });
   }
   
   async function advanceQueue(threadId) {
@@ -1045,10 +1086,12 @@ export function createConversations({ store, codex }) {
   
   async function loadThreadPage(threadId, searchParams) {
     const result = await codex.request("thread/read", { threadId, includeTurns: true });
-    const history = paginateTurns(result.thread.turns || [], searchParams);
+    const allTurns = result.thread.turns || [];
+    const history = paginateTurns(allTurns, searchParams);
     return {
       thread: { ...result.thread, turns: history.turns.map(compactHistoryTurn) },
       history,
+      allTurns,
     };
   }
   
