@@ -575,17 +575,20 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
   }
   if (hasCachedHistory && !mergeHistory) {
     try {
-      const refreshRuntime = isActiveThreadRuntime(listedThread?.runtime)
+      const activeTurnId = isActiveThreadRuntime(listedThread?.runtime) ? listedThread.runtime.activeTurnId : null;
+      const refreshRuntime = activeTurnId
         ? refreshProjectThreads(project.id)
         : Promise.resolve(null);
+      const activeMetrics = activeTurnId ? `&activeTurnId=${encodeURIComponent(activeTurnId)}` : "";
       const [result] = await Promise.all([
-        api(`/api/threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(project.id)}&history=none`, { signal: controller.signal }),
+        api(`/api/threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(project.id)}&history=none${activeMetrics}`, { signal: controller.signal }),
         refreshRuntime,
       ]);
+      ingestTurnMetrics(result.metrics);
       if (selectionId === state.threadSelectionId && result.accessedAt) {
         updateThreadInState(project.id, { ...findThread(project.id, threadId), accessedAt: result.accessedAt });
       }
-      if (selectionId === state.threadSelectionId && state.selectedThreadId === threadId && isActiveThreadRuntime(listedThread?.runtime)) {
+      if (selectionId === state.threadSelectionId && state.selectedThreadId === threadId && activeTurnId) {
         renderCurrentThread();
       }
     } catch (error) {

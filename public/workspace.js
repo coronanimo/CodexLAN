@@ -62,6 +62,10 @@ function threadActivityTime(thread) {
 export function mergeListedThread(existing, listed) {
   if (!existing) return listed;
   const { turns: listedTurns, ...summary } = listed;
+  if (typeof existing.name === "string" && existing.name.trim()
+    && !(typeof summary.name === "string" && summary.name.trim())) {
+    delete summary.name;
+  }
   const existingAccess = timestampMilliseconds(existing.accessedAt);
   const listedAccess = timestampMilliseconds(listed.accessedAt);
   return {

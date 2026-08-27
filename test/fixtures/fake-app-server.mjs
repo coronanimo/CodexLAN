@@ -31,10 +31,14 @@ if (process.env.CODEX_TEST_SEED_CWD) {
         exitCode: 0,
       })),
     }] : [];
+    const legacyListTitle = process.env.CODEX_TEST_LEGACY_LIST_TITLE && index === count - 1
+      ? "Recovered legacy title"
+      : null;
     threads.set(id, {
       id,
       cwd: process.env.CODEX_TEST_SEED_CWD,
-      name: index === 0 ? "Official App conversation" : `Official App conversation ${index + 1}`,
+      name: legacyListTitle ? null : index === 0 ? "Official App conversation" : `Official App conversation ${index + 1}`,
+      ...(legacyListTitle ? { historyMode: "legacy", legacyReadName: legacyListTitle } : {}),
       status: "idle",
       turns,
       createdAt: 1_700_000_000 + index,
@@ -397,7 +401,11 @@ function fakeResult(method, params = {}) {
     const limit = Math.max(1, Number(params.limit || 100));
     const nextOffset = offset + limit;
     return {
-      data: matching.slice(offset, nextOffset).map(copy),
+      data: matching.slice(offset, nextOffset).map((thread) => {
+        const listed = copy(thread);
+        delete listed.legacyReadName;
+        return listed;
+      }),
       nextCursor: nextOffset < matching.length ? String(nextOffset) : null,
     };
   }
@@ -407,7 +415,10 @@ function fakeResult(method, params = {}) {
     if (method === "thread/read" && params.includeTurns && !materializedThreads.has(params.threadId)) {
       throw new Error(`thread ${params.threadId} is not materialized yet; includeTurns is unavailable before first user message`);
     }
-    return { thread: copy(thread) };
+    const read = copy(thread);
+    if (read.legacyReadName) read.name = read.legacyReadName;
+    delete read.legacyReadName;
+    return { thread: read };
   }
   if (method === "thread/name/set") {
     const thread = threads.get(params.threadId);

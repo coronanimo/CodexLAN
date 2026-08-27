@@ -469,6 +469,12 @@ test("does not let an older thread-list response remove a newly created chat", (
   assert.deepEqual(merged.removedThreadIds, []);
 });
 
+test("does not let a nameless thread-list summary erase a known name", () => {
+  const existing = { id: "legacy", name: "Recovered legacy title", status: "idle" };
+  const merged = mergeListedThread(existing, { id: "legacy", name: null, status: "idle" });
+  assert.equal(merged.name, "Recovered legacy title");
+});
+
 test("removes only chats that existed when a thread-list request began", () => {
   const removed = { id: "removed" };
   const draft = { id: "local-draft" };

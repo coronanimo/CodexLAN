@@ -95,6 +95,14 @@ test("settings keep one connection surface and only durable preferences", async 
   assert.match(appJs, /serverStatusLabel\.textContent = text/);
 });
 
+test("cached active thread selection restores running metrics before rerendering", async () => {
+  const appJs = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const cachedSelection = appJs.match(/if \(hasCachedHistory && !mergeHistory\) \{\n    try \{[\s\S]*?\n  \}/)?.[0] || "";
+  assert.match(cachedSelection, /activeTurnId=/);
+  assert.match(cachedSelection, /ingestTurnMetrics\(result\.metrics\)/);
+  assert.match(cachedSelection, /renderCurrentThread\(\)/);
+});
+
 test("users can change only their own display name from the account menu", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const appJs = await readFile(new URL("../public/app.js", import.meta.url), "utf8");

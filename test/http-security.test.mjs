@@ -42,6 +42,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       CODEX_TEST_UNBOUND_NOTIFICATION_THREAD: unboundNotificationThread,
       CODEX_TEST_SEED_CWD: join(workspace, "admin", "默认项目"),
       CODEX_TEST_SEED_COUNT: "205",
+      CODEX_TEST_LEGACY_LIST_TITLE: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -104,6 +105,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(officialAppThreads.status, 200);
     assert.equal(officialAppThreads.body.threads.length, 205);
     assert.equal(officialAppThreads.body.threads.some((thread) => thread.name === "Official App conversation"), true);
+    assert.equal(officialAppThreads.body.threads.some((thread) => thread.name === "Recovered legacy title"), true);
 
     const arbitraryAdminPath = join(temporaryRoot, "admin-selected", "existing-code");
     const arbitraryAdminProject = await request(origin, "/api/projects", {
@@ -361,7 +363,12 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     const accessOnly = await request(origin, `/api/threads/${threadId}?projectId=${createdProject.body.project.id}&history=none`, { cookie: adminCookie });
     assert.equal(accessOnly.status, 200);
     assert.equal(typeof accessOnly.body.accessedAt, "string");
-    assert.deepEqual(Object.keys(accessOnly.body), ["accessedAt"]);
+    assert.deepEqual(accessOnly.body.metrics, {});
+    const activeAccessOnly = await request(origin, `/api/threads/${threadId}?projectId=${createdProject.body.project.id}&history=none&activeTurnId=${activeTurnId}`, { cookie: adminCookie });
+    assert.equal(activeAccessOnly.status, 200);
+    assert.equal(typeof activeAccessOnly.body.accessedAt, "string");
+    assert.ok(activeAccessOnly.body.metrics[activeTurnId]);
+    assert.ok(Object.values(activeAccessOnly.body.metrics[activeTurnId].items || {}).some((item) => item.type === "commandExecution" && item.startedAt));
     const readsAfterAccessOnly = (await readFile(traceFile, "utf8")).split(/\r?\n/)
       .filter((line) => line.includes('"method":"thread/read"')).length;
     assert.equal(readsAfterAccessOnly, readsBeforeAccessOnly);

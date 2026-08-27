@@ -32,6 +32,8 @@ export function createConversations({ store, codex }) {
   const queueSteerJobs = new Map();
   const threadTokenUsage = new Map();
   const threadGoals = new Map();
+  const effectiveThreadNames = new Map();
+  const resolvedLegacyThreadNames = new Set();
   const userInputRequests = new Map();
   const MAX_THREAD_TOKEN_USAGE = 300;
   const DEFAULT_REASONING_SUMMARY = "detailed";
@@ -160,6 +162,11 @@ export function createConversations({ store, codex }) {
     if (!projectId) return;
     if (message.method === "thread/goal/updated") threadGoals.set(threadId, message.params.goal);
     if (message.method === "thread/goal/cleared") threadGoals.set(threadId, null);
+    if (message.method === "thread/name/updated") {
+      const name = normalizedThreadName(message.params.threadName ?? message.params.name);
+      if (name) effectiveThreadNames.set(threadId, name);
+      resolvedLegacyThreadNames.add(threadId);
+    }
     if (message.method === "thread/tokenUsage/updated" && message.params.tokenUsage) {
       threadTokenUsage.delete(threadId);
       threadTokenUsage.set(threadId, message.params.tokenUsage);
@@ -268,7 +275,14 @@ export function createConversations({ store, codex }) {
       await store.requireThreadOwner(threadId, user.id, project.id);
       if (request.codexUrl.searchParams.get("history") === "none") {
         const accessedAt = await store.recordThreadAccess(user.id, threadId, { deferred: true });
-        return json(response, 200, { accessedAt });
+        const requestedActiveTurnId = request.codexUrl.searchParams.get("activeTurnId");
+        let metrics = {};
+        if (requestedActiveTurnId) {
+          const activeTurnId = validateId(requestedActiveTurnId, "activeTurnId");
+          const storedMetrics = await store.getTurnMetrics(threadId);
+          if (storedMetrics[activeTurnId]) metrics = { [activeTurnId]: storedMetrics[activeTurnId] };
+        }
+        return json(response, 200, { accessedAt, metrics });
       }
       const page = await loadThreadPage(threadId, request.codexUrl.searchParams);
       let thread = page.thread;
@@ -414,6 +428,8 @@ export function createConversations({ store, codex }) {
       }
       await codex.request("thread/delete", { threadId });
       await store.removeThread(threadId);
+      effectiveThreadNames.delete(threadId);
+      resolvedLegacyThreadNames.delete(threadId);
       forgetThreadRuntime(threadId);
       json(response, 200, { ok: true });
     });
@@ -626,7 +642,34 @@ export function createConversations({ store, codex }) {
       threads.push(...(result.data || []));
       cursor = result.nextCursor || null;
     } while (cursor);
-    return threads;
+    return Promise.all(threads.map(resolveListedThreadName));
+  }
+
+  async function resolveListedThreadName(thread) {
+    const listedName = normalizedThreadName(thread?.name);
+    if (listedName) {
+      effectiveThreadNames.set(thread.id, listedName);
+      resolvedLegacyThreadNames.add(thread.id);
+      return thread;
+    }
+    const cachedName = effectiveThreadNames.get(thread?.id);
+    if (cachedName) return { ...thread, name: cachedName };
+    if (thread?.historyMode !== "legacy" || resolvedLegacyThreadNames.has(thread.id)) return thread;
+    resolvedLegacyThreadNames.add(thread.id);
+    try {
+      const canonical = (await codex.request("thread/read", { threadId: thread.id, includeTurns: false })).thread;
+      const canonicalName = normalizedThreadName(canonical?.name);
+      if (!canonicalName) return thread;
+      effectiveThreadNames.set(thread.id, canonicalName);
+      return { ...thread, name: canonicalName };
+    } catch {
+      resolvedLegacyThreadNames.delete(thread.id);
+      return thread;
+    }
+  }
+
+  function normalizedThreadName(value) {
+    return typeof value === "string" ? value.trim() : "";
   }
   
   async function listProjectThreads(project, user) {
