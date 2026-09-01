@@ -115,3 +115,27 @@ test("renders inline and block formulas without interpreting fenced code as math
     globalThis.katex = previousKatex;
   }
 });
+
+test("renders Mermaid fences as diagram containers", async () => {
+  const previousDocument = globalThis.document;
+  const previousMermaid = globalThis.mermaid;
+  globalThis.document = {
+    createElement: (tagName) => new TestNode(tagName),
+    createTextNode: (value) => new TestNode("#text", String(value)),
+  };
+  globalThis.mermaid = {
+    initialize() {},
+    render: async () => ({ svg: "<svg data-mermaid=\"true\"></svg>" }),
+  };
+
+  try {
+    const container = new TestNode("article");
+    renderMarkdownDocument(container, ["```mermaid", "graph TD", "  A-->B", "```"].join("\n"));
+    assert.equal(container.children[0].className, "markdown-mermaid-block");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(container.children[0].children[0].innerHTML, "<svg data-mermaid=\"true\"></svg>");
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.mermaid = previousMermaid;
+  }
+});

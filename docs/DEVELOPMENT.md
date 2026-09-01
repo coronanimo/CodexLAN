@@ -8,7 +8,7 @@ Development is currently supported on Windows 10 and 11 with Node.js 20 or newer
 codex login status
 npm ci
 npm run check
-npm start
+npm run dev
 ```
 
 Use separate `CODEX_WEB_DATA_DIR` and `CODEX_WORKDIR` directories for manual tests. Test data should not contain real accounts, sessions, conversations, credentials, attachments, or project files.
@@ -30,9 +30,20 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for runtime boundaries and data ownership
 npm run check
 ```
 
-This checks the JavaScript entry points and runs the Node test suite. The HTTP tests start a real CodexLAN service on loopback with temporary data, a temporary workspace, and the fake App Server.
+This checks the JavaScript entry points and runs the Node test suite. The HTTP test starts a real CodexLAN service on loopback with temporary data, a temporary workspace, and the fake App Server.
 
 Use a real Codex CLI when changing protocol handling. Check initialization, authentication, model listing, thread creation and history, turn execution, steering, queues, interruption, reconnection, command output, file changes, token usage, and account limits.
+
+## Browser profiling
+
+When the workbench appears stuck or rendering becomes disordered, append `?profiling=1` to the page URL and reproduce the problem. The browser records recent SSE events, event-handler and conversation-render timings, API requests, long tasks, and uncaught errors. In DevTools, run:
+
+```js
+codexlanProfiler.report()
+codexlanProfiler.download()
+```
+
+The first command returns an in-memory report; the second downloads a JSON snapshot that can be attached to a bug report. Profiling is disabled by default and is not persisted unless `localStorage.setItem("codexlan-profiling", "1")` is used.
 
 ## Android
 

@@ -17,6 +17,11 @@
       "minLength": 1
     },
     "dataRoot": { "type": "string", "minLength": 1 },
-    "codexBin": { "type": ["string", "null"] }
+    "codexBin": { "type": ["string", "null"] },
+    "autoApprove": {
+      "description": "Automatically approve command execution, file changes, and requested permissions for the Codex session.",
+      "type": "boolean",
+      "default": false
+    }
   }
 }

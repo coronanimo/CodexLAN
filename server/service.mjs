@@ -48,7 +48,8 @@ async function handoffService() {
 
 async function startService() {
   const current = await readJson(statePath);
-  if (isProcessRunning(current?.supervisorPid)) {
+  const stopped = current?.status === "stopped";
+  if (!stopped && isProcessRunning(current?.supervisorPid)) {
     if (current.status === "failed") {
       await preflightPorts();
       const ready = await restartRunningSupervisor(current);
@@ -58,6 +59,7 @@ async function startService() {
     process.stdout.write(`CodexLAN supervisor is already running (PID ${current.supervisorPid}).\n`);
     return;
   }
+  if (stopped) await rm(statePath, { force: true });
   await preflightPorts();
   await rm(commandPath, { force: true });
   const daemonEnvironment = { ...process.env };
@@ -84,7 +86,10 @@ async function stopService() {
     return;
   }
   await sendCommand("stop");
-  await waitFor(() => !isProcessRunning(current.supervisorPid), 15_000, "CodexLAN supervisor did not stop in time.");
+  await waitFor(async () => {
+    const state = await readJson(statePath);
+    return state?.status === "stopped" && !isProcessRunning(current.supervisorPid);
+  }, 15_000, "CodexLAN supervisor did not stop in time.");
   process.stdout.write("CodexLAN stopped.\n");
 }
 

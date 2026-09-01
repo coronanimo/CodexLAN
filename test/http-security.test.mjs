@@ -58,7 +58,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     const anonymous = await request(origin, "/api/auth/session");
     assert.equal(anonymous.status, 401);
     assert.equal(anonymous.body.setupRequired, true);
-    assert.match(anonymous.response.headers.get("content-security-policy"), /style-src-elem 'self'; style-src-attr 'unsafe-inline'/);
+    assert.match(anonymous.response.headers.get("content-security-policy"), /style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'/);
 
     const rejectedOrigin = await request(origin, "/api/auth/setup", {
       method: "POST",
@@ -208,10 +208,10 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(suggestedTitle.body.name, "Quota reset timing");
     const titleTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
     const titleThreadStart = titleTrace.find((entry) => entry.method === "thread/start" && entry.params.ephemeral === true);
-    assert.equal(titleThreadStart?.params.model, "gpt-5.6-luna");
+    assert.equal(titleThreadStart?.params.model, "gpt-5.6-sol");
     const titleTurnStart = titleTrace.find((entry) => entry.method === "turn/start" && entry.params.outputSchema);
     assert.equal(titleTurnStart?.params.effort, "low");
-    assert.equal(titleTurnStart?.params.collaborationMode?.settings?.model, "gpt-5.6-luna");
+    assert.equal(titleTurnStart?.params.collaborationMode?.settings?.model, "gpt-5.6-sol");
     assert.equal(titleTurnStart?.params.collaborationMode?.settings?.reasoning_effort, "low");
 
     const visualizationFile = join(temporaryRoot, "chart.html");
@@ -372,6 +372,15 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     const readsAfterAccessOnly = (await readFile(traceFile, "utf8")).split(/\r?\n/)
       .filter((line) => line.includes('"method":"thread/read"')).length;
     assert.equal(readsAfterAccessOnly, readsBeforeAccessOnly);
+
+    const probe = await request(origin, `/api/threads/${threadId}/runtime?projectId=${createdProject.body.project.id}`, { cookie: adminCookie });
+    assert.equal(probe.status, 200);
+    assert.equal(probe.body.threadId, threadId);
+    assert.ok(probe.body.runtime.activeTurnId);
+    const probeTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    const probeRead = probeTrace.findLast((entry) => entry.method === "thread/read" && entry.params.threadId === threadId);
+    assert.ok(probeRead);
+    assert.equal(probeRead.params.includeTurns, false);
 
     const directGuidance = await request(origin, `/api/threads/${threadId}/steer`, {
       method: "POST",

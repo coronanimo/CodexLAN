@@ -9,13 +9,16 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node server/index.mjs",
+    "start": "node server/service.mjs start",
+    "dev": "node server/index.mjs",
+    "restart": "node server/service.mjs restart",
     "service:start": "node server/service.mjs start",
     "service:stop": "node server/service.mjs stop",
     "service:restart": "node server/service.mjs restart",
     "service:status": "node server/service.mjs status",
     "service:log": "node server/service.mjs log",
-    "check": "node --check server/index.mjs && node --check server/service.mjs && node --check server/accounts.mjs && node --check server/codex-client.mjs && node --check server/config.mjs && node --check server/conversations.mjs && node --check server/http.mjs && node --check server/projects.mjs && node --check server/thread-titles.mjs && node --check server/workspace-store.mjs && node --check public/app.js && node --check public/desktop.js && node --check public/goal.js && node --check public/mobile.js && node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check server/index.mjs && node --check server/service.mjs && node --check server/accounts.mjs && node --check server/codex-client.mjs && node --check server/config.mjs && node --check server/conversations.mjs && node --check server/http.mjs && node --check server/projects.mjs && node --check server/thread-titles.mjs && node --check server/workspace-store.mjs && node --check public/app.js && node --check public/profiling.js && node --check public/desktop.js && node --check public/goal.js && node --check public/mobile.js && npm test"
   },
   "dependencies": {
     "express": "5.2.1"

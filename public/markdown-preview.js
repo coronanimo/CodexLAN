@@ -20,7 +20,8 @@ export function renderMarkdownDocument(container, value) {
         index += 1;
       }
       if (index < lines.length) index += 1;
-      container.append(codeBlock(body.join("\n"), fence[2]));
+      const language = String(fence[2] || "").toLowerCase();
+      container.append(language === "mermaid" ? mermaidBlock(body.join("\n")) : codeBlock(body.join("\n"), fence[2]));
       continue;
     }
 
@@ -154,6 +155,71 @@ function codeBlock(value, language) {
   code.textContent = value;
   pre.append(code);
   figure.append(pre);
+  return figure;
+}
+
+let mermaidRenderId = 0;
+
+function mermaidBlock(value) {
+  const figure = document.createElement("figure");
+  figure.className = "markdown-mermaid-block";
+  const source = String(value ?? "").trim();
+  const renderer = globalThis.mermaid;
+
+  if (!source || typeof renderer?.render !== "function") {
+    figure.classList.add("markdown-mermaid-unavailable");
+    figure.textContent = source || "Mermaid 图表为空。";
+    return figure;
+  }
+
+  const stage = document.createElement("div");
+  stage.className = "markdown-mermaid-stage";
+  stage.setAttribute("role", "button");
+  stage.setAttribute("tabindex", "0");
+  stage.setAttribute("aria-label", "点击放大 Mermaid 图表");
+  const openFullSize = () => {
+    const svg = stage.innerHTML;
+    if (!svg || typeof globalThis.CustomEvent !== "function" || typeof document.dispatchEvent !== "function") return;
+    document.dispatchEvent(new CustomEvent("markdown-mermaid-open", { detail: { svg } }));
+  };
+  if (typeof stage.addEventListener === "function") {
+    stage.addEventListener("click", openFullSize);
+    stage.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openFullSize();
+      }
+    });
+  }
+  stage.textContent = "正在生成 Mermaid 图表…";
+  figure.append(stage);
+  try {
+    renderer.initialize?.({
+      startOnLoad: false,
+      securityLevel: "strict",
+      useMaxWidth: false,
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: "linear" },
+      theme: "default",
+      darkMode: false,
+      themeVariables: {
+        fontSize: "16px",
+        fontFamily: "Segoe UI, Microsoft YaHei UI, sans-serif",
+      },
+    });
+    const result = renderer.render(`markdown-mermaid-${++mermaidRenderId}`, source);
+    Promise.resolve(result).then((output) => {
+      const svg = typeof output === "string" ? output : output?.svg;
+      if (!svg) throw new Error("Mermaid 未返回图表");
+      stage.innerHTML = svg;
+      stage.classList.add("is-ready");
+    }).catch(() => {
+      figure.classList.add("markdown-mermaid-error");
+      stage.textContent = source;
+    });
+  } catch {
+    figure.classList.add("markdown-mermaid-error");
+    stage.textContent = source;
+  }
   return figure;
 }
 

@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.16.22">
     <link rel="stylesheet" href="/styles.css">
     <link rel="stylesheet" href="/workspace.css">
-    <link rel="stylesheet" href="/content.css">
+    <link rel="stylesheet" href="/content.css?v=20260901-2">
     <link rel="stylesheet" href="/execution.css">
     <link rel="stylesheet" href="/composer.css">
     <link rel="stylesheet" href="/dialogs.css">
@@ -389,6 +389,19 @@
       </section>
     </dialog>
 
+    <dialog id="mermaid-preview-dialog" class="mermaid-preview-dialog" aria-labelledby="mermaid-preview-name">
+      <section class="mermaid-preview-shell">
+        <header class="mermaid-preview-header">
+          <div class="mermaid-preview-heading">
+            <span>Mermaid 图表</span>
+            <h2 id="mermaid-preview-name">图表预览</h2>
+          </div>
+          <button id="close-mermaid-preview" class="icon-button" type="button" aria-label="关闭 Mermaid 图表预览">×</button>
+        </header>
+        <div id="mermaid-preview-stage" class="mermaid-preview-stage"></div>
+      </section>
+    </dialog>
+
     <dialog id="visualization-dialog" class="visualization-dialog" aria-labelledby="visualization-name">
       <section class="visualization-shell">
         <header class="visualization-header">
@@ -408,6 +421,7 @@
     <template id="message-template"><article class="message"><div class="message-meta"></div><div class="message-body"></div></article></template>
     <template id="queue-item-template"><li class="queue-item"><span class="queue-index"></span><span class="queue-text"></span><div class="queue-actions"><button data-action="guide" type="button" aria-label="转为当前任务的引导" title="转为引导"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 12 15-7-5 14-3-5zM11 14l3-3"/></svg></button><button data-action="edit" type="button" aria-label="编辑排队任务">✎</button><button data-action="up" type="button" aria-label="上移">↑</button><button data-action="down" type="button" aria-label="下移">↓</button><button data-action="remove" type="button" aria-label="移除">×</button></div></li></template>
     <script src="/vendor/katex/katex.min.js?v=0.16.22"></script>
+    <script src="/vendor/mermaid/mermaid.min.js?v=11.17.2-global2"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

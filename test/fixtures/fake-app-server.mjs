@@ -146,7 +146,7 @@ function emitUserMessage(params, result) {
   const text = (params.input || []).map((entry) => entry.text || "").filter(Boolean).join("\n");
   const turnId = result?.turn?.id;
   if (!text || !params.threadId || !turnId) return;
-  const item = { id: params.clientUserMessageId || randomUUID(), type: "userMessage", content: [{ type: "text", text }] };
+  const item = { id: randomUUID(), clientId: params.clientUserMessageId || null, type: "userMessage", content: [{ type: "text", text }] };
   const thread = threads.get(params.threadId);
   const turn = thread?.turns.find((entry) => entry.id === turnId);
   if (turn) turn.items.push(copy(item));
@@ -337,15 +337,26 @@ function fakeResult(method, params = {}) {
       : { account: { type: "chatgpt", email: "test@example.invalid", planType: "unknown" }, requiresOpenaiAuth: true };
   }
   if (method === "model/list") return {
-    data: [{
-      id: "gpt-5.6-sol",
-      displayName: "GPT-5.6 Sol",
-      hidden: false,
-      isDefault: true,
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
-      serviceTiers: [],
-    }],
+    data: [
+      {
+        id: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        hidden: false,
+        isDefault: true,
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+        serviceTiers: [],
+      },
+      {
+        id: "gpt-5-mini",
+        displayName: "GPT-5 mini",
+        hidden: true,
+        isDefault: false,
+        defaultReasoningEffort: "low",
+        supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+        serviceTiers: [],
+      },
+    ],
   };
   if (method === "collaborationMode/list") return {
     data: [
@@ -407,6 +418,20 @@ function fakeResult(method, params = {}) {
         return listed;
       }),
       nextCursor: nextOffset < matching.length ? String(nextOffset) : null,
+    };
+  }
+  if (method === "thread/turns/list") {
+    const thread = threads.get(params.threadId);
+    if (!thread) throw new Error("thread not found");
+    const descending = [...(thread.turns || [])].reverse();
+    const offset = Number(params.cursor || 0);
+    const limit = Math.max(1, Number(params.limit || 50));
+    const page = descending.slice(offset, offset + limit);
+    const nextOffset = offset + page.length;
+    return {
+      data: page.map(copy),
+      nextCursor: nextOffset < descending.length ? String(nextOffset) : null,
+      backwardsCursor: page.length ? String(Math.max(0, offset - 1)) : null,
     };
   }
   if (method === "thread/read" || method === "thread/resume") {

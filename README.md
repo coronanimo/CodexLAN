@@ -76,7 +76,8 @@ The copied configuration starts with:
   "$schema": "./codexlan.schema.json",
   "port": 8688,
   "host": "auto",
-  "dataRoot": "../data"
+  "dataRoot": "../data",
+  "autoApprove": false
 }
 ```
 
@@ -86,9 +87,10 @@ Edit the copied `config/codexlan.json`, not the example file. Supported settings
 | --- | --- |
 | `port` | HTTP port shared by loopback and LAN access. Default: `8688`. |
 | `host` | `auto` selects a private IPv4 interface; `127.0.0.1` disables LAN access. |
-| `dataRoot` | Accounts, sessions, queues, thread settings, and supervisor state. Relative paths resolve from `config/`. |
+| `dataRoot` | Accounts, sessions, queues, thread settings, and supervisor state. Relative paths resolve from `config/`; SQLite is the durable state store and JSON remains a compatibility mirror during migration. |
 | `workspaceRoot` | Optional boundary for automatically managed user projects. When omitted, CodexLAN uses `<dataRoot>/projects`. Existing projects may still point to their own absolute directories. |
 | `codexBin` | Optional path to a specific Codex executable. When omitted, CodexLAN uses `codex` from `PATH`. |
+| `autoApprove` | Automatically grants command, file-change, and permission requests for the current Codex session. Default: `false`. Enable only for trusted users. |
 
 Unknown settings and invalid values stop startup with an error instead of being ignored.
 
@@ -101,7 +103,8 @@ Unknown settings and invalid values stop startup with an error instead of being 
 | `npm run service:log` | Print the latest service log entries. |
 | `npm run service:restart` | Restart the server through the existing supervisor. Run this from an external terminal. |
 | `npm run service:stop` | Stop the server and supervisor. Run this from an external terminal. |
-| `npm start` | Run the server in the foreground for development. |
+| `npm start` | Start the supervisor and managed server. |
+| `npm run dev` | Run the server directly in the foreground for development. |
 
 The supervisor restarts a server that crashes after reaching readiness. Its control state is stored below `dataRoot`; logs are written to `logs/codexlan.log`.
 

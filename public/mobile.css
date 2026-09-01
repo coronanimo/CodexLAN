@@ -3,11 +3,14 @@ html.android-shell, html.android-shell body { overscroll-behavior: none; }
 
   .markdown-preview-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
   .image-preview-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
+  .mermaid-preview-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
   .image-preview-header { gap: 8px; padding: calc(9px + env(safe-area-inset-top)) 9px 9px 13px; }
   .image-preview-heading code { max-width: 48vw; }
   .image-preview-actions { gap: 4px; }
   .image-preview-actions .quiet-button { padding: 7px; font-size: 10px; }
   .image-preview-stage { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
+  .mermaid-preview-header { gap: 8px; padding: calc(9px + env(safe-area-inset-top)) 9px 9px 13px; }
+  .mermaid-preview-stage { padding: 12px 8px calc(12px + env(safe-area-inset-bottom)); }
   .visualization-dialog { inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; }
   .visualization-header { min-height: 46px; padding: calc(6px + env(safe-area-inset-top)) 7px 6px 11px; }
   .visualization-heading { gap: 8px; }
@@ -68,6 +71,9 @@ html.android-shell, html.android-shell body { overscroll-behavior: none; }
   .user-input-option { padding: 9px; }
   .user-input-footer { grid-template-columns: minmax(0, 1fr); }
   .user-input-footer .primary-button { justify-self: stretch; }
+  .approval-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .approval-actions .form-error { grid-column: 1 / -1; }
+  .approval-actions .primary-button { grid-column: 1 / -1; }
   .markdown-table-wrap { margin: 11px 0; border-radius: 9px; }
   .markdown-table-wrap th, .markdown-table-wrap td { min-width: 84px; max-width: 300px; padding: 8px 9px; font-size: 12px; }
   .execution-group { border-radius: 11px; }

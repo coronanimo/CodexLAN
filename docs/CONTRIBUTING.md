@@ -20,7 +20,7 @@ npm run check
 To start the development service:
 
 ```powershell
-npm start
+npm run dev
 ```
 
 ## Change rules

@@ -9,7 +9,7 @@ Copy-Item config\codexlan.example.json config\codexlan.json
 npm run service:start
 ```
 
-`config/codexlan.json` is the authoritative local configuration. It supports `port`, `host`, `workspaceRoot`, `dataRoot`, and `codexBin`; relative paths resolve from the config file. Environment variables remain available when a key is absent, primarily for tests and temporary launches.
+`config/codexlan.json` is the authoritative local configuration. It supports `port`, `host`, `workspaceRoot`, `dataRoot`, `codexBin`, and `autoApprove`; relative paths resolve from the config file. Environment variables remain available for the existing settings when a key is absent, primarily for tests and temporary launches. `autoApprove` is file-only and defaults to `false`.
 
 The server uses one shared listener. With `host: "auto"`, it binds once to `0.0.0.0:<port>` and accepts requests only through loopback or the selected private IPv4 interface. The supervisor performs a port preflight, reports deterministic startup failures once, and only auto-restarts a process that had already reached ready state.
 

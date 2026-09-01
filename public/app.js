@@ -3,7 +3,7 @@ import { renderMarkdownDocument } from "./markdown-preview.js";
 import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
 import { commandDisplayText, commandOutputTail, executionBodyHasContent, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName } from "./workspace.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName, userMessageClientId, visibleServiceTiers } from "./workspace.js";
 import { appendAnsiOutput, renderAnsiOutput } from "./ansi-output.js";
 import { diffLineStats, renderFileChanges, unifiedDiffChanges } from "./diff-output.js";
 import { clipboardImageFiles, clipboardImageName, isMobileComposer, messageWithAttachments, resizeComposerInput } from "./composer.js";
@@ -11,7 +11,10 @@ import { createTurnPlanView, planShortcut, updateTurnPlanView } from "./plan.js"
 import { goalPresentation, goalShortcut, isActiveGoal } from "./goal.js";
 import { createWorkbenchLayout } from "./layout.js";
 import { copyTextToClipboard, fileChangesText, isPreviewableImage, openDownloadExternally, printableMarkdownHtml, shareMarkdown } from "./mobile-actions.js";
+
 import { EVENT_STREAM_WATCHDOG_INTERVAL_MS, eventStreamNeedsRestart } from "./event-stream.js";
+import { profileMark, profileSpan } from "./profiling.js";
+import { deriveRunDiagnostic } from "./run-diagnostics.js";
 
 const $ = (selector) => document.querySelector(selector);
 const MAX_RENDERED_COMMAND_OUTPUT = 16_000;
@@ -207,6 +210,10 @@ const ui = {
   imagePreviewImage: $("#image-preview-image"),
   imagePreviewDownload: $("#image-preview-download"),
   closeImagePreview: $("#close-image-preview"),
+  mermaidPreviewDialog: $("#mermaid-preview-dialog"),
+  mermaidPreviewName: $("#mermaid-preview-name"),
+  mermaidPreviewStage: $("#mermaid-preview-stage"),
+  closeMermaidPreview: $("#close-mermaid-preview"),
   visualizationDialog: $("#visualization-dialog"),
   visualizationName: $("#visualization-name"),
   visualizationStatus: $("#visualization-status"),
@@ -238,13 +245,16 @@ const state = {
   goalDialogThreadId: null,
   goalMutating: false,
   userInputRequests: new Map(),
+  approvalRequests: new Map(),
   editingQueueItemId: null,
   mode: "queue",
   runStripOpen: false,
   workspaceRefreshPromise: null,
+  threadRefreshGeneration: 0,
   materializingThread: false,
   submittingMessage: false,
   submittingThreadIds: new Set(),
+  turnDiagnostics: new Map(),
   uploadingFiles: false,
   composerAttachments: [],
   stoppingTurn: false,
@@ -258,6 +268,8 @@ const state = {
   messageElements: new Map(),
   executionGroups: new Map(),
   executionIdleTimers: new Map(),
+  pendingQueueMessages: new Map(),
+  runtimeProbes: new Map(),
   turnMetrics: new Map(),
   activityTimer: null,
   elapsedTimer: null,
@@ -458,8 +470,22 @@ function renderContextUsage() {
   ui.contextUsage.classList.toggle("critical", percent >= 90);
 }
 
-async function refreshAllThreads() {
-  await Promise.all(state.projects.map((project) => refreshProjectThreads(project.id)));
+async function refreshAllThreads({ foregroundProjectId = null } = {}) {
+  const projectIds = state.projects.map((project) => project.id);
+  const foreground = projectIds.includes(foregroundProjectId) ? foregroundProjectId : null;
+  const generation = ++state.threadRefreshGeneration;
+  if (!foreground) {
+    await Promise.all(projectIds.map((projectId) => refreshProjectThreads(projectId)));
+  } else {
+    await refreshProjectThreads(foreground);
+    const remaining = projectIds.filter((projectId) => projectId !== foreground);
+    void (async () => {
+      for (const projectId of remaining) {
+        if (generation !== state.threadRefreshGeneration) return;
+        await refreshProjectThreads(projectId);
+      }
+    })().catch((error) => showActivity(`其他项目刷新失败：${error.message}`, true));
+  }
   ensureEventStream();
   renderRunStrip();
 }
@@ -678,6 +704,34 @@ function currentQueue() {
   return threadId ? state.queueSnapshots.get(threadId)?.queue || [] : [];
 }
 
+function queuedItem(threadId, itemId) {
+  return state.queueSnapshots.get(threadId)?.queue?.find((item) => item.id === itemId || item.clientId === itemId) || null;
+}
+
+function deferQueuedUserMessage(threadId, turnId, item) {
+  const clientId = userMessageClientId(item);
+  const queueItemId = clientId || item?.id;
+  if (!item?.id || item.type !== "userMessage" || !queuedItem(threadId, queueItemId)) return false;
+  const pending = state.pendingQueueMessages.get(queueItemId);
+  state.pendingQueueMessages.set(queueItemId, {
+    threadId,
+    turnId,
+    item: { ...(pending?.item || {}), ...item },
+  });
+  return true;
+}
+
+function flushPendingQueueMessages(threadId) {
+  const projectId = findProjectForThread(threadId);
+  if (!projectId) return;
+  for (const [itemId, pending] of state.pendingQueueMessages) {
+    if (pending.threadId !== threadId || queuedItem(threadId, itemId)) continue;
+    state.pendingQueueMessages.delete(itemId);
+    const stored = rememberThreadItem(projectId, threadId, pending.turnId, pending.item);
+    if (stored && state.selectedThreadId === threadId) renderLiveUserMessage(stored, pending.turnId);
+  }
+}
+
 function currentRuntime() {
   return currentThread()?.runtime || { activeTurnId: null, status: "idle" };
 }
@@ -716,6 +770,12 @@ function refreshElapsedDisplay(element) {
 
 function refreshElapsedDisplays() {
   document.querySelectorAll("[data-elapsed-prefix]").forEach(refreshElapsedDisplay);
+  const runtime = currentRuntime();
+  const activeTurnId = isActiveThreadStatus(runtime.status) ? runtime.activeTurnId : null;
+  if (activeTurnId) {
+    const activity = state.messageElements.get(turnActivityId(activeTurnId));
+    if (activity) renderTurnActivityMessage(activeTurnId, activity);
+  }
 }
 
 function syncElapsedTimer() {
@@ -972,7 +1032,11 @@ function renderRunStrip() {
     const title = document.createElement("strong");
     title.textContent = `${project.name} · ${threadDisplayName(thread)}`;
     const detail = document.createElement("small");
-    if (isActiveThreadRuntime(thread.runtime)) setElapsedDisplay(detail, "正在执行", thread.runtime);
+    if (isActiveThreadRuntime(thread.runtime)) {
+      const diagnostic = deriveRunDiagnostic({ runtime: thread.runtime });
+      if (diagnostic.state === "unexplained") detail.textContent = `${diagnostic.label} · ${formatElapsed(diagnostic.ageMs || 0)}`;
+      else setElapsedDisplay(detail, diagnostic.label, thread.runtime);
+    }
     else if (isActiveGoal(thread.goal)) detail.textContent = thread.queueCount ? `目标持续执行 · 队列 ${thread.queueCount}` : "目标持续执行中";
     else detail.textContent = `等待队列 ${thread.queueCount}`;
     words.append(title, detail);
@@ -994,8 +1058,8 @@ function renderSettings() {
   const efforts = selectedModel?.supportedReasoningEfforts || [];
   const selectedEffort = settings.effort || selectedModel?.defaultReasoningEffort || efforts[0]?.reasoningEffort;
   fillCompactEffortOptions(ui.composerEffort, efforts, selectedEffort);
-  const tiers = selectedModel?.serviceTiers || [];
   const selectedTier = settings.serviceTier || "";
+  const tiers = visibleServiceTiers(selectedModel?.serviceTiers, selectedTier);
   fillCompactTierOptions(ui.composerTier, tiers, selectedTier);
   ui.summary.value = ["auto", "concise", "detailed", "none"].includes(settings.summary) ? settings.summary : "detailed";
   const planAvailable = state.collaborationModes.some((entry) => entry.mode === "plan");
@@ -1064,8 +1128,8 @@ function compactModelLabel(model) {
 }
 
 function serviceTierLabel(tier) {
-  const value = String(tier?.id || tier?.name || "").toLowerCase();
-  return ({ standard: "标准", fast: "快速", priority: "优先", flex: "弹性" })[value] || "服务档";
+  const value = String(tier?.name || tier?.id || "").toLowerCase();
+  return ({ standard: "标准", fast: "快速", priority: "快速", ultrafast: "超快", flex: "弹性" })[value] || "服务档";
 }
 
 function bindCompactSelects() {
@@ -1168,6 +1232,15 @@ function renderGoalButton() {
 }
 
 function renderConversation(turns) {
+  return renderConversationProfiled(turns);
+}
+
+function renderConversationProfiled(turns) {
+  const finishProfile = profileSpan("renderConversation", {
+    turns: Array.isArray(turns) ? turns.length : 0,
+    threadId: state.selectedThreadId,
+  });
+  try {
   const shouldFollow = state.followLatest;
   const previousScrollTop = ui.conversation.scrollTop;
   const liveMetricsByTurn = captureRenderedExecutionItems();
@@ -1184,13 +1257,14 @@ function renderConversation(turns) {
     loadOlder.addEventListener("click", () => loadOlderTurns().catch(showError));
     ui.conversation.append(loadOlder);
   }
-  for (const rawTurn of turns) {
+  for (const rawTurn of Array.isArray(turns) ? turns : []) {
     let turn = reconcileStaleExecutionTurn(turnWithMetrics(rawTurn), currentRuntime());
     const liveMetrics = liveMetricsByTurn.get(turn.id);
     if (liveMetrics) turn = { ...turn, items: restoreMissingExecutionItems(turn.items || [], liveMetrics) };
     appendConversationDate(turn.id, turnTimestamp(turn));
-    const items = turn.items || [];
+    const items = Array.isArray(turn.items) ? turn.items : [];
     let userMessageSeen = false;
+    if (items.some(isExecutionItem)) ensureExecutionGroup(turn.id, turn.status, turn);
     for (const item of items) {
       if (isExecutionItem(item)) {
         upsertExecutionItem(turn.id, item, { turnStatus: turn.status, timing: turn });
@@ -1201,9 +1275,13 @@ function renderConversation(turns) {
       }
     }
     renderTurnPlan(turn.id, state.turnMetrics.get(turn.id)?.plan, turn.status);
+    moveFinalMessagesToEnd(state.executionGroups.get(turn.id));
   }
   for (const request of state.userInputRequests.values()) {
     if (request.threadId === state.selectedThreadId) renderUserInputRequest(request);
+  }
+  for (const request of state.approvalRequests.values()) {
+    if (request.threadId === state.selectedThreadId) renderApprovalRequest(request);
   }
   if (!ui.conversation.childElementCount) renderEmptyConversation();
   const activeTurnId = currentRuntime().activeTurnId;
@@ -1214,6 +1292,9 @@ function renderConversation(turns) {
     ui.conversation.scrollTop = Math.min(previousScrollTop, Math.max(0, ui.conversation.scrollHeight - ui.conversation.clientHeight));
     updateJumpLatest();
   });
+  } finally {
+    finishProfile({ children: ui.conversation.childElementCount });
+  }
 }
 
 function renderUserInputRequest(request) {
@@ -1382,6 +1463,127 @@ function syncUserInputRequests(threadId, requests) {
   }
 }
 
+function renderApprovalRequest(request) {
+  if (!request?.requestId || request.threadId !== state.selectedThreadId) return;
+  removeApprovalCard(request.requestId);
+  ui.conversation.querySelector(".empty-state")?.remove();
+  const card = document.createElement("section");
+  card.className = "user-input-card approval-card";
+  card.dataset.requestId = request.requestId;
+  const heading = document.createElement("div");
+  heading.className = "user-input-heading";
+  const title = document.createElement("strong");
+  title.textContent = approvalRequestTitle(request.method);
+  const note = document.createElement("span");
+  note.textContent = "确认后 Codex 会继续当前任务";
+  heading.append(title, note);
+  card.append(heading);
+  if (request.reason) {
+    const reason = document.createElement("p");
+    reason.className = "approval-reason";
+    reason.textContent = request.reason;
+    card.append(reason);
+  }
+  const detail = approvalRequestDetail(request);
+  if (detail) {
+    const pre = document.createElement("pre");
+    pre.className = "approval-detail";
+    pre.textContent = detail;
+    card.append(pre);
+  }
+  const footer = document.createElement("div");
+  footer.className = "approval-actions";
+  const error = document.createElement("p");
+  error.className = "form-error";
+  footer.append(error);
+  if (approvalDecisionAvailable(request, "cancel")) footer.append(approvalButton("取消任务", "cancel", "danger-button"));
+  else if (approvalDecisionAvailable(request, "decline")) footer.append(approvalButton("拒绝", "decline", "danger-button"));
+  if (approvalDecisionAvailable(request, "accept")) footer.append(approvalButton("允许一次", "accept", "quiet-button"));
+  if (approvalDecisionAvailable(request, "acceptForSession")) {
+    footer.append(approvalButton("本次会话允许", "acceptForSession", "primary-button"));
+  }
+  card.append(footer);
+  for (const button of footer.querySelectorAll("button")) {
+    button.addEventListener("click", () => void submitApprovalRequest(request, button.dataset.decision, card, error));
+  }
+  ui.conversation.append(card);
+  placeTurnContent(request.turnId, { root: card });
+  followNewContent();
+}
+
+function approvalButton(label, decision, className) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.dataset.decision = decision;
+  button.textContent = label;
+  return button;
+}
+
+function approvalRequestTitle(method) {
+  if (method === "item/fileChange/requestApproval") return "需要批准文件修改";
+  if (method === "item/permissions/requestApproval") return "需要授予额外权限";
+  return "需要批准命令执行";
+}
+
+function approvalRequestDetail(request) {
+  const lines = [];
+  if (request.command) lines.push(Array.isArray(request.command) ? request.command.join(" ") : String(request.command));
+  if (request.cwd) lines.push("目录：" + request.cwd);
+  if (request.grantRoot) lines.push("授权目录：" + request.grantRoot);
+  const permissions = request.additionalPermissions || request.permissions;
+  if (permissions) lines.push("额外权限：" + JSON.stringify(permissions, null, 2));
+  if (request.networkApprovalContext) lines.push("网络访问：" + JSON.stringify(request.networkApprovalContext, null, 2));
+  return lines.join("\n");
+}
+
+function approvalDecisionAvailable(request, decision) {
+  if (!Array.isArray(request.availableDecisions) || !request.availableDecisions.length) return decision !== "cancel";
+  return request.availableDecisions.some((entry) => entry === decision || entry?.decision === decision);
+}
+
+async function submitApprovalRequest(request, decision, card, error) {
+  const project = currentProject();
+  if (!project || request.threadId !== state.selectedThreadId) return;
+  error.textContent = "";
+  for (const button of card.querySelectorAll("button")) button.disabled = true;
+  try {
+    await api("/api/threads/" + encodeURIComponent(request.threadId) + "/approval/" + encodeURIComponent(request.requestId), {
+      method: "POST",
+      body: { projectId: project.id, decision },
+    });
+    state.approvalRequests.delete(String(request.requestId));
+    card.remove();
+    scheduleTurnActivity(request.turnId, 0);
+  } catch (submitError) {
+    for (const button of card.querySelectorAll("button")) button.disabled = false;
+    error.textContent = submitError.message;
+  }
+}
+
+function removeApprovalCard(requestId) {
+  for (const card of ui.conversation.querySelectorAll(".approval-card")) {
+    if (card.dataset.requestId === String(requestId)) card.remove();
+  }
+}
+
+function removeApprovalRequest(requestId) {
+  state.approvalRequests.delete(String(requestId));
+  removeApprovalCard(requestId);
+}
+
+function syncApprovalRequests(threadId, requests) {
+  for (const [requestId, request] of state.approvalRequests) {
+    if (request.threadId === threadId) state.approvalRequests.delete(requestId);
+  }
+  for (const request of requests || []) state.approvalRequests.set(String(request.requestId), request);
+  if (state.selectedThreadId !== threadId) return;
+  for (const card of ui.conversation.querySelectorAll(".approval-card")) card.remove();
+  for (const request of state.approvalRequests.values()) {
+    if (request.threadId === threadId) renderApprovalRequest(request);
+  }
+}
+
 function captureRenderedExecutionItems() {
   const captured = new Map();
   for (const [turnId, group] of state.executionGroups) {
@@ -1427,7 +1629,7 @@ async function loadOlderTurns() {
     if (state.selectedThreadId !== thread.id) return;
     ingestTurnMetrics(result.metrics);
     const selected = currentThread();
-    const turns = [...(result.thread.turns || []), ...(selected.turns || [])];
+    const turns = mergeTurnPages(result.thread.turns || [], selected.turns || []);
     updateThreadInState(project.id, {
       ...selected,
       turns,
@@ -1453,6 +1655,9 @@ function renderHistoryItem(item, { turnId = null, guide = false } = {}) {
   if (item.type === "userMessage") {
     const message = addMessage(item.id, guide ? "引导" : "你", userMessageText(item), guide ? "guide" : "user", messageTimestamp(item, turnId));
     if (turnId) message.root.dataset.turnId = turnId;
+    const clientId = userMessageClientId(item);
+    if (clientId) message.root.dataset.clientId = clientId;
+    else message.root.removeAttribute("data-client-id");
     if (item.clientPending) message.root.dataset.clientPending = "true";
     else message.root.removeAttribute("data-client-pending");
     placeTurnContent(turnId, message, { beforeExecution: !guide });
@@ -1470,6 +1675,12 @@ function renderHistoryItem(item, { turnId = null, guide = false } = {}) {
 function placeTurnContent(turnId, message, { beforeExecution = false } = {}) {
   const group = turnId ? state.executionGroups.get(turnId) : null;
   if (!message?.root) return;
+  if (turnId) message.root.dataset.turnId = turnId;
+  if (message.root.classList.contains("user")) {
+    if (group?.root?.parentNode === ui.conversation) group.root.before(message.root);
+    else if (message.root.parentNode !== ui.conversation) ui.conversation.append(message.root);
+    return;
+  }
   if (!group?.list) {
     const activity = turnId ? state.messageElements.get(turnActivityId(turnId)) : null;
     if (beforeExecution && activity?.root !== message.root && activity?.root?.parentNode === ui.conversation) {
@@ -1650,6 +1861,7 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
     entry.autoOpened = false;
   }
   updateExecutionGroup(group, turnStatus);
+  moveFinalMessagesToEnd(group);
   if (!state.renderingConversation) syncElapsedTimer();
   followNewContent();
 }
@@ -1781,8 +1993,29 @@ function ensureExecutionGroup(turnId, turnStatus, timing) {
   group = { turnId, root, count, status, list, items: new Map(), commandBatches: new Set(), activeCommandBatch: null, plan: null, turnStatus, timingSummary, totalValue, timingFields, copyProcess };
   mergeExecutionTiming(group, timing);
   state.executionGroups.set(turnId, group);
+  moveExistingTurnContentIntoExecutionGroup(group);
+  moveFinalMessagesToEnd(group);
   updateExecutionGroup(group, turnStatus);
   return group;
+}
+
+function moveExistingTurnContentIntoExecutionGroup(group) {
+  if (!group?.turnId || !group.list) return;
+  const roots = [...ui.conversation.children].filter((root) => (
+    root.dataset?.turnId === group.turnId
+      && root.parentNode === ui.conversation
+      && (root.classList.contains("message") || root.classList.contains("progress-message"))
+      && !root.classList.contains("user")
+  ));
+  for (const root of roots) group.list.append(root);
+}
+
+function moveFinalMessagesToEnd(group) {
+  if (!group?.list) return;
+  const messages = [...group.list.children].filter((root) => (
+    root.classList.contains("message") && root.classList.contains("assistant")
+  ));
+  for (const message of messages) group.list.append(message);
 }
 
 function renderTurnPlan(turnId, plan, turnStatus = "inProgress") {
@@ -1795,6 +2028,7 @@ function renderTurnPlan(turnId, plan, turnStatus = "inProgress") {
   } else {
     updateTurnPlanView(group.plan, plan);
   }
+  moveFinalMessagesToEnd(group);
   followNewContent();
 }
 
@@ -1953,10 +2187,78 @@ function showTurnActivity(turnId) {
     executionStatus(entry.item).tone === "running"
   ));
   if (currentRuntime().activeTurnId !== turnId || hasRunningItem || state.messageElements.has(turnActivityId(turnId))) return;
-  const message = addProgressMessage(turnActivityId(turnId), "Codex 处理中");
+  const message = addProgressMessage(turnActivityId(turnId), "正在生成");
   message.root.classList.add("running", "waiting");
-  setElapsedDisplay(message.body, "Codex 处理中", currentRuntime());
+  if (!message.action) {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "progress-message-action quiet-button";
+    action.textContent = "检查状态";
+    action.hidden = true;
+    action.addEventListener("click", () => void probeCurrentRuntime(turnId, action));
+    message.root.append(action);
+    message.action = action;
+  }
+  renderTurnActivityMessage(turnId, message);
   placeTurnContent(turnId, message);
+}
+
+function renderTurnActivityMessage(turnId, message) {
+  const runtime = currentRuntime();
+  if (!message || runtime.activeTurnId !== turnId) return;
+  const diagnostic = deriveRunDiagnostic({
+    runtime,
+    turnMetric: state.turnMetrics.get(turnId),
+    activeItems: [...(state.executionGroups.get(turnId)?.items.values() || [])].map((entry) => entry.item),
+    approvalRequests: [...state.approvalRequests.values()].filter((request) => request.threadId === state.selectedThreadId && request.turnId === turnId),
+    userInputRequests: [...state.userInputRequests.values()].filter((request) => request.threadId === state.selectedThreadId && request.turnId === turnId),
+  });
+  const silence = diagnostic.state === "unexplained";
+  const prefix = silence ? "无可观察活动" : diagnostic.label;
+  setElapsedDisplay(message.body, prefix, {
+    startedAt: silence ? diagnostic.observedAt : runtime.startedAt,
+    status: "running",
+  });
+  message.body.setAttribute("aria-label", diagnostic.label);
+  if (message.action) {
+    message.action.hidden = !silence;
+    message.action.disabled = state.runtimeProbes.has(state.selectedThreadId);
+    message.action.title = silence ? "读取一次 App Server 线程状态" : "当前无需核验";
+  }
+  message.root.classList.toggle("stale", silence);
+}
+
+async function probeCurrentRuntime(turnId, button) {
+  const thread = currentThread();
+  const project = currentProject();
+  if (!thread || !project || thread.id !== state.selectedThreadId || currentRuntime().activeTurnId !== turnId) return;
+  const existing = state.runtimeProbes.get(thread.id);
+  if (existing) return existing;
+  button.disabled = true;
+  const probe = (async () => {
+    try {
+      const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/runtime?projectId=${encodeURIComponent(project.id)}`, { timeoutMs: 7_000 });
+      updateThreadInState(project.id, { ...thread, runtime: result.runtime });
+      renderThreads();
+      renderRunStrip();
+      if (!isActiveThreadRuntime(result.runtime)) {
+        clearTurnActivity(turnId);
+        await reconcileInterruptedThread(thread.id);
+        showActivity("已核验：这个任务已经结束。", false);
+      } else {
+        showActivity("已核验：App Server 仍报告任务运行中。", false);
+        renderTurnActivityMessage(turnId, state.messageElements.get(turnActivityId(turnId)));
+      }
+    } catch (error) {
+      showActivity(`无法核验运行状态：${error.message}`, true);
+    } finally {
+      state.runtimeProbes.delete(thread.id);
+      const activity = state.messageElements.get(turnActivityId(turnId));
+      if (activity) renderTurnActivityMessage(turnId, activity);
+    }
+  })();
+  state.runtimeProbes.set(thread.id, probe);
+  return probe;
 }
 
 function scheduleTurnActivity(turnId, delay = 180) {
@@ -2126,9 +2428,14 @@ function renderEmptyConversation() {
 function addMessage(id, label, text, kind, timestamp = null) {
   if (state.messageElements.has(id)) {
     const entry = state.messageElements.get(id);
-    if (text !== undefined) renderMessageContent(entry, text);
-    setMessageTimestamp(entry, timestamp);
-    return entry;
+    if (entry.kind !== kind) {
+      entry.root.remove();
+      state.messageElements.delete(id);
+    } else {
+      if (text !== undefined) renderMessageContent(entry, text);
+      setMessageTimestamp(entry, timestamp);
+      return entry;
+    }
   }
   ui.conversation.querySelector(".empty-state")?.remove();
   const root = ui.messageTemplate.content.firstElementChild.cloneNode(true);
@@ -2233,10 +2540,14 @@ function setMessageTimestamp(entry, timestamp) {
 
 function addProgressMessage(id, text) {
   const existing = state.messageElements.get(id);
-  if (existing) {
+  if (existing?.kind === "progress") {
     existing.text = String(text || "");
     existing.body.textContent = existing.text;
     return existing;
+  }
+  if (existing) {
+    existing.root.remove();
+    state.messageElements.delete(id);
   }
   ui.conversation.querySelector(".empty-state")?.remove();
   const root = document.createElement("div");
@@ -2262,32 +2573,34 @@ function removeRenderedMessage(id) {
 
 function renderLiveUserMessage(item, turnId = null, guide = null) {
   const text = userMessageText(item);
+  const clientId = userMessageClientId(item);
+  const turn = turnId ? currentThread()?.turns?.find((candidate) => candidate.id === turnId) : null;
+  const itemIndex = turn?.items?.findIndex((candidate) => candidate.id === item.id) ?? -1;
+  const isGuide = guide ?? (itemIndex > 0 && turn.items.slice(0, itemIndex).some((candidate) => candidate.type === "userMessage"));
   const matching = [...state.messageElements].find(([, entry]) => (
     entry.root.matches?.(".message.user, .message.guide")
       && entry.root.dataset.turnId === turnId
-      && entry.rawText === text
-      && (item.clientPending
-        ? entry.root.dataset.clientPending !== "true"
-        : entry.root.dataset.clientPending === "true")
+      && (entry.root.dataset.clientId === clientId || state.messageElements.get(item.id) === entry)
   ));
   if (matching) {
     const [matchingId, entry] = matching;
-    setMessageTimestamp(entry, messageTimestamp(item, turnId));
-    const thread = currentThread();
-    const turn = thread?.turns?.find((candidate) => candidate.id === turnId);
-    if (matchingId === item.id) {
-      const stored = turn?.items?.find((candidate) => candidate.id === item.id);
-      if (stored) delete stored.clientPending;
-      entry.root.removeAttribute("data-client-pending");
-      renderMessageContent(entry, text);
-      return entry;
+    if (entry.kind !== (isGuide ? "guide" : "user")) {
+      removeRenderedMessage(matchingId);
+    } else {
+      setMessageTimestamp(entry, messageTimestamp(item, turnId));
+      if (matchingId === item.id) {
+        const stored = turn?.items?.find((candidate) => candidate.id === item.id);
+        if (stored) delete stored.clientPending;
+        entry.root.removeAttribute("data-client-pending");
+        if (clientId) entry.root.dataset.clientId = clientId;
+        renderMessageContent(entry, text);
+        return entry;
+      }
+      if (item.clientPending) return entry;
+      if (turn) turn.items = turn.items.filter((candidate) => candidate.id !== matchingId);
+      removeRenderedMessage(matchingId);
     }
-    if (turn) turn.items = turn.items.filter((candidate) => candidate.id !== (item.clientPending ? item.id : matchingId));
-    if (item.clientPending) return entry;
-    removeRenderedMessage(matchingId);
   }
-  const isGuide = guide ?? Boolean(turnId && [...ui.conversation.querySelectorAll(".message.user, .message.guide")]
-    .some((message) => message.dataset.turnId === turnId));
   return renderHistoryItem(item, { turnId, guide: isGuide });
 }
 
@@ -2473,6 +2786,13 @@ function openImagePreview(path, name = "", url = "") {
   if (!ui.imagePreviewDialog.open) ui.imagePreviewDialog.showModal();
 }
 
+function openMermaidPreview(svg) {
+  if (!svg || !ui.mermaidPreviewStage) return;
+  ui.mermaidPreviewName.textContent = "图表预览";
+  ui.mermaidPreviewStage.innerHTML = svg;
+  if (!ui.mermaidPreviewDialog.open) ui.mermaidPreviewDialog.showModal();
+}
+
 function fileCardContent(file, actionLabel) {
   const fragment = document.createDocumentFragment();
   const extension = document.createElement("span");
@@ -2621,7 +2941,7 @@ function renderQueue() {
     if (guiding) row.setAttribute("aria-busy", "true");
     if (guiding) queueIndex.replaceChildren(iconElement("guide"));
     if (guiding) row.querySelector(".queue-text").dataset.status = "正在转入信息流";
-    guideButton.disabled = !runtime.activeTurnId || guiding;
+    guideButton.disabled = !(runtime.activeTurnId && isActiveThreadStatus(runtime.status)) || guiding;
     guideButton.setAttribute("aria-busy", String(guiding));
     guideButton.title = runtimeIdentityPending ? "正在同步当前执行标识" : runtime.activeTurnId ? "转入当前信息流" : "当前没有运行中的任务";
     row.querySelector('[data-action="edit"]').disabled = guiding;
@@ -2644,12 +2964,12 @@ function updateComposer() {
   const runtime = currentRuntime();
   const active = isActiveThreadRuntime(runtime);
   const goalActive = isActiveGoal(currentThread()?.goal);
-  const activeTurnReady = Boolean(runtime.activeTurnId);
+  const activeTurnReady = Boolean(runtime.activeTurnId && isActiveThreadStatus(runtime.status));
   const hasInput = Boolean(ui.prompt.value.trim() || state.composerAttachments.length);
   const projectAvailable = currentProject()?.available !== false;
   const showStop = activeTurnReady && !hasInput && !state.materializingThread;
   const guideAvailable = hasThread && activeTurnReady;
-  if (state.mode === "guide" && !active) state.mode = "queue";
+  if (state.mode === "guide" && !activeTurnReady) state.mode = "queue";
   ui.guide.classList.toggle("active", state.mode === "guide");
   ui.queue.classList.toggle("active", state.mode === "queue");
   ui.guide.setAttribute("aria-checked", String(state.mode === "guide"));
@@ -2960,6 +3280,10 @@ async function submitPrompt(event) {
   event.preventDefault();
   const hasContent = Boolean(ui.prompt.value.trim() || state.composerAttachments.length);
   if (!hasContent || !currentProject() || state.materializingThread || state.submittingMessage || state.uploadingFiles) return;
+  const sourcePrompt = ui.prompt.value;
+  const attachments = [...state.composerAttachments];
+  ui.prompt.value = "";
+  resizePrompt();
   state.submittingMessage = true;
   updateComposer();
   scrollToLatest(false);
@@ -2968,20 +3292,15 @@ async function submitPrompt(event) {
     let project = currentProject();
     let thread = currentThread() || await createThread();
     if (!project || !thread) return;
-    const sourceThreadId = thread.id;
-    const sourcePrompt = ui.prompt.value;
-    const attachments = [...state.composerAttachments];
-    const mode = state.mode;
-    const activeTurnId = thread.runtime?.activeTurnId || null;
+    const runtime = thread.runtime || {};
+    const activeTurnId = isActiveThreadStatus(runtime.status) ? runtime.activeTurnId || null : null;
+    const selectedMode = ui.guide.getAttribute("aria-checked") === "true" ? "guide" : "queue";
+    const mode = selectedMode === "guide" && activeTurnId ? "guide" : "queue";
     let prompt = sourcePrompt;
     const goalCommand = goalShortcut(sourcePrompt);
     if (goalCommand) {
       if (attachments.length) throw new Error("目标不能包含附件；请在目标文字中引用项目里的文件路径。");
       await executeGoalCommand(goalCommand, project, thread);
-      if (ui.prompt.value === sourcePrompt) {
-        ui.prompt.value = "";
-        resizePrompt();
-      }
       return;
     }
     const shortcut = planShortcut(sourcePrompt);
@@ -2992,10 +3311,6 @@ async function submitPrompt(event) {
       if (!changed) return;
       prompt = shortcut.prompt;
       if (!prompt) {
-        if (state.selectedProjectId === project.id && state.selectedThreadId === sourceThreadId && ui.prompt.value === sourcePrompt) {
-          ui.prompt.value = "";
-          resizePrompt();
-        }
         showActivity(targetMode === "plan" ? "已进入规划模式。" : "已退出规划模式。", false);
         return;
       }
@@ -3009,26 +3324,25 @@ async function submitPrompt(event) {
     await waitForEventStream();
     await uploadComposerAttachments(project, thread, attachments);
     const text = messageWithAttachments(prompt, attachments.map((attachment) => attachment.uploaded).filter(Boolean));
-    if (mode === "guide") {
-      if (!activeTurnId) throw new Error("当前没有可引导的执行任务。");
+    const latestRuntime = currentThread()?.runtime || {};
+    const latestTurnId = isActiveThreadStatus(latestRuntime.status) ? latestRuntime.activeTurnId || null : null;
+    if (mode === "guide" && latestTurnId === activeTurnId && latestTurnId) {
       const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/steer`, { method: "POST", body: { projectId: project.id, expectedTurnId: activeTurnId, text } });
       acceptGuideMessage(thread.id, result.turnId, result.item);
       showActivity("引导已送达；正在运行的命令结束后会处理。", false);
     } else {
       const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue`, { method: "POST", body: { projectId: project.id, text } });
+      state.turnDiagnostics.set(thread.id, { submittedAt: Date.now(), textLength: text.length });
       applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
       renderQueue();
       renderThreads();
       renderRunStrip();
-      showActivity("任务已进入队列。", false);
+      showActivity("已发送 · 等待 Codex 开始执行…", false);
     }
     const sentAttachments = new Set(attachments);
     state.composerAttachments = state.composerAttachments.filter((attachment) => !sentAttachments.has(attachment));
     for (const attachment of attachments) if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
     renderComposerAttachments();
-    if (state.selectedProjectId === project.id && state.selectedThreadId === thread.id && ui.prompt.value === sourcePrompt) {
-      ui.prompt.value = "";
-    }
     resizePrompt();
   } catch (error) {
     showError(error);
@@ -3272,6 +3586,7 @@ async function stopCurrentTurn() {
   const thread = currentThread();
   if (!project || !thread || state.stoppingTurn) return;
   state.stoppingTurn = true;
+  state.mode = "queue";
   updateComposer();
   try {
     const activeTurnId = thread.runtime?.activeTurnId;
@@ -3464,7 +3779,8 @@ async function guideQueueItem(itemId) {
   const thread = currentThread();
   if (!project || !thread || state.queueGuiding.has(itemId)) return;
   const item = currentQueue().find((entry) => entry.id === itemId);
-  const activeTurnId = currentRuntime().activeTurnId;
+  const runtime = currentRuntime();
+  const activeTurnId = isActiveThreadStatus(runtime.status) ? runtime.activeTurnId : null;
   if (!item || !activeTurnId) {
     showActivity(item ? "当前任务已经结束，排队任务将按顺序执行。" : "该任务已经离开等待队列。", false);
     return;
@@ -3615,10 +3931,12 @@ function openEventStream() {
   markEventStreamActivity(stream);
   stream.addEventListener("open", () => {
     markEventStreamActivity(stream);
+    profileMark("eventStream", { event: "open" });
     reconcileEventStreamInterruption().catch(showError);
   });
   stream.addEventListener("error", () => {
     if (state.eventStream !== stream) return;
+    profileMark("eventStream", { event: "error", readyState: stream.readyState });
     if (!state.eventStreamInterrupted) invalidateCachedThreadHistories();
     state.eventStreamInterrupted = true;
   });
@@ -3626,6 +3944,7 @@ function openEventStream() {
   stream.addEventListener("server", (event) => {
     markEventStreamActivity(stream);
     const data = safeJson(event.data);
+    profileMark("serverEvent", { status: data?.status });
     applyCodexStatus(data);
     if (data?.status === "ready") scheduleResume(0);
   });
@@ -3633,6 +3952,7 @@ function openEventStream() {
     markEventStreamActivity(stream);
     const data = safeJson(event.data);
     const threadId = data?.params?.threadId;
+    profileMark("codexEventReceived", { method: data?.method, threadId });
     if (threadId) handleCodexEvent(threadId, data);
   });
   scheduleEventStreamWatchdog();
@@ -3668,12 +3988,28 @@ function ensureEventStream() {
 }
 
 function handleCodexEvent(threadId, event) {
+  const finishProfile = profileSpan("handleCodexEvent", { method: event?.method, threadId });
+  try {
+    return handleCodexEventImpl(threadId, event);
+  } finally {
+    finishProfile({ selected: state.selectedThreadId === threadId });
+  }
+}
+
+function handleCodexEventImpl(threadId, event) {
   if (!event) return;
   const params = event.params || {};
   const projectId = findProjectForThread(threadId);
   if (!projectId) return;
   let thread = findThread(projectId, threadId);
   if (!thread) return;
+  if (params.runtime) {
+    thread = updateThreadInState(projectId, { ...thread, runtime: params.runtime });
+  }
+  if (event.method === "thread/replaced") {
+    applyThreadReplacement(projectId, threadId, params);
+    return;
+  }
   if (event.method === "thread/goal/updated") {
     applyThreadGoal(threadId, params.goal);
     return;
@@ -3696,9 +4032,29 @@ function handleCodexEvent(threadId, event) {
     clearTurnActivity(params.turnId);
     return;
   }
+  if ([
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+  ].includes(event.method)) {
+    const request = { ...params, method: event.method, requestId: String(params.requestId) };
+    state.approvalRequests.set(request.requestId, request);
+    if (state.selectedThreadId === threadId) renderApprovalRequest(request);
+    clearTurnActivity(params.turnId);
+    return;
+  }
   if (event.method === "serverRequest/resolved") {
     removeUserInputRequest(params.requestId);
+    removeApprovalRequest(params.requestId);
     if (state.selectedThreadId === threadId && currentRuntime().activeTurnId === params.turnId) scheduleTurnActivity(params.turnId);
+    return;
+  }
+  if (event.method === "mcpServerStatusUpdated") {
+    renderThreads();
+    renderRunStrip();
+    if (state.selectedThreadId === threadId && params.status === "failed") {
+      showActivity(`${params.name || "MCP"} 启动失败：${params.error || "请检查配置。"}`, true);
+    }
     return;
   }
   if (event.method === "item/commandExecution/outputDelta") {
@@ -3745,6 +4101,7 @@ function handleCodexEvent(threadId, event) {
     });
     const changed = applyQueueSnapshot(threadId, params.queue, params.queueRevision);
     syncUserInputRequests(threadId, params.userInputRequests);
+    syncApprovalRequests(threadId, params.approvalRequests);
     for (const item of params.activeItems || []) {
       const turnId = item.turnId || runtime.activeTurnId;
       if (!turnId || !item.id) continue;
@@ -3767,6 +4124,13 @@ function handleCodexEvent(threadId, event) {
     const startedAt = timestampMilliseconds(params.turn?.startedAt);
     mergeTurnMetric(params.turn?.id, { startedAt });
     const runtime = params.runtime;
+    const diagnostic = state.turnDiagnostics.get(params.turn?.id) || state.turnDiagnostics.get(threadId);
+    if (diagnostic && !diagnostic.turnStartedAt) {
+      state.turnDiagnostics.delete(threadId);
+      state.turnDiagnostics.set(params.turn?.id, diagnostic);
+      diagnostic.turnStartedAt = Date.now();
+      showActivity(`已开始执行 · 等待首字（排队 ${Math.max(0, diagnostic.turnStartedAt - diagnostic.submittedAt)} ms）`, false);
+    }
     rememberThreadTurn(projectId, threadId, params.turn?.id, { ...params.turn, status: params.turn?.status || "inProgress" });
     updateThreadInState(projectId, { ...thread, runtime });
     if (state.selectedThreadId === threadId) {
@@ -3810,6 +4174,7 @@ function handleCodexEvent(threadId, event) {
     return;
   }
   if (event.method === "turn/completed") {
+    state.turnDiagnostics.delete(params.turn?.id);
     const completedAt = timestampMilliseconds(params.turn?.completedAt);
     mergeTurnMetric(params.turn?.id, {
       startedAt: params.turn?.startedAt,
@@ -3854,14 +4219,22 @@ function handleCodexEvent(threadId, event) {
   if (event.method === "turn/diff/updated") {
     const changes = unifiedDiffChanges(params.diff);
     if (!changes.length || !params.turnId) return;
-    const itemId = activeFileChangeItemId(projectId, threadId, params.turnId);
+    // A turn diff is a turn-level snapshot, not an item/fileChange lifecycle event.
+    // Keep it separate from real fileChange items so its snapshot cannot own their timer.
+    const itemId = `${params.turnId}:diff`;
     const current = rememberedThreadItem(projectId, threadId, params.turnId, itemId)
       || currentExecutionItem(params.turnId, itemId);
-    const item = fileChangeUpdateItem(current, {
-      itemId,
+    const snapshotAt = timestampMilliseconds(params.updatedAtMs)
+      || timestampMilliseconds(params.serverReceivedAt)
+      || Date.now();
+    const item = {
+      ...(current || {}),
+      id: itemId,
+      type: "fileChange",
       changes,
-      startedAtMs: timestampMilliseconds(current?.startedAt) || timestampMilliseconds(params.updatedAtMs) || Date.now(),
-    });
+      status: "completed",
+      completedAt: snapshotAt,
+    };
     mergeItemMetric(params.turnId, itemId, item);
     rememberThreadItem(projectId, threadId, params.turnId, item);
     if (state.selectedThreadId === threadId) upsertExecutionItem(params.turnId, item);
@@ -3870,6 +4243,7 @@ function handleCodexEvent(threadId, event) {
   if (event.method.startsWith("item/") && params.turnId) clearTurnActivity(params.turnId);
   if (event.method === "item/started") {
     const item = params.item || {};
+    if (deferQueuedUserMessage(threadId, params.turnId, item)) return;
     if (item.type === "contextCompaction") {
       state.compactingThreads.add(threadId);
       if (state.selectedThreadId === threadId) renderThreadActions();
@@ -3887,6 +4261,7 @@ function handleCodexEvent(threadId, event) {
     });
   } else if (event.method === "item/completed") {
     const item = params.item || {};
+    if (deferQueuedUserMessage(threadId, params.turnId, item)) return;
     if (item.type === "contextCompaction") {
       state.compactingThreads.delete(threadId);
       renderThreadActions();
@@ -3913,6 +4288,14 @@ function handleCodexEvent(threadId, event) {
     });
   }
   if (event.method === "item/agentMessage/delta") {
+    const diagnostic = state.turnDiagnostics.get(params.turnId);
+    if (diagnostic && !diagnostic.firstDeltaAt) {
+      diagnostic.firstDeltaAt = Date.now();
+      const transportMs = Number.isFinite(Number(params.serverReceivedAt))
+        ? Math.max(0, diagnostic.firstDeltaAt - Number(params.serverReceivedAt)) : null;
+      const transportText = transportMs === null ? "" : `，服务端到界面 ${transportMs} ms`;
+      showActivity(`已收到首字 · 发送到首字 ${Math.max(0, diagnostic.firstDeltaAt - diagnostic.submittedAt)} ms${transportText}`, false);
+    }
     const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
       || { id: params.itemId, type: "agentMessage", phase: "commentary", text: "", status: "inProgress" };
     const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, text: `${current.text || ""}${params.delta || ""}` });
@@ -3975,7 +4358,7 @@ function handleCodexEvent(threadId, event) {
     if (params.item?.type === "userMessage") renderLiveUserMessage(params.item, params.turnId);
     else if (isExecutionItem(params.item)) upsertExecutionItem(params.turnId, { ...params.item, ...timing, status: params.item?.status || "inProgress" });
   } else if (event.method === "error") {
-    if (state.selectedThreadId === threadId) showActivity(params.message || "Codex 返回错误。", true);
+    if (state.selectedThreadId === threadId) showActivity(params.error?.message || params.message || "Codex 返回错误。", true);
   }
   if (state.selectedThreadId !== threadId) return;
   const completedFinalMessage = event.method === "item/completed"
@@ -4023,6 +4406,28 @@ function updateThreadInState(projectId, updated) {
   return stored;
 }
 
+function applyThreadReplacement(projectId, oldThreadId, params) {
+  const replacement = params.replacementThread;
+  if (!replacement?.id) return;
+  const threads = state.threads.get(projectId) || [];
+  const oldThread = threads.find((thread) => thread.id === oldThreadId) || {};
+  const nextThread = { ...oldThread, ...replacement };
+  state.threads.set(projectId, [
+    nextThread,
+    ...threads.filter((thread) => thread.id !== oldThreadId && thread.id !== replacement.id),
+  ]);
+  const wasSelected = state.selectedThreadId === oldThreadId;
+  forgetClientThread(oldThreadId);
+  applyQueueSnapshot(replacement.id, params.queue || [], params.queueRevision ?? 0);
+  if (wasSelected) state.selectedThreadId = replacement.id;
+  renderThreads();
+  renderRunStrip();
+  if (wasSelected) {
+    renderCurrentThread();
+    showActivity("原聊天记录已丢失；排队消息已迁移到新的聊天并继续执行。", false);
+  }
+}
+
 function rememberThreadTurn(projectId, threadId, turnId, patch = {}) {
   if (!turnId) return null;
   const thread = findThread(projectId, threadId);
@@ -4046,6 +4451,12 @@ function rememberThreadItem(projectId, threadId, turnId, item) {
   if (!item?.id) return null;
   const turn = rememberThreadTurn(projectId, threadId, turnId);
   if (!turn) return null;
+  if (item.type === "userMessage") {
+    turn.items = mergeTurnItems(turn.items, [item]);
+    const clientId = userMessageClientId(item);
+    return turn.items.find((entry) => entry.id === item.id
+      || (clientId && userMessageClientId(entry) === clientId)) || null;
+  }
   let stored = turn.items.find((entry) => entry.id === item.id);
   if (!stored) {
     stored = { ...item };
@@ -4062,12 +4473,6 @@ function rememberedThreadItem(projectId, threadId, turnId, itemId) {
     ?.find((item) => item.id === itemId) || null;
 }
 
-function activeFileChangeItemId(projectId, threadId, turnId) {
-  const items = findThread(projectId, threadId)?.turns?.find((turn) => turn.id === turnId)?.items || [];
-  const active = [...items].reverse().find((item) => item?.type === "fileChange" && executionStatus(item).tone === "running");
-  return active?.id || `${turnId}:diff`;
-}
-
 function applyQueueSnapshot(threadId, queue, queueRevision) {
   const revision = Number.isInteger(queueRevision) && queueRevision >= 0 ? queueRevision : null;
   const previous = state.queueSnapshots.get(threadId);
@@ -4076,6 +4481,7 @@ function applyQueueSnapshot(threadId, queue, queueRevision) {
   }
   const next = Array.isArray(queue) ? queue : [];
   state.queueSnapshots.set(threadId, { queue: next, revision });
+  flushPendingQueueMessages(threadId);
   if (state.selectedThreadId === threadId && state.editingQueueItemId && !next.some((item) => item.id === state.editingQueueItemId)) {
     state.editingQueueItemId = null;
     if (ui.queueEditDialog.open) ui.queueEditDialog.close();
@@ -4096,9 +4502,9 @@ async function saveSettings(overrides = {}, { quiet = false } = {}) {
     : currentSettings.model || selectedModelForThread(thread)?.id || null;
   const model = state.models.find((entry) => entry.id === modelId);
   const efforts = model?.supportedReasoningEfforts || [];
-  const tiers = model?.serviceTiers || [];
   const effortValue = Object.hasOwn(overrides, "effort") ? overrides.effort : currentSettings.effort;
   const tierValue = Object.hasOwn(overrides, "serviceTier") ? overrides.serviceTier : currentSettings.serviceTier;
+  const tiers = visibleServiceTiers(model?.serviceTiers, tierValue);
   const effort = efforts.some((entry) => entry.reasoningEffort === effortValue) ? effortValue : (model?.defaultReasoningEffort || efforts[0]?.reasoningEffort);
   const serviceTier = tiers.some((entry) => entry.id === tierValue) ? tierValue : "";
   const settings = {
@@ -4144,7 +4550,12 @@ async function refreshWorkspace({ quiet = false } = {}) {
       applyCodexStatus(status);
       await loadProjects();
       if (state.codexReady) {
-        await Promise.all([loadModels(), loadCollaborationModes(), loadAccountRateLimits(), refreshAllThreads()]);
+        await Promise.all([
+          loadModels(),
+          loadCollaborationModes(),
+          loadAccountRateLimits(),
+          refreshAllThreads({ foregroundProjectId: state.selectedProjectId }),
+        ]);
       }
       const projectId = state.projects.some((project) => project.id === rememberedProjectId) ? rememberedProjectId : state.projects[0]?.id;
       if (projectId && selectionId === state.threadSelectionId) {
@@ -4190,8 +4601,11 @@ async function restoreSelectionAfterRefresh(projectId, rememberedThreadId, previ
       state.selectedThreadId = target.id;
       renderThreads();
       ensureEventStream();
-      renderCurrentThread({ messages: false });
-      return;
+      return selectThread(target.id, {
+        closeNavigation: false,
+        preserveFollowLatest: true,
+        mergeHistory: true,
+      });
     }
     return selectThread(target.id, {
       closeNavigation: false,
@@ -4566,6 +4980,10 @@ function applyCodexStatus(status) {
     : codexState === "login_required" ? (error || "Codex CLI 尚未登录")
       : codexState === "starting" ? "正在连接本机 Codex"
         : error || (codexState === "failed" ? "本机 Codex 连接失败" : "本机 Codex 连接中断");
+  if (codexState !== "ready") {
+    state.approvalRequests.clear();
+    for (const card of ui.conversation.querySelectorAll(".approval-card")) card.remove();
+  }
   setServerStatus(codexState === "ready", text);
   if (state.codexStatusTimer) clearTimeout(state.codexStatusTimer);
   state.codexStatusTimer = null;
@@ -4848,10 +5266,16 @@ async function setUserActive(user, active) {
 }
 
 function forgetClientThread(threadId) {
+  for (const [itemId, pending] of state.pendingQueueMessages) {
+    if (pending.threadId === threadId) state.pendingQueueMessages.delete(itemId);
+  }
   state.queueSnapshots.delete(threadId);
   state.threadTokenUsage.delete(threadId);
   for (const [requestId, request] of state.userInputRequests) {
     if (request.threadId === threadId) state.userInputRequests.delete(requestId);
+  }
+  for (const [requestId, request] of state.approvalRequests) {
+    if (request.threadId === threadId) state.approvalRequests.delete(requestId);
   }
 }
 
@@ -4888,6 +5312,8 @@ function safeJson(value) {
 
 async function api(path, options = {}) {
   const method = options.method || "GET";
+  const finishProfile = profileSpan("api", { path, method });
+  let profileStatus = "completed";
   const headers = {};
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort();
@@ -4907,12 +5333,14 @@ async function api(path, options = {}) {
     if (!response.ok) throw new Error(body.error || `请求失败（${response.status}）`);
     return body;
   } catch (error) {
+    profileStatus = error?.name === "AbortError" ? "aborted" : "error";
     if (error?.name === "AbortError" && options.signal?.aborted) throw error;
     if (error?.name === "AbortError") throw new Error("请求超时，请检查连接后重试。");
     throw error;
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener("abort", abortFromCaller);
+    finishProfile({ status: profileStatus });
   }
 }
 
@@ -5057,6 +5485,12 @@ ui.imagePreviewDialog.addEventListener("close", () => {
 });
 ui.imagePreviewDialog.addEventListener("click", (event) => {
   if (event.target === ui.imagePreviewDialog) ui.imagePreviewDialog.close();
+});
+document.addEventListener("markdown-mermaid-open", (event) => openMermaidPreview(event.detail?.svg));
+ui.closeMermaidPreview.addEventListener("click", () => ui.mermaidPreviewDialog.close());
+ui.mermaidPreviewDialog.addEventListener("close", () => ui.mermaidPreviewStage.replaceChildren());
+ui.mermaidPreviewDialog.addEventListener("click", (event) => {
+  if (event.target === ui.mermaidPreviewDialog) ui.mermaidPreviewDialog.close();
 });
 ui.closeVisualization.addEventListener("click", () => ui.visualizationDialog.close());
 ui.visualizationDialog.addEventListener("close", () => {

@@ -51,6 +51,12 @@
 .markdown-code-block figcaption { border-bottom: 1px solid #d9e4ef; padding: 6px 11px; color: #63748a; background: #edf3f9; font-family: Consolas, "Cascadia Mono", monospace; font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .markdown-code-block pre { margin: 0; overflow-x: auto; padding: 14px; }
 .markdown-code-block code { padding: 0; color: var(--text-code); background: transparent; font-size: 12px; line-height: 1.65; white-space: pre; }
+.markdown-mermaid-block { margin: 1.15em 0; overflow: auto; border: 1px solid #c9d8e8; border-radius: 9px; padding: 18px; background: #fff; color: #142d4f; text-align: center; }
+.markdown-mermaid-stage { min-height: 24px; color: var(--muted); }
+.markdown-mermaid-stage.is-ready { cursor: zoom-in; }
+.markdown-mermaid-stage:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -3px; }
+.markdown-mermaid-stage svg { display: block; width: 100%; max-width: 100%; height: auto; margin: 0 auto; }
+.markdown-mermaid-error, .markdown-mermaid-unavailable { color: #8a3f4a; font-family: Consolas, "Cascadia Mono", monospace; text-align: left; white-space: pre-wrap; }
 .markdown-preview-table-wrap { width: 100%; margin: 1.2em 0; overflow-x: auto; border: 1px solid #d3deeb; border-radius: 8px; }
 .markdown-preview-table-wrap table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.5; }
 .markdown-preview-table-wrap th, .markdown-preview-table-wrap td { min-width: 90px; max-width: 360px; border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); padding: 9px 11px; text-align: left; vertical-align: top; }
@@ -76,6 +82,15 @@
 .image-preview-header .icon-button { color: var(--muted); background: transparent; }
 .image-preview-stage { display: grid; min-height: 0; place-items: center; overflow: auto; padding: 16px; background: var(--surface-subtle); }
 .image-preview-stage img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+.mermaid-preview-dialog { width: min(1500px, calc(100vw - 24px)); max-width: calc(100vw - 24px); height: min(1000px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); overflow: hidden; border: 0; border-radius: 18px; padding: 0; color: var(--ink); background: var(--surface); box-shadow: 0 24px 80px #10213d45; }
+.mermaid-preview-dialog::backdrop { background: #10213d55; backdrop-filter: blur(4px); }
+.mermaid-preview-shell { display: grid; height: 100%; grid-template-rows: auto minmax(0, 1fr); }
+.mermaid-preview-header { display: flex; z-index: 1; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); padding: 12px 14px 11px 18px; background: var(--surface); box-shadow: 0 5px 18px #16345e0a; }
+.mermaid-preview-heading { min-width: 0; }
+.mermaid-preview-heading > span { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.mermaid-preview-heading h2 { margin: 2px 0; color: var(--ink); font-size: 16px; }
+.mermaid-preview-stage { min-height: 0; overflow: auto; padding: 24px; background: var(--surface-subtle); overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.mermaid-preview-stage svg { display: block; width: max(100%, 1200px); max-width: none; height: auto; margin: 0 auto; }
 .visualization-dialog { width: min(940px, calc(100vw - 28px)); max-width: calc(100vw - 28px); height: min(860px, calc(100dvh - 28px)); max-height: calc(100dvh - 28px); overflow: hidden; border: 1px solid #cbd7e5; border-radius: 16px; padding: 0; color: var(--ink); background: #f3f6fa; box-shadow: 0 24px 72px #10213d38; }
 .visualization-dialog.wide { width: min(1180px, calc(100vw - 28px)); }
 .visualization-dialog::backdrop { background: #14243d70; backdrop-filter: blur(5px); }

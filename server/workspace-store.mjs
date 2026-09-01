@@ -1,10 +1,16 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { deflateSync, inflateSync } from "node:zlib";
 import { commandExecutionSnapshot } from "../public/execution-events.js";
 import { turnPlanSnapshot } from "../public/plan.js";
+
+let DatabaseSync = null;
+try {
+  ({ DatabaseSync } = await import("node:sqlite"));
+} catch {}
 
 export const LEGACY_SESSION_COOKIE = "codex_workspace_session";
 export const SESSION_MAX_AGE_SECONDS = 90 * 24 * 60 * 60;
@@ -12,6 +18,8 @@ const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 export const SESSION_TIMER_MAX_MS = 2_147_000_000;
 const MAX_LOGIN_ATTEMPTS = 2_000;
 const LOGIN_ATTEMPT_RETENTION_MS = 10 * 60_000;
+const MAX_TURN_METRICS_PER_THREAD = 24;
+const MAX_TOTAL_TURN_METRICS = 600;
 const STATE_VERSION = 13;
 const V9_STATE_FIELDS = ["version", "projects", "queues", "queueRevisions", "threadSettings", "turnMetrics", "users", "threadOwners", "sessions", "legacyProjectIds"];
 const scryptAsync = promisify(scrypt);
@@ -122,9 +130,12 @@ function activeStoredSessions(sessions) {
 }
 
 export class WorkspaceStore {
-  constructor({ dataRoot, stateFile, workspace }) {
+  constructor({ dataRoot, stateFile, workspace, legacyJsonMirror = true }) {
     this.dataRoot = dataRoot;
     this.stateFile = stateFile;
+    this.sqliteFile = join(dataRoot, "workspace-state.sqlite");
+    this.legacyJsonMirror = legacyJsonMirror;
+    this.database = null;
     this.workspace = workspace;
     this.projects = [];
     this.queues = {};
@@ -135,29 +146,81 @@ export class WorkspaceStore {
     this.threadProjects = {};
     this.threadAccesses = {};
     this.sessions = {};
-    this.persistence = Promise.resolve();
+    this.persistence = null;
+    this.persistenceRequestedRevision = 0;
+    this.persistenceCompletedRevision = 0;
+    this.persistenceWaiters = [];
     this.ready = this.load();
   }
 
   async load() {
     await mkdir(this.dataRoot, { recursive: true });
-    try {
-      const state = await migrateWorkspaceState(JSON.parse(await readFile(this.stateFile, "utf8")));
+    this.openDatabase();
+    let state = null;
+    let stateError = null;
+    if (!state && this.database) {
+      try {
+        state = await this.loadDatabaseState();
+      } catch (error) {
+        process.stderr.write(`[data] SQLite 工作区状态无法读取：${error.message}\n`);
+      }
+    }
+    if (!state) {
+      try {
+        state = await migrateWorkspaceState(JSON.parse(await readFile(this.stateFile, "utf8")));
+      } catch (error) {
+        if (error.code !== "ENOENT") stateError = error;
+      }
+    }
+    if (!state && stateError) {
+      const quarantined = await quarantineStateFile(this.stateFile);
+      process.stderr.write(`[data] 工作区状态文件无法读取，已移至 ${quarantined}：${stateError.message}\n`);
+    }
+    if (state) {
+      await repairMemberProjectPaths(state.projects, state.users, this.workspace);
       this.projects = state.projects;
       this.queues = state.queues;
       this.queueRevisions = state.queueRevisions;
       this.threadSettings = state.threadSettings;
-      this.turnMetrics = state.turnMetrics;
+      this.turnMetrics = pruneStoredTurnMetrics(state.turnMetrics);
       this.users = state.users;
       this.threadProjects = state.threadProjects;
       this.threadAccesses = state.threadAccesses;
       this.sessions = state.sessions;
-      await repairMemberProjectPaths(this.projects, this.users, this.workspace);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
     }
 
     await this.persist();
+  }
+
+  openDatabase() {
+    if (!DatabaseSync || this.database) return;
+    try {
+      this.database = new DatabaseSync(this.sqliteFile);
+      this.database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS turn_metrics (thread_id TEXT PRIMARY KEY, value BLOB NOT NULL);");
+    } catch (error) {
+      this.database = null;
+      process.stderr.write(`[data] SQLite 不可用，将继续使用 JSON：${error.message}\n`);
+    }
+  }
+
+  async loadDatabaseState() {
+    if (!this.database) return null;
+    try {
+      const rows = this.database.prepare("SELECT key, value FROM state WHERE key <> 'turnMetrics'").all();
+      if (!rows.length) return null;
+      const input = {};
+      for (const row of rows) input[row.key] = JSON.parse(row.value);
+      const metricRows = this.database.prepare("SELECT thread_id, value FROM turn_metrics").all();
+      input.turnMetrics = Object.fromEntries(metricRows.map((row) => [row.thread_id, JSON.parse(inflateSync(row.value).toString("utf8"))]));
+      if (!metricRows.length) {
+        const legacyMetrics = this.database.prepare("SELECT value FROM state WHERE key = 'turnMetrics'").get();
+        if (legacyMetrics) input.turnMetrics = JSON.parse(legacyMetrics.value);
+      }
+      return migrateWorkspaceState(input);
+    } finally {
+      this.database.close();
+      this.database = null;
+    }
   }
 
   async listProjects(ownerId) {
@@ -427,6 +490,40 @@ export class WorkspaceStore {
     return structuredClone(this.threadSettings[threadId]);
   }
 
+  async replaceMissingThread(oldThreadId, newThreadId, projectId) {
+    await this.ready;
+    if (oldThreadId === newThreadId) throw httpError(409, "替代聊天不能使用原聊天编号。");
+    if (this.threadProjects[oldThreadId] !== projectId) throw httpError(404, "待恢复聊天不存在或不属于当前项目。");
+    if (Object.hasOwn(this.threadProjects, newThreadId)) throw httpError(409, "替代聊天已经绑定到项目。");
+
+    const queue = this.queues[oldThreadId] || [];
+    if (!queue.length) throw httpError(409, "待恢复聊天已经没有排队任务。");
+    const settings = this.threadSettings[oldThreadId];
+    const revision = (this.queueRevisions[oldThreadId] || 0) + 1;
+
+    this.threadProjects[newThreadId] = projectId;
+    this.queues[newThreadId] = queue;
+    this.queueRevisions[newThreadId] = revision;
+    if (settings) this.threadSettings[newThreadId] = settings;
+    for (const accesses of Object.values(this.threadAccesses)) {
+      if (!Object.hasOwn(accesses, oldThreadId)) continue;
+      accesses[newThreadId] = accesses[oldThreadId];
+      delete accesses[oldThreadId];
+    }
+
+    delete this.threadProjects[oldThreadId];
+    delete this.queues[oldThreadId];
+    delete this.queueRevisions[oldThreadId];
+    delete this.threadSettings[oldThreadId];
+    delete this.turnMetrics[oldThreadId];
+    await this.persist();
+    return {
+      queue: structuredClone(queue),
+      queueRevision: revision,
+      settings: structuredClone(settings || {}),
+    };
+  }
+
   async getTurnMetrics(threadId, turnIds = null) {
     await this.ready;
     const metrics = this.turnMetrics[threadId] || {};
@@ -475,7 +572,8 @@ export class WorkspaceStore {
     const metrics = this.turnMetrics[threadId];
     if (!metrics) return;
     const turnIds = Object.keys(metrics);
-    for (const turnId of turnIds.slice(0, Math.max(0, turnIds.length - 80))) delete metrics[turnId];
+    for (const turnId of turnIds.slice(0, Math.max(0, turnIds.length - MAX_TURN_METRICS_PER_THREAD))) delete metrics[turnId];
+    pruneStoredTurnMetrics(this.turnMetrics);
   }
 
   async removeThread(threadId) {
@@ -592,25 +690,99 @@ export class WorkspaceStore {
   }
 
   async persist() {
-    const contents = `${JSON.stringify({
-      version: STATE_VERSION,
-      projects: this.projects,
-      queues: this.queues,
-      queueRevisions: this.queueRevisions,
-      threadSettings: this.threadSettings,
-      turnMetrics: this.turnMetrics,
-      users: this.users,
-      threadProjects: this.threadProjects,
-      threadAccesses: this.threadAccesses,
-      sessions: this.sessions,
-    }, null, 2)}\n`;
-    const save = async () => {
-      const temporary = `${this.stateFile}.${process.pid}.${randomUUID()}.tmp`;
-      await writeFile(temporary, contents, "utf8");
-      await rename(temporary, this.stateFile);
-    };
-    this.persistence = this.persistence.then(save, save);
-    await this.persistence;
+    const revision = ++this.persistenceRequestedRevision;
+    const completion = new Promise((resolve, reject) => {
+      this.persistenceWaiters.push({ revision, resolve, reject });
+    });
+    this.startPersistence();
+    await completion;
+  }
+
+  startPersistence() {
+    if (this.persistence) return;
+    this.persistence = this.flushPersistence().catch(() => {}).finally(() => {
+      this.persistence = null;
+      if (this.persistenceCompletedRevision < this.persistenceRequestedRevision) this.startPersistence();
+    });
+  }
+
+  async flushPersistence() {
+    while (this.persistenceCompletedRevision < this.persistenceRequestedRevision) {
+      const revision = this.persistenceRequestedRevision;
+      const temporary = this.legacyJsonMirror ? `${this.stateFile}.${process.pid}.${randomUUID()}.tmp` : null;
+      try {
+        const snapshot = {
+          version: STATE_VERSION,
+          projects: this.projects,
+          queues: this.queues,
+          queueRevisions: this.queueRevisions,
+          threadSettings: this.threadSettings,
+          turnMetrics: this.turnMetrics,
+          users: this.users,
+          threadProjects: this.threadProjects,
+          threadAccesses: this.threadAccesses,
+          sessions: this.sessions,
+        };
+        this.persistDatabase(snapshot);
+        if (this.legacyJsonMirror) {
+          const contents = `${JSON.stringify(snapshot)}\n`;
+          await writeFile(temporary, contents, "utf8");
+          await rename(temporary, this.stateFile);
+        }
+        this.persistenceCompletedRevision = revision;
+        this.settlePersistenceWaiters(revision);
+      } catch (error) {
+        if (temporary) await rm(temporary, { force: true }).catch(() => {});
+        this.persistenceCompletedRevision = revision;
+        this.settlePersistenceWaiters(revision, error);
+        throw error;
+      }
+    }
+  }
+
+  persistDatabase(snapshot) {
+    this.openDatabase();
+    if (!this.database) return;
+    const write = this.database.prepare("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+    try {
+      this.database.exec("BEGIN IMMEDIATE");
+      for (const [key, value] of Object.entries(snapshot)) {
+        if (key === "turnMetrics") continue;
+        write.run(key, JSON.stringify(value));
+      }
+      const metricRows = this.database.prepare("INSERT INTO turn_metrics (thread_id, value) VALUES (?, ?) ON CONFLICT(thread_id) DO UPDATE SET value=excluded.value");
+      const metricThreadIds = Object.keys(snapshot.turnMetrics || {});
+      for (const [threadId, metrics] of Object.entries(snapshot.turnMetrics || {})) {
+        metricRows.run(threadId, deflateSync(JSON.stringify(metrics)));
+      }
+      if (metricThreadIds.length) {
+        this.database.prepare(`DELETE FROM turn_metrics WHERE thread_id NOT IN (${metricThreadIds.map(() => "?").join(",")})`).run(...metricThreadIds);
+      } else {
+        this.database.exec("DELETE FROM turn_metrics");
+      }
+      this.database.prepare("DELETE FROM state WHERE key = 'turnMetrics'").run();
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.close();
+      this.database = null;
+    }
+  }
+
+  settlePersistenceWaiters(revision, error = null) {
+    const pending = [];
+    for (const waiter of this.persistenceWaiters) {
+      if (waiter.revision > revision) {
+        pending.push(waiter);
+      } else if (error) {
+        waiter.reject(error);
+      } else {
+        waiter.resolve();
+      }
+    }
+    this.persistenceWaiters = pending;
   }
 }
 
@@ -924,6 +1096,14 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+async function quarantineStateFile(stateFile) {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  let target = `${stateFile}.corrupt-${stamp}`;
+  if (existsSync(target)) target = `${target}-${randomUUID()}`;
+  await rename(stateFile, target);
+  return target;
+}
+
 function isStoredQueueItem(item) {
   if (!isRecord(item)
     || !hasOnlyFields(item, ["id", "projectId", "text", "createdAt", "updatedAt"])
@@ -1033,6 +1213,41 @@ function cleanStoredTurnMetrics(value) {
     if (Object.keys(cleanedTurns).length) stored[threadId] = cleanedTurns;
   }
   return stored;
+}
+
+export function pruneStoredTurnMetrics(value, {
+  maxTurnsPerThread = MAX_TURN_METRICS_PER_THREAD,
+  maxTotalTurns = MAX_TOTAL_TURN_METRICS,
+} = {}) {
+  if (!value || typeof value !== "object") return {};
+  const turns = [];
+  let sequence = 0;
+  for (const [threadId, metrics] of Object.entries(value)) {
+    if (!metrics || typeof metrics !== "object") {
+      delete value[threadId];
+      continue;
+    }
+    const turnIds = Object.keys(metrics);
+    for (const turnId of turnIds.slice(0, Math.max(0, turnIds.length - maxTurnsPerThread))) delete metrics[turnId];
+    for (const [turnId, metric] of Object.entries(metrics)) {
+      const completedAt = Number(metric?.completedAt);
+      const startedAt = Number(metric?.startedAt);
+      turns.push({
+        threadId,
+        turnId,
+        timestamp: Number.isFinite(completedAt) ? completedAt : Number.isFinite(startedAt) ? startedAt : 0,
+        sequence: sequence++,
+      });
+    }
+    if (!Object.keys(metrics).length) delete value[threadId];
+  }
+  if (turns.length <= maxTotalTurns) return value;
+  turns.sort((left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence);
+  for (const { threadId, turnId } of turns.slice(0, turns.length - maxTotalTurns)) {
+    delete value[threadId]?.[turnId];
+    if (value[threadId] && !Object.keys(value[threadId]).length) delete value[threadId];
+  }
+  return value;
 }
 
 export function mergeSettings(existing = {}, update = {}) {

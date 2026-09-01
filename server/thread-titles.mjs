@@ -2,8 +2,10 @@ const TITLE_TIMEOUT_MS = 45_000;
 const MAX_TITLE_LENGTH = 100;
 const MAX_TRANSCRIPT_LENGTH = 8_000;
 const MAX_MANUAL_TRANSCRIPT_TURNS = 6;
-const TITLE_MODEL = "gpt-5.6-luna";
+const FALLBACK_TITLE_MODEL = "gpt-5.6-terra";
 const TITLE_REASONING_EFFORT = "low";
+const TITLE_MODEL_CACHE_MS = 30 * 60_000;
+const TITLE_FAILURE_COOLDOWN_MS = 60_000;
 
 const TITLE_OUTPUT_SCHEMA = {
   type: "object",
@@ -16,6 +18,8 @@ const TITLE_OUTPUT_SCHEMA = {
 
 export function createThreadTitleService({ codex }) {
   const jobs = new Map();
+  const failedUntil = new Map();
+  let titleModelCache = { expiresAt: 0, model: null };
 
   async function suggest({ cwd, turns, settings, latest = false }) {
     const transcript = titleTranscript(turns, { latest });
@@ -29,10 +33,20 @@ export function createThreadTitleService({ codex }) {
 
   function schedule({ threadId, cwd, turns, legacyTurns = turns, settings }) {
     if (jobs.has(threadId)) return jobs.get(threadId);
+    if ((failedUntil.get(threadId) || 0) > Date.now()) return Promise.resolve(null);
+    failedUntil.delete(threadId);
     const transcript = titleTranscript(turns);
     if (!transcript) return Promise.resolve(null);
     const legacyName = legacyFirstMessageName(legacyTurns);
     const job = generate({ threadId, cwd, transcript, legacyName, settings })
+      .then((title) => {
+        failedUntil.delete(threadId);
+        return title;
+      })
+      .catch((error) => {
+        failedUntil.set(threadId, Date.now() + TITLE_FAILURE_COOLDOWN_MS);
+        throw error;
+      })
       .finally(() => jobs.delete(threadId));
     jobs.set(threadId, job);
     return job;
@@ -50,21 +64,29 @@ export function createThreadTitleService({ codex }) {
   }
 
   async function requestTitle({ cwd, transcript, settings }) {
+    const titleModel = (await resolveTitleModels(settings))[0];
+    if (!titleModel) throw new Error("没有可用于自动命名的模型。");
+    const title = await requestTitleAttempt({ cwd, transcript, settings, titleModel, effort: TITLE_REASONING_EFFORT });
+    if (!title) throw new Error("标题生成结果为空。");
+    return title;
+  }
+
+  async function requestTitleAttempt({ cwd, transcript, settings, titleModel, effort }) {
     let helperThreadId;
     let collector;
     try {
       const titleCollaborationMode = {
         mode: "default",
         settings: {
-          model: TITLE_MODEL,
-          reasoning_effort: TITLE_REASONING_EFFORT,
+          model: titleModel,
+          ...(effort ? { reasoning_effort: effort } : {}),
           developer_instructions: null,
         },
       };
       const helper = await codex.request("thread/start", {
         cwd,
         ephemeral: true,
-        model: TITLE_MODEL,
+        model: titleModel,
         config: { model_reasoning_summary: "none" },
         ...(settings?.serviceTier ? { serviceTier: settings.serviceTier } : {}),
       });
@@ -74,14 +96,12 @@ export function createThreadTitleService({ codex }) {
         threadId: helperThreadId,
         input: [{ type: "text", text: titlePrompt(transcript) }],
         outputSchema: TITLE_OUTPUT_SCHEMA,
-        effort: TITLE_REASONING_EFFORT,
+        ...(effort ? { effort } : {}),
         summary: "none",
         collaborationMode: titleCollaborationMode,
         ...(settings?.serviceTier ? { serviceTier: settings.serviceTier } : {}),
       });
-      const title = normalizeGeneratedTitle(await collector.promise);
-      if (!title) throw new Error("标题生成结果为空。");
-      return title;
+      return normalizeGeneratedTitle(await collector.promise);
     } finally {
       collector?.cancel();
       if (helperThreadId) {
@@ -90,7 +110,39 @@ export function createThreadTitleService({ codex }) {
     }
   }
 
+  async function resolveTitleModels(settings) {
+    if (titleModelCache.expiresAt > Date.now() && titleModelCache.model) return titleModelCache.model;
+    let models = [];
+    try {
+      const result = await codex.request("model/list", { includeHidden: true });
+      models = Array.isArray(result?.data) ? result.data : [];
+    } catch {}
+    const model = selectTitleModels(models, settings);
+    titleModelCache = { expiresAt: Date.now() + TITLE_MODEL_CACHE_MS, model };
+    return model;
+  }
+
   return { schedule, suggest };
+}
+
+export function isMiniModel(modelId) {
+  return typeof modelId === "string" && /(?:^|[-_.])mini(?:$|[-_.])/i.test(modelId);
+}
+
+export function selectTitleModel(models, settings = {}) {
+  return selectTitleModels(models, settings)[0];
+}
+
+export function selectTitleModels(models, settings = {}) {
+  const available = Array.isArray(models) ? models.filter((model) => typeof model?.id === "string" && model.id) : [];
+  const ids = [];
+  const add = (id) => { if (typeof id === "string" && id && !ids.includes(id)) ids.push(id); };
+  // Terra is the preferred low-cost title model when this provider exposes it.
+  add(available.find((model) => model.id === FALLBACK_TITLE_MODEL)?.id);
+  add(settings?.model);
+  add(available.find((model) => model.isDefault)?.id);
+  add(available[0]?.id);
+  return ids;
 }
 
 export function titleTranscript(turns, { latest = false } = {}) {

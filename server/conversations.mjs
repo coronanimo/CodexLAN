@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandExecutionSnapshot, commandOutputTail, executionItemText } from "../public/execution-events.js";
@@ -7,8 +8,9 @@ import { timestampMilliseconds } from "../public/elapsed-time.js";
 import { isActiveThreadStatus } from "../public/workspace.js";
 import { turnPlanSnapshot } from "../public/plan.js";
 import { isActiveGoal } from "../public/goal.js";
+import { activityFromNotification, mergeRuntimeActivity } from "../public/run-diagnostics.js";
 import { json, readJson, validateId, validateText } from "./http.mjs";
-import { createThreadTitleService, shouldGenerateThreadTitle } from "./thread-titles.mjs";
+import { createThreadTitleService, isMiniModel, shouldGenerateThreadTitle } from "./thread-titles.mjs";
 import {
   SESSION_TIMER_MAX_MS,
   cleanSettings,
@@ -21,8 +23,22 @@ const COMMAND_OUTPUT_FLUSH_DELAY = 100;
 const MAX_LIVE_COMMAND_OUTPUT = 16 * 1024;
 const MAX_HISTORY_TOOL_DETAIL = 16 * 1024;
 const MAX_VISUALIZATION_BYTES = 5 * 1024 * 1024;
+const MAX_EVENT_STREAM_BUFFER = 1024 * 1024;
+const MODEL_CACHE_TTL_MS = 30 * 60_000;
+const MODEL_FAILURE_RETRY_MS = 60_000;
+const FALLBACK_MODEL_ID = "gpt-5.6-terra";
+const FALLBACK_REASONING_EFFORT = "low";
+const FALLBACK_MODEL = {
+  id: FALLBACK_MODEL_ID,
+  displayName: "GPT-5.6 Terra",
+  hidden: false,
+  isDefault: true,
+  defaultReasoningEffort: FALLBACK_REASONING_EFFORT,
+  supportedReasoningEfforts: [{ reasoningEffort: FALLBACK_REASONING_EFFORT }],
+  serviceTiers: [],
+};
 
-export function createConversations({ store, codex }) {
+export function createConversations({ store, codex, autoApprove = false }) {
   const threadTitles = createThreadTitleService({ codex });
   const eventClients = new Set();
   const commandOutputBatches = new Map();
@@ -35,6 +51,7 @@ export function createConversations({ store, codex }) {
   const effectiveThreadNames = new Map();
   const resolvedLegacyThreadNames = new Set();
   const userInputRequests = new Map();
+  const approvalRequests = new Map();
   const MAX_THREAD_TOKEN_USAGE = 300;
   const DEFAULT_REASONING_SUMMARY = "detailed";
   const REASONING_SUMMARIES = new Set(["auto", "concise", "detailed", "none"]);
@@ -43,16 +60,27 @@ export function createConversations({ store, codex }) {
   const DEFAULT_HISTORY_PAGE_SIZE = 12;
   const MAX_HISTORY_PAGE_SIZE = 40;
   let modelCache = { expiresAt: 0, data: [] };
+  let modelRefreshPromise = null;
   let collaborationModeCache = { expiresAt: 0, data: [] };
   let accountRateLimitsCache = { expiresAt: 0, data: null };
   codex.events.on("notification", (message) => {
     if (message.method === "account/rateLimits/updated") accountRateLimitsCache.expiresAt = 0;
-    if (message.method === "serverRequest/resolved") userInputRequests.delete(String(message.params?.requestId));
+    if (message.method === "serverRequest/resolved") {
+      const requestId = String(message.params?.requestId ?? "");
+      userInputRequests.delete(requestId);
+      const threadId = message.params?.threadId;
+      if (threadId) approvalRequests.delete(threadId + ":" + requestId);
+    }
     const threadId = message.params?.threadId;
     if (!threadId) return;
     if (message.method === "item/commandExecution/outputDelta") {
       queueCommandOutput(message);
       return;
+    }
+    if (message.method === "turn/started") {
+      logTurnTiming(message.params?.threadId, "turn/started-notification", null, {
+        turnId: message.params?.turn?.id || message.params?.turnId || null,
+      });
     }
     flushCommandOutputBatches(threadId);
     dispatchCodexNotification(message);
@@ -68,6 +96,35 @@ export function createConversations({ store, codex }) {
   });
 
   async function handleServerRequest(message) {
+    if ([
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+      "item/permissions/requestApproval",
+    ].includes(message.method)) {
+      await store.ready;
+      const params = message.params || {};
+      const threadId = validateId(params.threadId, "threadId");
+      const requestId = String(message.id);
+      const projectId = store.threadProjects[threadId];
+      if (!projectId) throw new Error("Codex 审批来自未登记的聊天。");
+      if (autoApprove) {
+        codex.respond(message.id, approvalResponse({ method: message.method, params }, "acceptForSession"));
+        return;
+      }
+      const key = threadId + ":" + requestId;
+      if (approvalRequests.has(key)) throw new Error("Codex 审批编号重复。");
+      approvalRequests.set(key, {
+        requestId,
+        codexRequestId: message.id,
+        threadId,
+        turnId: params.turnId || null,
+        itemId: params.itemId || null,
+        method: message.method,
+        params,
+      });
+      broadcast(threadId, { method: message.method, params: { ...params, requestId } });
+      return;
+    }
     if (message.method !== "item/tool/requestUserInput") {
       codex.respondError(message.id, -32601, `CodexLAN 尚未实现客户端请求 ${message.method}。`);
       return;
@@ -182,6 +239,7 @@ export function createConversations({ store, codex }) {
         activeTurnId: message.params.turn?.id,
         status: "running",
         startedAt: timestampMilliseconds(message.params.turn?.startedAt) || Date.now(),
+        activity: activityFromNotification(message.method, message.params, receivedAt),
       });
     }
     if (message.method === "turn/completed") {
@@ -192,10 +250,26 @@ export function createConversations({ store, codex }) {
       });
     }
     if (message.method === "thread/status/changed") {
-      runtime = updateThreadRuntime(threadId, { projectId, status: message.params.status });
+      runtime = updateThreadRuntime(threadId, {
+        projectId,
+        status: message.params.status,
+        activity: mergeRuntimeActivity(
+          threadState.get(threadId)?.activity,
+          activityFromNotification(message.method, message.params, receivedAt),
+        ),
+      });
       if (!isActiveThreadStatus(message.params.status)) void advanceQueue(threadId);
     }
-    if (["turn/started", "turn/completed", "thread/status/changed"].includes(message.method)) {
+    if (!runtime && threadState.has(threadId)) {
+      runtime = updateThreadRuntime(threadId, {
+        projectId,
+        activity: mergeRuntimeActivity(
+          threadState.get(threadId)?.activity,
+          activityFromNotification(message.method, message.params, receivedAt),
+        ),
+      });
+    }
+    if (runtime) {
       message = { ...message, params: { ...message.params, runtime } };
     }
     broadcast(threadId, compactNotification(message));
@@ -207,6 +281,7 @@ export function createConversations({ store, codex }) {
   
   codex.events.on("offline", (details) => {
     userInputRequests.clear();
+    approvalRequests.clear();
     broadcastServer({ status: codex.state, ...details });
   });
   
@@ -244,12 +319,7 @@ export function createConversations({ store, codex }) {
       const requestedName = typeof body.name === "string" && body.name.trim()
         ? body.name.trim().slice(0, 100)
         : null;
-      const params = { cwd: project.path, config: { model_reasoning_summary: settings.summary || DEFAULT_REASONING_SUMMARY } };
-      if (settings.model) params.model = settings.model;
-      if (settings.serviceTier) params.serviceTier = settings.serviceTier;
-      const collaborationMode = await collaborationModeForSettings(settings);
-      if (collaborationMode) params.collaborationMode = collaborationMode;
-      const result = await codex.request("thread/start", params);
+      const result = await startCodexThread(project, settings);
       codex.markThreadLoaded(result.thread.id);
       if (requestedName) {
         await codex.request("thread/name/set", { threadId: result.thread.id, name: requestedName });
@@ -320,6 +390,32 @@ export function createConversations({ store, codex }) {
       }
     });
 
+    application.get("/api/threads/:threadId/runtime", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = validateId(request.params.threadId, "threadId");
+      const project = await projectFromQuery(request.codexUrl, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      const result = await codex.request("thread/read", { threadId, includeTurns: false }, { timeoutMs: 5_000 });
+      const thread = result?.thread || {};
+      const activeTurn = activeTurnFromThread(thread);
+      const active = isActiveThreadStatus(thread.status);
+      const previous = threadState.get(threadId);
+      const runtime = updateThreadRuntime(threadId, {
+        projectId: project.id,
+        status: thread.status || "idle",
+        activeTurnId: activeTurn?.id || (active ? previous?.activeTurnId || null : null),
+        ...(activeTurn ? { startedAt: timestampMilliseconds(activeTurn.startedAt) || Date.now() } : {}),
+        ...(active && previous?.activity ? { activity: previous.activity } : {}),
+      });
+      if (!active) void advanceQueue(threadId);
+      json(response, 200, {
+        threadId,
+        runtime,
+        status: thread.status || { type: "idle" },
+        probedAt: new Date().toISOString(),
+      });
+    });
+
     application.get("/api/threads/:threadId/visualization", async (request, response) => {
       const user = request.identity.user;
       const threadId = validateId(request.params.threadId, "threadId");
@@ -354,7 +450,7 @@ export function createConversations({ store, codex }) {
       }
       if (Object.hasOwn(body, "settings")) {
         settings = await validateSettings(mergeSettings(await store.getThreadSettings(request.params.threadId), body.settings));
-        await codex.ensureLoaded(request.params.threadId, project);
+        await ensureThreadLoaded(request.params.threadId, project, settings);
         await codex.request("thread/settings/update", {
           threadId: request.params.threadId,
           collaborationMode: await collaborationModeForSettings(settings),
@@ -372,7 +468,7 @@ export function createConversations({ store, codex }) {
       const body = await readJson(request);
       const project = await store.getProject(body.projectId, user.id);
       await store.requireThreadOwner(threadId, user.id, project.id);
-      await codex.ensureLoaded(threadId, project);
+      await ensureThreadLoaded(threadId, project);
       const thread = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
       const settings = await validateSettings(await store.getThreadSettings(threadId, project.settings));
       const name = await threadTitles.suggest({
@@ -447,6 +543,7 @@ export function createConversations({ store, codex }) {
       const project = await store.getProject(body.projectId, user.id);
       await store.requireThreadOwner(request.params.threadId, user.id, project.id);
       const item = await store.enqueue(request.params.threadId, project.id, validateText(body.text));
+      logTurnTiming(request.params.threadId, "queue-received", null, { itemId: item.id });
       broadcastQueue(request.params.threadId);
       void advanceQueue(request.params.threadId);
       json(response, 202, { item, ...await store.getQueueSnapshot(request.params.threadId) });
@@ -500,7 +597,7 @@ export function createConversations({ store, codex }) {
       const body = await readJson(request);
       const project = await store.getProject(body.projectId, user.id);
       await store.requireThreadOwner(threadId, user.id, project.id);
-      await codex.ensureLoaded(threadId, project);
+      await ensureThreadLoaded(threadId, project);
       const text = validateText(body.text);
       const messageId = randomUUID();
       const result = await codex.request("turn/steer", {
@@ -511,7 +608,7 @@ export function createConversations({ store, codex }) {
       }, { timeoutMs: 10_000 });
       json(response, 202, {
         turnId: result.turnId || body.expectedTurnId,
-        item: { id: messageId, type: "userMessage", content: [{ type: "text", text }], clientPending: true },
+        item: { id: messageId, clientId: messageId, type: "userMessage", content: [{ type: "text", text }], clientPending: true },
       });
     });
   
@@ -554,7 +651,7 @@ export function createConversations({ store, codex }) {
       const body = await readJson(request);
       const project = await store.getProject(body.projectId, user.id);
       await store.requireThreadOwner(threadId, user.id, project.id);
-      const loaded = await codex.ensureLoaded(threadId, project);
+      const loaded = await ensureThreadLoaded(threadId, project);
       const runtime = threadState.get(threadId);
       const activeTurn = activeTurnFromThread(loaded?.thread);
       if (runtime?.activeTurnId || isActiveThreadStatus(runtime?.status) || activeTurn) {
@@ -583,6 +680,22 @@ export function createConversations({ store, codex }) {
       }
       json(response, 200, { ok: true });
     });
+
+    application.post("/api/threads/:threadId/approval/:requestId", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = validateId(request.params.threadId, "threadId");
+      const requestId = String(request.params.requestId || "");
+      if (!requestId || requestId.length > 200) throw httpError(400, "requestId 无效。");
+      const body = await readJson(request);
+      const project = await store.getProject(body.projectId, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      const key = threadId + ":" + requestId;
+      const pending = approvalRequests.get(key);
+      if (!pending) throw httpError(409, "这个审批请求已经结束。");
+      codex.respond(pending.codexRequestId, approvalResponse(pending, body.decision));
+      approvalRequests.delete(key);
+      json(response, 200, { ok: true });
+    });
   
     application.get("/api/events", (request, response) => {
       return openEventStream(response, request.identity);
@@ -591,9 +704,25 @@ export function createConversations({ store, codex }) {
   
   async function listModels() {
     if (modelCache.expiresAt > Date.now()) return modelCache.data;
-    const result = await codex.request("model/list", {});
-    modelCache = { expiresAt: Date.now() + 30_000, data: result.data.filter((model) => !model.hidden) };
-    return modelCache.data;
+    if (modelRefreshPromise) return modelRefreshPromise;
+    modelRefreshPromise = (async () => {
+      try {
+        const result = await codex.request("model/list", { includeHidden: true }, { timeoutMs: 15_000 });
+        const data = (result?.data || []).filter((model) => !model.hidden || isMiniModel(model.id));
+        if (!data.length) throw new Error("Codex App Server 返回了空模型目录。");
+        modelCache = { expiresAt: Date.now() + MODEL_CACHE_TTL_MS, data };
+        return data;
+      } catch (error) {
+        const usingFallback = !modelCache.data.length;
+        const data = usingFallback ? [FALLBACK_MODEL] : modelCache.data;
+        modelCache = { expiresAt: Date.now() + MODEL_FAILURE_RETRY_MS, data };
+        process.stderr.write(`[web] 模型目录刷新失败，暂时使用${usingFallback ? " Terra Low" : "缓存"}：${error.message}\n`);
+        return data;
+      } finally {
+        modelRefreshPromise = null;
+      }
+    })();
+    return modelRefreshPromise;
   }
   
   async function readAccountRateLimits() {
@@ -725,7 +854,15 @@ export function createConversations({ store, codex }) {
       throw httpError(400, "当前 Codex 不支持所选协作模式。");
     }
     if (!requested.model) return requested;
-    const model = (await listModels()).find((entry) => entry.id === requested.model);
+    if (!modelCache.data.length) {
+      // A model selected by the client does not need a catalog round-trip to
+      // create a new thread. Validate against the catalog when it is cached,
+      // while allowing compatible providers without model/list support to
+      // start immediately.
+      void listModels();
+      return requested;
+    }
+    const model = (await modelsForSettings()).find((entry) => entry.id === requested.model);
     if (!model) throw httpError(400, "所选模型当前不可用。");
     if (requested.effort && !(model.supportedReasoningEfforts || []).some((entry) => entry.reasoningEffort === requested.effort)) {
       throw httpError(400, "该模型不支持所选推理深度。");
@@ -789,20 +926,104 @@ export function createConversations({ store, codex }) {
       settings,
     });
   }
+
+  async function effectiveResumeSettings(threadId, project, requestedSettings = null) {
+    const settings = cleanSettings(requestedSettings
+      || await store.getThreadSettings(threadId, project.settings));
+    if (settings.model && !modelCache.data.length) {
+      // A configured model can be sent directly. Do not delay turn/start on
+      // a catalog refresh that may be unsupported by a compatible provider.
+      void listModels();
+      return settings;
+    }
+    const resolved = resolveModelSettings(settings, await modelsForSettings());
+    if (resolved.changed) await store.setThreadSettings(threadId, resolved.settings);
+    return resolved.settings;
+  }
+
+  async function modelsForSettings() {
+    return modelCache.data.length ? modelCache.data : listModels();
+  }
+
+  async function ensureThreadLoaded(threadId, project, requestedSettings = null) {
+    const settings = await effectiveResumeSettings(threadId, project, requestedSettings);
+    return codex.ensureLoaded(threadId, project, settings);
+  }
+
+  async function startCodexThread(project, settings) {
+    const params = {
+      cwd: project.path,
+      config: { model_reasoning_summary: settings.summary || DEFAULT_REASONING_SUMMARY },
+    };
+    if (settings.model) params.model = settings.model;
+    if (settings.serviceTier) params.serviceTier = settings.serviceTier;
+    params.collaborationMode = await collaborationModeForSettings(settings);
+    return codex.request("thread/start", params);
+  }
+
+  async function replaceMissingQueuedThread(oldThreadId, project, settings) {
+    const result = await startCodexThread(project, settings);
+    const newThreadId = validateId(result?.thread?.id, "替代 threadId");
+    codex.markThreadLoaded(newThreadId);
+    let migrated;
+    try {
+      migrated = await store.replaceMissingThread(oldThreadId, newThreadId, project.id);
+    } catch (error) {
+      codex.loadedThreads.delete(newThreadId);
+      await codex.request("thread/delete", { threadId: newThreadId }, { timeoutMs: 10_000 }).catch(() => {});
+      throw error;
+    }
+
+    const cachedName = effectiveThreadNames.get(oldThreadId);
+    if (cachedName) {
+      await codex.request("thread/name/set", { threadId: newThreadId, name: cachedName }).catch(() => {});
+      effectiveThreadNames.set(newThreadId, cachedName);
+    }
+    effectiveThreadNames.delete(oldThreadId);
+    resolvedLegacyThreadNames.delete(oldThreadId);
+    forgetThreadRuntime(oldThreadId);
+
+    const thread = {
+      ...result.thread,
+      ...(cachedName ? { name: cachedName } : {}),
+      settings: migrated.settings,
+      queueCount: migrated.queue.length,
+      queueRevision: migrated.queueRevision,
+      runtime: { projectId: project.id, activeTurnId: null, status: "idle" },
+    };
+    broadcastOwner(project.ownerId, {
+      method: "thread/replaced",
+      params: {
+        threadId: oldThreadId,
+        replacementThread: thread,
+        queue: migrated.queue,
+        queueRevision: migrated.queueRevision,
+      },
+    });
+    process.stderr.write(`[web] 聊天 rollout 已丢失，已将队列迁移到替代聊天 (${oldThreadId} -> ${newThreadId})。\n`);
+    return newThreadId;
+  }
   
   async function advanceQueue(threadId) {
     if (queueAdvances.has(threadId)) return queueAdvances.get(threadId);
     const runner = (async () => {
+      const timingStarted = performance.now();
+      logTurnTiming(threadId, "queue-advance-start", timingStarted);
       const next = (await store.listQueue(threadId))[0];
       if (!next || queueSteerJobs.has(`${threadId}:${next.id}`)) return;
       const project = await store.getProject(next.projectId);
       await store.requireThreadOwner(threadId, project.ownerId, project.id);
+      let settings;
       try {
-        const resumed = await codex.ensureLoaded(threadId, project);
+        settings = await effectiveResumeSettings(threadId, project);
+        logTurnTiming(threadId, "settings-resolved", timingStarted, { model: settings.model || null });
+        const resumed = await codex.ensureLoaded(threadId, project, settings);
+        logTurnTiming(threadId, "thread-resume-complete", timingStarted);
         const goal = threadGoals.has(threadId) ? threadGoals.get(threadId) : await readThreadGoal(threadId);
         if (isActiveGoal(goal)) return;
         const canonicalThread = resumed?.thread
           || (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
+        logTurnTiming(threadId, "thread-state-ready", timingStarted);
         const activeTurn = activeTurnFromThread(canonicalThread);
         if (activeTurn || isActiveThreadStatus(canonicalThread?.status)) {
           updateThreadRuntime(threadId, {
@@ -814,7 +1035,6 @@ export function createConversations({ store, codex }) {
           return;
         }
         updateThreadRuntime(threadId, { projectId: project.id, status: canonicalThread?.status || "idle" });
-        const settings = await validateSettings(await store.getThreadSettings(threadId, project.settings));
         const params = {
           threadId,
           clientUserMessageId: next.id,
@@ -826,6 +1046,7 @@ export function createConversations({ store, codex }) {
         params.summary = settings.summary || DEFAULT_REASONING_SUMMARY;
         params.collaborationMode = await collaborationModeForSettings(settings);
         const result = await codex.request("turn/start", params);
+        logTurnTiming(threadId, "turn-start-response", timingStarted, { turnId: result.turn.id });
         updateThreadRuntime(threadId, {
           projectId: project.id,
           activeTurnId: result.turn.id,
@@ -852,6 +1073,16 @@ export function createConversations({ store, codex }) {
         await store.completeQueueItem(threadId, next.id);
         broadcastQueue(threadId);
       } catch (error) {
+        if (isMissingRolloutError(error)) {
+          try {
+            const replacementThreadId = await replaceMissingQueuedThread(threadId, project, settings || {});
+            await advanceQueue(replacementThreadId);
+          } catch (recoveryError) {
+            process.stderr.write(`[web] 丢失聊天的队列恢复失败 (${threadId})：${recoveryError.message}\n`);
+            broadcastOwner(project.ownerId, { method: "queue/error", params: { threadId, message: recoveryError.message } });
+          }
+          return;
+        }
         process.stderr.write(`[web] 队列启动失败 (${threadId})：${error.message}\n`);
         broadcast(threadId, { method: "queue/error", params: { threadId, message: error.message } });
       }
@@ -874,7 +1105,7 @@ export function createConversations({ store, codex }) {
       if (runtime?.activeTurnId && runtime.activeTurnId !== expectedTurnId) {
         throw httpError(409, "当前执行任务已经变化，请刷新后重试。");
       }
-      await codex.ensureLoaded(threadId, project);
+      await ensureThreadLoaded(threadId, project);
       await codex.request("turn/steer", {
         threadId,
         clientUserMessageId: item.id,
@@ -887,7 +1118,7 @@ export function createConversations({ store, codex }) {
       return {
         ...snapshot,
         turnId: expectedTurnId,
-        item: { id: item.id, type: "userMessage", content: [{ type: "text", text: item.text }], clientPending: true },
+        item: { id: item.id, clientId: item.id, type: "userMessage", content: [{ type: "text", text: item.text }], clientPending: true },
       };
     })();
     queueSteerJobs.set(key, job);
@@ -904,7 +1135,7 @@ export function createConversations({ store, codex }) {
     process.stderr.write(`[web] 正在恢复 ${threadIds.length} 个聊天的持久化队列。\n`);
     await Promise.all(threadIds.map((threadId) => advanceQueue(threadId)));
   }
-  
+
   function updateThreadRuntime(threadId, patch) {
     const next = { ...(threadState.get(threadId) || {}), ...patch };
     if (Object.hasOwn(patch, "status")) {
@@ -920,6 +1151,17 @@ export function createConversations({ store, codex }) {
       threadState.set(threadId, next);
     }
     return next;
+  }
+
+  function logTurnTiming(threadId, phase, startedAt, details = {}) {
+    if (!threadId) return;
+    const elapsedMs = typeof startedAt === "number" ? Math.round(performance.now() - startedAt) : null;
+    const fields = [`threadId=${threadId}`, `phase=${phase}`];
+    if (elapsedMs !== null) fields.push(`elapsedMs=${elapsedMs}`);
+    for (const [key, value] of Object.entries(details)) {
+      if (value !== null && value !== undefined && value !== "") fields.push(`${key}=${String(value)}`);
+    }
+    process.stderr.write(`[timing] ${new Date().toISOString()} ${fields.join(" ")}\n`);
   }
   
   function projectHasActiveThread(projectId) {
@@ -963,7 +1205,7 @@ export function createConversations({ store, codex }) {
   }
   
   function timestampCodexNotification(message, receivedAt) {
-    const params = { ...(message.params || {}) };
+    const params = { ...(message.params || {}), serverReceivedAt: receivedAt };
     if (message.method === "turn/started") {
       params.turn = { ...(params.turn || {}), startedAt: timestampMilliseconds(params.turn?.startedAt) || receivedAt };
     } else if (message.method === "turn/completed") {
@@ -984,6 +1226,25 @@ export function createConversations({ store, codex }) {
     const params = message.params || {};
     const threadId = params.threadId;
     if (!threadId) return;
+    if (message.method === "item/commandExecution/outputDelta") {
+      const turnId = params.turnId;
+      const itemId = params.itemId || params.item?.id;
+      const output = commandOutputTails.get(commandOutputKey(params));
+      if (!turnId || !itemId || !output) return;
+      const storedMetrics = await store.getTurnMetrics(threadId, [turnId]);
+      const current = storedMetrics?.[turnId]?.items?.[itemId]?.snapshot || {};
+      await store.recordItemMetric(threadId, turnId, itemId, {
+        type: "commandExecution",
+        snapshot: {
+          ...current,
+          id: itemId,
+          type: "commandExecution",
+          aggregatedOutput: output.text,
+          ...(output.truncated ? { outputTruncated: true } : {}),
+        },
+      });
+      return;
+    }
     if (message.method === "turn/started") {
       await store.recordTurnMetric(threadId, params.turn?.id, {
         startedAt: timestampMilliseconds(params.turn?.startedAt),
@@ -1044,14 +1305,39 @@ export function createConversations({ store, codex }) {
     if (!ownerId) return;
     for (const client of eventClients) {
       if (client.userId !== ownerId) continue;
-      client.response.write(`event: ${eventName}\ndata: ${JSON.stringify(message)}\n\n`);
+      writeEvent(client, `event: ${eventName}\ndata: ${JSON.stringify(message)}\n\n`);
     }
   }
 
   function broadcastServer(message) {
     for (const client of eventClients) {
-      client.response.write(`event: server\ndata: ${JSON.stringify(message)}\n\n`);
+      writeEvent(client, `event: server\ndata: ${JSON.stringify(message)}\n\n`);
     }
+  }
+
+  function broadcastOwner(ownerId, message, eventName = "codex") {
+    for (const client of eventClients) {
+      if (client.userId !== ownerId) continue;
+      writeEvent(client, `event: ${eventName}\ndata: ${JSON.stringify(message)}\n\n`);
+    }
+  }
+
+  function writeEvent(client, payload) {
+    const { response } = client;
+    if (response.writableEnded || response.destroyed) {
+      eventClients.delete(client);
+      return false;
+    }
+    if (response.writableLength >= MAX_EVENT_STREAM_BUFFER) {
+      eventClients.delete(client);
+      response.destroy();
+      return false;
+    }
+    response.write(payload);
+    if (response.writableLength < MAX_EVENT_STREAM_BUFFER) return true;
+    eventClients.delete(client);
+    response.destroy();
+    return false;
   }
 
   function publicUserInputRequest(request) {
@@ -1062,6 +1348,14 @@ export function createConversations({ store, codex }) {
       itemId: request.itemId,
       autoResolutionMs: request.autoResolutionMs,
       questions: request.questions,
+    };
+  }
+
+  function publicApprovalRequest(request) {
+    return {
+      ...request.params,
+      requestId: request.requestId,
+      method: request.method,
     };
   }
   
@@ -1080,13 +1374,13 @@ export function createConversations({ store, codex }) {
       () => response.end(),
       Math.max(1, Math.min(SESSION_TIMER_MAX_MS, identity.session.expiresAt - Date.now())),
     );
-    response.write(`event: server\ndata: ${JSON.stringify({ status: codex.state })}\n\n`);
-    void sendInitialWorkspaceState(response, user.id).catch((error) => {
+    writeEvent(client, `event: server\ndata: ${JSON.stringify({ status: codex.state })}\n\n`);
+    void sendInitialWorkspaceState(client, user.id).catch((error) => {
       process.stderr.write(`[web] 无法同步实时工作区状态：${error.message}\n`);
     });
     const heartbeat = setInterval(() => {
       if (!response.writableEnded && !response.destroyed) {
-        response.write(`event: heartbeat\ndata: ${Date.now()}\n\n`);
+        writeEvent(client, `event: heartbeat\ndata: ${Date.now()}\n\n`);
       }
     }, 25_000);
     response.on("close", () => {
@@ -1096,7 +1390,8 @@ export function createConversations({ store, codex }) {
     });
   }
 
-  async function sendInitialWorkspaceState(response, userId) {
+  async function sendInitialWorkspaceState(client, userId) {
+    const { response } = client;
     const threadIds = new Set([
       ...threadState.keys(),
       ...threadGoals.keys(),
@@ -1111,7 +1406,7 @@ export function createConversations({ store, codex }) {
       if (response.writableEnded || response.destroyed) return;
       const runtime = threadState.get(threadId) || null;
       const activeTurn = metrics?.[runtime?.activeTurnId];
-      response.write(`event: codex\ndata: ${JSON.stringify({
+      if (!writeEvent(client, `event: codex\ndata: ${JSON.stringify({
         method: "workspace/state",
         params: {
           threadId,
@@ -1123,8 +1418,11 @@ export function createConversations({ store, codex }) {
           userInputRequests: [...userInputRequests.values()]
             .filter((entry) => entry.threadId === threadId)
             .map(publicUserInputRequest),
+          approvalRequests: [...approvalRequests.values()]
+            .filter((entry) => entry.threadId === threadId)
+            .map(publicApprovalRequest),
         },
-      })}\n\n`);
+      })}\n\n`)) return;
     }
   }
   
@@ -1135,21 +1433,64 @@ export function createConversations({ store, codex }) {
   }
   
   async function loadThreadPage(threadId, searchParams) {
-    const result = await codex.request("thread/read", { threadId, includeTurns: true });
-    const allTurns = result.thread.turns || [];
-    const history = paginateTurns(allTurns, searchParams);
-    return {
-      thread: { ...result.thread, turns: history.turns.map(compactHistoryTurn) },
-      history,
-      allTurns,
-    };
+    const limit = historyPageLimit(searchParams);
+    const cursor = searchParams.get("before");
+    try {
+      const [metadata, page] = await Promise.all([
+        codex.request("thread/read", { threadId, includeTurns: false }),
+        codex.request("thread/turns/list", {
+          threadId,
+          limit,
+          sortDirection: "desc",
+          itemsView: "full",
+          ...(cursor ? { cursor } : {}),
+        }),
+      ]);
+      const turns = (Array.isArray(page?.data) ? page.data : [])
+        .slice()
+        .reverse()
+        .map(compactHistoryTurn);
+      return {
+        thread: { ...metadata.thread, turns },
+        history: {
+          turns,
+          hasMore: Boolean(page?.nextCursor),
+          before: page?.nextCursor || null,
+          totalTurns: null,
+        },
+        allTurns: turns,
+      };
+    } catch (error) {
+      if (!isUnsupportedTurnsListError(error)) throw error;
+      const result = await codex.request("thread/read", { threadId, includeTurns: true });
+      const allTurns = result.thread.turns || [];
+      const history = paginateTurns(allTurns, searchParams);
+      return {
+        thread: { ...result.thread, turns: history.turns.map(compactHistoryTurn) },
+        history,
+        allTurns,
+      };
+    }
   }
-  
-  function paginateTurns(turns, searchParams) {
+
+  function historyPageLimit(searchParams) {
     const rawLimit = Number(searchParams.get("limit") || DEFAULT_HISTORY_PAGE_SIZE);
     if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_HISTORY_PAGE_SIZE) {
       throw httpError(400, `聊天历史每页数量必须是 1 到 ${MAX_HISTORY_PAGE_SIZE}。`);
     }
+    return rawLimit;
+  }
+
+  function isUnsupportedTurnsListError(error) {
+    const message = String(error?.message || "").toLowerCase();
+    return message.includes("unknown method thread/turns/list")
+      || message.includes("thread/turns/list is not supported")
+      || message.includes("method not found")
+      || (message.includes("thread/turns/list") && (message.includes("unsupported") || message.includes("unavailable")));
+  }
+
+  function paginateTurns(turns, searchParams) {
+    const rawLimit = historyPageLimit(searchParams);
     const before = searchParams.get("before");
     let end = turns.length;
     if (before) {
@@ -1170,6 +1511,23 @@ export function createConversations({ store, codex }) {
     const item = compactHistoryItem(message.params?.item);
     if (item === message.params?.item) return message;
     return { ...message, params: { ...message.params, item } };
+  }
+
+  function approvalResponse(request, value) {
+    if (request.method === "item/permissions/requestApproval") {
+      if (value === "accept" || value === "acceptForSession") {
+        return {
+          permissions: request.params.permissions || {},
+          scope: value === "acceptForSession" ? "session" : "turn",
+        };
+      }
+      if (value === "decline" || value === "cancel") return { permissions: {} };
+      throw httpError(400, "权限审批决定无效。");
+    }
+    if (typeof value === "string" && ["accept", "acceptForSession", "decline", "cancel"].includes(value)) return { decision: value };
+    if (value && typeof value === "object" && Object.hasOwn(value, "acceptWithExecpolicyAmendment")) return { decision: value };
+    if (value && typeof value === "object" && Object.hasOwn(value, "applyNetworkPolicyAmendment")) return { decision: value };
+    throw httpError(400, "审批决定无效。");
   }
 
   function compactHistoryTurn(turn) {
@@ -1250,6 +1608,43 @@ export function createConversations({ store, codex }) {
     registerRoutes,
     validateSettings,
   };
+}
+
+export function resolveModelSettings(candidate = {}, models = []) {
+  const settings = cleanSettings(candidate);
+  const available = Array.isArray(models) ? models.filter((model) => model?.id) : [];
+  const current = available.find((model) => model.id === settings.model);
+  if (current) {
+    const efforts = current.supportedReasoningEfforts || [];
+    const effortSupported = !settings.effort || efforts.some((entry) => entry.reasoningEffort === settings.effort);
+    const tiers = current.serviceTiers || [];
+    const tierSupported = !settings.serviceTier || tiers.some((entry) => entry.id === settings.serviceTier);
+    if (effortSupported && tierSupported) return { settings, changed: false };
+    return {
+      settings: {
+        ...settings,
+        effort: effortSupported ? settings.effort : current.defaultReasoningEffort || null,
+        serviceTier: tierSupported ? settings.serviceTier : null,
+      },
+      changed: true,
+    };
+  }
+  const fallback = available.find((model) => model.id === FALLBACK_MODEL_ID)
+    || available.find((model) => model.isDefault)
+    || available[0]
+    || FALLBACK_MODEL;
+  const fallbackEfforts = fallback.supportedReasoningEfforts || [];
+  const effort = fallbackEfforts.some((entry) => entry.reasoningEffort === FALLBACK_REASONING_EFFORT)
+    ? FALLBACK_REASONING_EFFORT
+    : fallback.defaultReasoningEffort || fallbackEfforts[0]?.reasoningEffort || null;
+  return {
+    settings: { ...settings, model: fallback.id, effort, serviceTier: null },
+    changed: true,
+  };
+}
+
+export function isMissingRolloutError(error) {
+  return /no rollout found for thread id/i.test(String(error?.message || ""));
 }
 
 async function visualizationFilePath(value) {

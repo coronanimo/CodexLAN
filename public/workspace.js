@@ -94,23 +94,29 @@ export function mergeRefreshedThreads(baselineThreads, currentThreads, listedThr
 
 export function mergeTurnItems(existingItems, incomingItems) {
   const merged = (existingItems || []).map((item) => ({ ...item }));
-  const indexes = new Map(merged.map((item, index) => [item?.id, index]).filter(([id]) => id));
   for (const item of incomingItems || []) {
     if (!item?.id) {
       merged.push({ ...item });
       continue;
     }
-    const index = indexes.get(item.id);
-    if (index === undefined) {
-      indexes.set(item.id, merged.length);
+    const clientId = userMessageClientId(item);
+    const index = merged.findIndex((candidate) => candidate?.id === item.id
+      || (clientId && userMessageClientId(candidate) === clientId));
+    if (index === -1) {
       merged.push({ ...item });
       continue;
     }
+    if (item.clientPending && !merged[index].clientPending) continue;
     const updated = { ...merged[index], ...item };
     if (!item.clientPending) delete updated.clientPending;
     merged[index] = updated;
   }
   return merged;
+}
+
+export function userMessageClientId(item) {
+  if (item?.type !== "userMessage") return null;
+  return item.clientId || (item.clientPending ? item.id : null);
 }
 
 export function hasCurrentThreadHistory(thread) {
@@ -138,6 +144,27 @@ export function newThreadSettings({ projectSettings = {}, currentThread = null, 
     summary: configured.summary || "detailed",
     collaborationMode: configured.collaborationMode || "default",
   };
+}
+
+export function visibleServiceTiers(tiers, selectedId = "") {
+  const groups = new Map();
+  for (const tier of Array.isArray(tiers) ? tiers : []) {
+    const id = typeof tier?.id === "string" ? tier.id.trim() : "";
+    if (!id || ["default", "standard"].includes(id.toLowerCase())) continue;
+    const key = serviceTierKey(tier);
+    const existing = groups.get(key);
+    if (!existing || id === selectedId || (existing.id !== selectedId && id === "priority")) {
+      groups.set(key, tier);
+    }
+  }
+  return [...groups.values()];
+}
+
+function serviceTierKey(tier) {
+  const id = String(tier?.id || "").toLowerCase();
+  const name = String(tier?.name || "").toLowerCase();
+  if (["fast", "priority"].includes(id) || ["fast", "priority"].includes(name)) return "accelerated";
+  return id;
 }
 
 export function contextWindowUsage(tokenUsage) {

@@ -33,7 +33,7 @@ The Android project is a WebView shell. Native code owns server selection, refre
 
 Codex conversation history belongs to Codex. CodexLAN associates a thread with a project by matching the thread's canonical working directory to the project directory.
 
-CodexLAN stores web accounts, display names, sessions, projects, queues, thread settings, per-user access order, and runtime metadata in `workspace-state.json`. Project files remain in their project directories. Sent attachments are stored below each project's `.codexlan/attachments/` directory.
+CodexLAN stores web accounts, display names, sessions, projects, queues, thread settings, per-user access order, and runtime metadata in SQLite at `workspace-state.sqlite`. The legacy `workspace-state.json` file is kept as a human-readable compatibility mirror during the migration period and is automatically rebuilt from SQLite if it is truncated or corrupted. Project files remain in their project directories. Sent attachments are stored below each project's `.codexlan/attachments/` directory.
 
 The Node service stores its state below the configured repository-local `data/` directory. `workspaceRoot` defines the shared multi-user workspace boundary. Automatically managed user projects live below `<workspaceRoot>/<username>/`; every project record retains its individual absolute path.
 

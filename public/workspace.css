@@ -128,9 +128,6 @@
 .markdown-table-wrap .align-right { text-align: right; }
 .message.user .message-body { padding: 11px 13px; border-radius: 13px 13px 4px; background: var(--dispatch); color: white; }
 .message.tool .message-body { padding: 8px 10px; border-left: 2px solid #a7b7cc; color: #516078; background: #f1f5fa; font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px; line-height: 1.55; }
-.message.guide { margin-left: auto; }
-.message.guide .message-meta { color: var(--accent); letter-spacing: .04em; text-transform: none; }
-.message.guide .message-body { border: 1px solid #b6d4eb; border-radius: 13px 13px 4px; padding: 10px 12px; color: var(--accent-strong); background: var(--surface-selected); }
 .user-input-card { display: grid; width: min(680px, 100%); gap: 14px; margin: 6px 0 18px; border: 1px solid #bdc8d3; border-radius: 13px; padding: 15px; background: #f8fafb; box-shadow: 0 8px 24px #23364b10; }
 .user-input-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .user-input-heading strong { color: var(--accent-strong); font-size: 13px; }
@@ -150,12 +147,20 @@
 .user-input-text:focus, .user-input-other:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 .user-input-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .user-input-footer .form-error { min-height: 0; margin: 0; }
+.approval-card { border-color: #e1b86f; background: #fffaf0; }
+.approval-card .user-input-heading strong { color: #8a5614; }
+.approval-reason { margin: 0; color: #554635; font-size: 12px; line-height: 1.55; }
+.approval-detail { max-height: 240px; margin: 0; overflow: auto; border: 1px solid #e5d1ac; border-radius: 9px; padding: 10px; color: #3d342a; background: #fffdf8; font: 11px/1.55 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.approval-actions .form-error { flex: 1 1 220px; min-height: 0; margin: 0; }
 .message.streaming .message-body::after { display: inline-block; width: 6px; height: 1em; margin-left: 4px; background: var(--dispatch); content: ""; vertical-align: -.18em; animation: blink 1s steps(2) infinite; }
-.progress-message { display: grid; width: min(780px, 100%); min-width: 0; grid-template-columns: 7px minmax(0, 1fr); gap: 8px; align-items: baseline; margin: 1px 0 3px; padding: 1px 10px; color: #53657b; font-size: 12px; line-height: 1.5; }
+.progress-message { display: grid; width: min(780px, 100%); min-width: 0; grid-template-columns: 7px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; margin: 1px 0 3px; padding: 1px 10px; color: #53657b; font-size: 12px; line-height: 1.5; }
 .progress-message-marker { width: 6px; height: 6px; border-radius: 50%; background: #7892b5; transform: translateY(-1px); }
 .progress-message.running .progress-message-marker { background: var(--execute); box-shadow: 0 0 0 3px var(--execute-soft); }
+.progress-message.stale .progress-message-marker { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
 .progress-message.waiting p { color: var(--accent-strong); font-variant-numeric: tabular-nums; }
 .progress-message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.progress-message-action { align-self: center; padding: 3px 7px; color: var(--accent-strong); font-size: 11px; }
 .message-files { display: grid; width: min(560px, 100%); gap: 7px; margin-top: 9px; }
 .message-visualizations { display: grid; width: min(680px, 100%); gap: 7px; margin-top: 10px; }
 .visualization-card { display: grid; width: 100%; min-width: 0; grid-template-columns: 46px minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid #b9cde8; border-radius: 13px; padding: 10px 11px; color: var(--ink); background: linear-gradient(112deg, #f5f9ff, var(--surface) 62%); box-shadow: 0 5px 18px #17345f0d; text-align: left; }

@@ -59,6 +59,10 @@ export function terminalExecutionStatus(status) {
 
 export function mergeHistoricalExecutionItem(item, metric, turnStatus) {
   const merged = { ...item, ...(metric || {}) };
+  // Timing metrics are supplemental; a canonical history item owns its role.
+  // Otherwise a stale metric can turn an assistant message into a user message
+  // during a refresh because both are keyed by the same item id in the UI.
+  if (item?.type) merged.type = item.type;
   if (!isActiveThreadStatus(turnStatus) && isActiveThreadStatus(merged.status)) {
     merged.status = terminalExecutionStatus(item?.status);
   }

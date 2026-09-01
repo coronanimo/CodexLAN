@@ -5,21 +5,34 @@ import { resolve } from "node:path";
 const APP_SERVER_MAX_RESTARTS = 6;
 const MAX_LOADED_THREADS = 300;
 const CODEXLAN_DEFAULT_SERVICE_TIER = 'service_tier="default"';
+const CODEXLAN_WINDOWS_EXEC_COMPATIBILITY = 'features.unified_exec=false';
+const CODEXLAN_DISABLE_PLUGIN_SUGGESTIONS = 'features.tool_suggest=false';
 
 export function appServerLaunch({
   codexBin,
   fixture = process.env.CODEX_TEST_APP_SERVER,
   nodeEnv = process.env.NODE_ENV,
   nodeExecutable = process.execPath,
+  platform = process.platform,
 } = {}) {
   if (!fixture) {
+    const args = ["-c", CODEXLAN_DEFAULT_SERVICE_TIER, "-c", CODEXLAN_DISABLE_PLUGIN_SUGGESTIONS];
+    if (platform === "win32") args.push("-c", CODEXLAN_WINDOWS_EXEC_COMPATIBILITY);
+    args.push("app-server", "--listen", "stdio://");
     return {
       executable: codexBin || "codex",
-      args: ["-c", CODEXLAN_DEFAULT_SERVICE_TIER, "app-server", "--listen", "stdio://"],
+      args,
     };
   }
   if (nodeEnv !== "test") throw new Error("CODEX_TEST_APP_SERVER is available only when NODE_ENV=test.");
   return { executable: nodeExecutable, args: [resolve(fixture)] };
+}
+
+export function threadResumeParams(threadId, project, settings = {}) {
+  const params = { threadId, cwd: project.path, excludeTurns: true };
+  if (settings.model) params.model = settings.model;
+  if (settings.serviceTier) params.serviceTier = settings.serviceTier;
+  return params;
 }
 
 export class AppServerClient {
@@ -196,12 +209,12 @@ export class AppServerClient {
     return this.rawRequest(method, params, options);
   }
 
-  async ensureLoaded(threadId, project) {
+  async ensureLoaded(threadId, project, settings = {}) {
     if (this.loadedThreads.has(threadId)) {
       this.markThreadLoaded(threadId);
       return null;
     }
-    const result = await this.request("thread/resume", { threadId, cwd: project.path });
+    const result = await this.request("thread/resume", threadResumeParams(threadId, project, settings));
     this.markThreadLoaded(threadId);
     return result;
   }

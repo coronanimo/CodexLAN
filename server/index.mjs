@@ -42,7 +42,12 @@ if (!serverConfig.workspaceRootConfigured) await mkdir(workspaceRoot, { recursiv
 if (!existsSync(workspaceRoot) || !statSync(workspaceRoot).isDirectory()) {
   throw new Error(`workspaceRoot is not a directory: ${workspaceRoot}`);
 }
-const store = new WorkspaceStore({ dataRoot, stateFile, workspace: workspaceRoot });
+const store = new WorkspaceStore({
+  dataRoot,
+  stateFile,
+  workspace: workspaceRoot,
+  legacyJsonMirror: process.env.NODE_ENV === "test",
+});
 await store.ready;
 const auth = new AuthService(store);
 const codex = new AppServerClient({ workspace: workspaceRoot, appVersion, codexBin: configuredCodexBin });
@@ -57,7 +62,7 @@ const listenerState = {
     error: null,
   },
 };
-const conversations = createConversations({ store, codex });
+const conversations = createConversations({ store, codex, autoApprove: serverConfig.autoApprove });
 const workspaceApplication = createWorkspaceApplication();
 
 void startHttpServers().catch((error) => {
@@ -218,7 +223,7 @@ function serveStatic(pathname, request, response) {
 function setSecurityHeaders(response) {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Referrer-Policy", "no-referrer");
-  response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+  response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
 }
 
 function text(response, status, body) {

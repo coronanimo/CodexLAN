@@ -11,6 +11,7 @@ const CONFIG_KEYS = new Set([
   "workspaceRoot",
   "dataRoot",
   "codexBin",
+  "autoApprove",
 ]);
 
 export async function loadServerConfig({ appRoot, env = process.env } = {}) {
@@ -33,6 +34,7 @@ export async function loadServerConfig({ appRoot, env = process.env } = {}) {
   const dataRoot = pathSetting(dataRootSetting, "dataRoot", configBase, appRoot);
   const workspaceRootSetting = setting(fileConfig, env, "workspaceRoot", "CODEX_WORKDIR", join(dataRoot, "projects"));
   const codexBin = optionalStringSetting(setting(fileConfig, env, "codexBin", "CODEX_BIN", null), "codexBin");
+  const autoApprove = booleanSetting(Object.hasOwn(fileConfig, "autoApprove") ? fileConfig.autoApprove : false, "autoApprove");
 
   return {
     configPath: configLoaded ? configPath : null,
@@ -42,6 +44,7 @@ export async function loadServerConfig({ appRoot, env = process.env } = {}) {
     workspaceRootConfigured: workspaceRootSetting.configured,
     dataRoot,
     codexBin,
+    autoApprove,
   };
 }
 
@@ -127,6 +130,11 @@ function optionalStringSetting(selected, name) {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string or null.`);
   return value.trim();
+}
+
+function booleanSetting(value, name) {
+  if (typeof value !== "boolean") throw new Error(`${name} must be a boolean.`);
+  return value;
 }
 
 function pathSetting(selected, name, configBase, appRoot) {
