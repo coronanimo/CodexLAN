@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { legacyFirstMessageName, shouldGenerateThreadTitle, titleTranscript } from "../server/thread-titles.mjs";
+import {
+  fallbackThreadTitle,
+  legacyFirstMessageName,
+  selectTitleModels,
+  shouldGenerateThreadTitle,
+  titleTranscript,
+} from "../server/thread-titles.mjs";
 
 const turns = [{
   id: "turn-1",
@@ -43,4 +49,18 @@ test("replaces only an empty name or the legacy first-message title", () => {
   assert.equal(shouldGenerateThreadTitle({ name: null }, turns), true);
   assert.equal(shouldGenerateThreadTitle({ name: legacyName }, turns), true);
   assert.equal(shouldGenerateThreadTitle({ name: "My custom quota notes" }, turns), false);
+});
+
+test("prefers mini then terra for title generation", () => {
+  assert.deepEqual(selectTitleModels([
+    { id: "gpt-5.6-terra" },
+    { id: "gpt-5.4-mini" },
+    { id: "gpt-5.6-sol", isDefault: true },
+  ]), ["gpt-5.4-mini", "gpt-5.6-terra", "gpt-5.6-sol"]);
+});
+
+test("uses an exclamation fallback from the first user message", () => {
+  assert.equal(fallbackThreadTitle([{
+    items: [{ type: "userMessage", content: [{ type: "text", text: "你好，帮我检查这个项目" }] }],
+  }]), "!你好，帮我检查这");
 });
