@@ -139,3 +139,25 @@ test("renders Mermaid fences as diagram containers", async () => {
     globalThis.mermaid = previousMermaid;
   }
 });
+
+test("shows the target URL for titled external links", () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tagName) => new TestNode(tagName),
+    createTextNode: (value) => new TestNode("#text", String(value)),
+  };
+
+  try {
+    const container = new TestNode("article");
+    renderMarkdownDocument(container, "[查看图表](http://192.168.1.50:3000/chart)");
+    const link = container.children[0].children[0];
+    assert.equal(link.tagName, "A");
+    assert.equal(link.children[1].className, "markdown-link-target");
+    assert.equal(link.children[1].textContent, "http://192.168.1.50:3000/chart");
+
+    renderMarkdownDocument(container, "<https://example.com/chart>");
+    assert.equal(container.children[0].children[0].children.length, 1);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});

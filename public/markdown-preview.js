@@ -378,6 +378,12 @@ function linkElement(label, rawTarget, depth) {
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     appendInline(link, label, depth + 1);
+    if (/^https?:/i.test(target) && String(label).trim() !== target) {
+      const visibleTarget = document.createElement("span");
+      visibleTarget.className = "markdown-link-target";
+      visibleTarget.textContent = target;
+      link.append(visibleTarget);
+    }
     return link;
   }
   const local = document.createElement("span");

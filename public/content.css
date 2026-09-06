@@ -67,6 +67,7 @@
 .markdown-preview-table-wrap .align-center { text-align: center; }
 .markdown-preview-table-wrap .align-right { text-align: right; }
 .markdown-document a { color: #1557c0; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.markdown-link-target { display: block; margin-top: 2px; color: #56708f; font-family: Consolas, "Cascadia Mono", monospace; font-size: .8em; font-weight: 400; overflow-wrap: anywhere; text-decoration: underline; text-decoration-color: #9babc0; }
 .markdown-local-link { border-bottom: 1px dotted #8198b5; color: #3d5b7d; cursor: help; }
 .markdown-image-reference { display: inline-block; border-radius: 5px; padding: 1px 6px; color: #56708f; background: #eef3f8; font-size: .9em; }
 .image-preview-dialog { width: min(1100px, calc(100vw - 28px)); max-width: calc(100vw - 28px); height: min(900px, calc(100dvh - 28px)); max-height: calc(100dvh - 28px); overflow: hidden; border: 0; border-radius: 18px; padding: 0; color: var(--ink); background: var(--surface); box-shadow: 0 24px 70px #1d27331f; }
@@ -98,7 +99,9 @@
 .visualization-header { display: flex; min-width: 0; min-height: 48px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #dbe3ed; padding: 7px 9px 7px 15px; background: var(--surface); }
 .visualization-heading { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .visualization-heading > span { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; border-radius: 7px; color: #3265a7; background: #e9f1fb; font-size: 13px; font-weight: 800; }
+.visualization-heading-copy { min-width: 0; }
 .visualization-heading h2 { margin: 0; overflow: hidden; color: #31445f; font-size: 13px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.visualization-url { display: block; overflow: hidden; max-width: min(680px, 66vw); margin-top: 2px; color: #56708f; font-family: Consolas, "Cascadia Mono", monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .visualization-header .icon-button { width: 34px; height: 34px; flex: 0 0 auto; color: #55677e; background: #f1f4f8; }
 .visualization-stage { display: grid; min-height: 0; place-items: stretch; padding: 8px; background: #f3f6fa; }
 .visualization-frame { width: 100%; height: 100%; min-height: 0; border: 1px solid #d9e2ec; border-radius: 10px; background: var(--surface-control); box-shadow: 0 5px 20px #1c355a0d; }

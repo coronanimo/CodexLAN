@@ -252,6 +252,37 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(planSettings.status, 200);
     assert.equal(planSettings.body.settings.collaborationMode, "plan");
 
+    const forkedThread = await request(origin, `/api/threads/${threadId}/fork`, {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: createdProject.body.project.id },
+    });
+    assert.equal(forkedThread.status, 201, `${JSON.stringify(forkedThread.body)}\n${errors}`);
+    assert.notEqual(forkedThread.body.thread.id, threadId);
+    assert.equal(forkedThread.body.thread.name, "Renamed conversation（分支）");
+    assert.equal(forkedThread.body.thread.settings.collaborationMode, "plan");
+    assert.deepEqual(forkedThread.body.thread.turns, []);
+    assert.deepEqual(forkedThread.body.queue, []);
+    assert.equal(forkedThread.body.thread.goal, null);
+    const forkedThreadId = forkedThread.body.thread.id;
+    const loadedFork = await request(origin, `/api/threads/${forkedThreadId}?projectId=${createdProject.body.project.id}`, { cookie: adminCookie });
+    assert.equal(loadedFork.status, 200);
+    assert.equal(loadedFork.body.thread.name, "Renamed conversation（分支）");
+    const crossProjectFork = await request(origin, `/api/threads/${threadId}/fork`, {
+      method: "POST",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: { projectId: secondProject.body.project.id },
+    });
+    assert.equal(crossProjectFork.status, 404);
+    const forkTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse)
+      .findLast((entry) => entry.method === "thread/fork");
+    assert.equal(forkTrace.params.threadId, threadId);
+    assert.equal(forkTrace.params.cwd, createdProject.body.project.path);
+    assert.equal(forkTrace.params.excludeTurns, true);
+    assert.equal(forkTrace.params.model, "gpt-5.6-sol");
+
     const compactSse = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
     assert.equal(compactSse.status, 200);
     const compacted = await request(origin, `/api/threads/${threadId}/compact`, {

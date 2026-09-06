@@ -71,6 +71,7 @@ const ui = {
   threadMenuWrap: $("#thread-menu-wrap"),
   threadMenu: $("#thread-menu"),
   renameThread: $("#rename-thread"),
+  forkThread: $("#fork-thread"),
   compactThread: $("#compact-thread"),
   deleteThread: $("#delete-thread"),
   conversation: $("#conversation"),
@@ -216,6 +217,7 @@ const ui = {
   closeMermaidPreview: $("#close-mermaid-preview"),
   visualizationDialog: $("#visualization-dialog"),
   visualizationName: $("#visualization-name"),
+  visualizationUrl: $("#visualization-url"),
   visualizationStatus: $("#visualization-status"),
   visualizationFrame: $("#visualization-frame"),
   closeVisualization: $("#close-visualization"),
@@ -242,6 +244,7 @@ const state = {
   queueSnapshots: new Map(),
   queueGuiding: new Set(),
   compactingThreads: new Set(),
+  forkingThreads: new Set(),
   goalDialogThreadId: null,
   goalMutating: false,
   userInputRequests: new Map(),
@@ -679,6 +682,7 @@ function clearThread() {
   closeRecentThreads();
   ui.openThreadMenu.disabled = true;
   ui.renameThread.disabled = true;
+  ui.forkThread.disabled = true;
   ui.compactThread.disabled = true;
   ui.deleteThread.disabled = true;
   ui.stop.disabled = true;
@@ -1210,13 +1214,16 @@ function renderThreadActions() {
   const active = isActiveThreadRuntime(currentRuntime());
   const goalActive = isActiveGoal(thread?.goal);
   const compacting = thread && state.compactingThreads.has(thread.id);
+  const forking = thread && state.forkingThreads.has(thread.id);
   const submitting = state.submittingMessage || (thread && state.submittingThreadIds.has(thread.id));
   const switching = Boolean(state.threadSelectionTargetId);
-  ui.openThreadMenu.disabled = !thread || switching || submitting;
-  ui.renameThread.disabled = !thread || switching || submitting;
-  ui.compactThread.disabled = !thread || local || active || goalActive || compacting || submitting || !state.codexReady || switching;
+  ui.openThreadMenu.disabled = !thread || switching || submitting || forking;
+  ui.renameThread.disabled = !thread || switching || submitting || forking;
+  ui.forkThread.disabled = !thread || local || active || compacting || submitting || forking || !state.codexReady || switching;
+  ui.forkThread.textContent = forking ? "正在分叉…" : "分叉聊天";
+  ui.compactThread.disabled = !thread || local || active || goalActive || compacting || submitting || forking || !state.codexReady || switching;
   ui.compactThread.textContent = compacting ? "正在压缩上下文…" : "压缩上下文";
-  ui.deleteThread.disabled = !thread || active || goalActive || compacting || submitting || switching;
+  ui.deleteThread.disabled = !thread || active || goalActive || compacting || submitting || forking || switching;
 }
 
 function renderGoalButton() {
@@ -2688,7 +2695,11 @@ let visualizationRequest = 0;
 
 async function openVisualization(visualization) {
   const request = ++visualizationRequest;
+  const url = new URL(visualizationUrl(visualization.path), location.href).href;
   ui.visualizationName.textContent = visualization.title;
+  ui.visualizationUrl.href = url;
+  ui.visualizationUrl.textContent = url;
+  ui.visualizationUrl.title = url;
   ui.visualizationStatus.textContent = "正在载入图表…";
   ui.visualizationStatus.className = "visualization-status";
   ui.visualizationStatus.hidden = false;
@@ -2701,7 +2712,7 @@ async function openVisualization(visualization) {
     ui.visualizationFrame.hidden = false;
     ui.visualizationStatus.hidden = true;
   };
-  ui.visualizationFrame.src = visualizationUrl(visualization.path);
+  ui.visualizationFrame.src = url;
 }
 
 function visualizationUrl(path) {
@@ -3639,6 +3650,38 @@ async function compactCurrentThread() {
     state.compactingThreads.delete(thread.id);
     renderThreadActions();
     showError(error);
+  }
+}
+
+async function forkCurrentThread() {
+  const project = currentProject();
+  const thread = currentThread();
+  if (!project || !thread || isLocalThreadId(thread.id) || isActiveThreadRuntime(currentRuntime()) || state.forkingThreads.has(thread.id)) return;
+  closeThreadMenu();
+  state.forkingThreads.add(thread.id);
+  renderThreadActions();
+  showActivity("正在创建聊天分支…", false);
+  try {
+    const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/fork`, {
+      method: "POST",
+      body: { projectId: project.id },
+      timeoutMs: 60_000,
+    });
+    const forked = updateThreadInState(project.id, {
+      ...result.thread,
+      turns: [],
+      settings: result.thread.settings || thread.settings,
+      runtime: result.runtime || result.thread.runtime,
+    });
+    applyQueueSnapshot(forked.id, result.queue || [], result.queueRevision ?? 0);
+    renderThreads();
+    await selectThread(forked.id, { closeNavigation: false });
+    showActivity("已创建并打开聊天分支。", false);
+  } catch (error) {
+    showError(error);
+  } finally {
+    state.forkingThreads.delete(thread.id);
+    renderThreadActions();
   }
 }
 
@@ -5450,6 +5493,7 @@ ui.sidebarOrderOriginal.addEventListener("click", () => setSidebarNavigation(nul
 ui.sidebarOrderRecent.addEventListener("click", () => setSidebarNavigation(null, "recent"));
 ui.renameThread.addEventListener("click", () => { closeThreadMenu(); openThreadDialog(); });
 ui.suggestThreadName.addEventListener("click", suggestThreadName);
+ui.forkThread.addEventListener("click", forkCurrentThread);
 ui.compactThread.addEventListener("click", compactCurrentThread);
 ui.deleteThread.addEventListener("click", () => { closeThreadMenu(); deleteCurrentThread(); });
 ui.threadForm.addEventListener("submit", saveThreadName);
@@ -5495,6 +5539,9 @@ ui.mermaidPreviewDialog.addEventListener("click", (event) => {
 ui.closeVisualization.addEventListener("click", () => ui.visualizationDialog.close());
 ui.visualizationDialog.addEventListener("close", () => {
   visualizationRequest += 1;
+  ui.visualizationUrl.removeAttribute("href");
+  ui.visualizationUrl.textContent = "";
+  ui.visualizationUrl.removeAttribute("title");
   ui.visualizationFrame.onload = null;
   ui.visualizationFrame.removeAttribute("src");
   ui.visualizationFrame.hidden = true;

@@ -406,6 +406,33 @@ function fakeResult(method, params = {}) {
     threads.set(thread.id, thread);
     return { thread };
   }
+  if (method === "thread/fork") {
+    const source = threads.get(params.threadId);
+    if (!source) throw new Error("thread not found");
+    let turns = [...(source.turns || [])];
+    if (params.beforeTurnId) {
+      const index = turns.findIndex((turn) => turn.id === params.beforeTurnId);
+      if (index < 0) throw new Error("turn not found");
+      turns = turns.slice(0, index);
+    }
+    if (params.lastTurnId) {
+      const index = turns.findIndex((turn) => turn.id === params.lastTurnId);
+      if (index < 0) throw new Error("turn not found");
+      turns = turns.slice(0, index + 1);
+    }
+    const thread = {
+      ...copy(source),
+      id: randomUUID(),
+      cwd: params.cwd || source.cwd,
+      status: "idle",
+      turns: turns.map(copy),
+      createdAt: Math.floor(Date.now() / 1000),
+      updatedAt: Math.floor(Date.now() / 1000),
+    };
+    threads.set(thread.id, thread);
+    if (materializedThreads.has(source.id)) materializedThreads.add(thread.id);
+    return { thread: params.excludeTurns ? { ...copy(thread), turns: [] } : copy(thread) };
+  }
   if (method === "thread/list") {
     const matching = [...threads.values()].filter((thread) => thread.cwd === params.cwd);
     const offset = Number(params.cursor || 0);

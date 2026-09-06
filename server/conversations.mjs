@@ -337,6 +337,61 @@ export function createConversations({ store, codex, autoApprove = false }) {
         history: { hasMore: false, before: null, totalTurns: 0 },
       });
     });
+
+    application.post("/api/threads/:threadId/fork", async (request, response) => {
+      const user = request.identity.user;
+      const threadId = validateId(request.params.threadId, "threadId");
+      const body = await readJson(request);
+      const project = await store.getProject(body.projectId, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      const source = (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
+      const runtime = threadState.get(threadId);
+      if (runtime?.activeTurnId || isActiveThreadStatus(runtime?.status) || isActiveThreadStatus(source?.status)) {
+        throw httpError(409, "聊天仍在执行中，请先停止任务再分叉。");
+      }
+      const settings = cleanSettings(await store.getThreadSettings(threadId, project.settings));
+      const params = {
+        threadId,
+        cwd: project.path,
+        excludeTurns: true,
+        config: { model_reasoning_summary: settings.summary || DEFAULT_REASONING_SUMMARY },
+      };
+      if (settings.model) params.model = settings.model;
+      if (settings.serviceTier) params.serviceTier = settings.serviceTier;
+      const result = await codex.request("thread/fork", params);
+      const forkedThreadId = validateId(result?.thread?.id, "forkedThreadId");
+      if (forkedThreadId === threadId) throw new Error("Codex 返回了无效的分叉聊天编号。");
+      const sourceName = normalizedThreadName(source?.name);
+      const forkedName = sourceName ? `${sourceName.slice(0, 96)}（分支）` : null;
+      try {
+        codex.markThreadLoaded(forkedThreadId);
+        if (forkedName) await codex.request("thread/name/set", { threadId: forkedThreadId, name: forkedName });
+        await store.setThreadProject(forkedThreadId, project.id);
+        await store.setThreadSettings(forkedThreadId, settings);
+        const accessedAt = await store.recordThreadAccess(user.id, forkedThreadId);
+        const forkRuntime = updateThreadRuntime(forkedThreadId, {
+          projectId: project.id,
+          activeTurnId: null,
+          status: "idle",
+        });
+        const thread = {
+          ...result.thread,
+          ...(forkedName ? { name: forkedName } : {}),
+          turns: [],
+          accessedAt,
+          settings,
+          goal: null,
+          runtime: forkRuntime,
+        };
+        json(response, 201, { thread, runtime: forkRuntime, queue: [], queueRevision: 0 });
+      } catch (error) {
+        codex.loadedThreads.delete(forkedThreadId);
+        forgetThreadRuntime(forkedThreadId);
+        await codex.request("thread/delete", { threadId: forkedThreadId }, { timeoutMs: 10_000 }).catch(() => {});
+        await store.removeThread(forkedThreadId).catch(() => {});
+        throw error;
+      }
+    });
   
     application.get("/api/threads/:threadId", async (request, response) => {
       const user = request.identity.user;
@@ -420,8 +475,12 @@ export function createConversations({ store, codex, autoApprove = false }) {
       const user = request.identity.user;
       const threadId = validateId(request.params.threadId, "threadId");
       const projectId = validateId(request.codexUrl.searchParams.get("projectId"), "项目 ID");
+      const project = await store.getProject(projectId, user.id);
       await store.requireThreadOwner(threadId, user.id, projectId);
-      const filePath = await visualizationFilePath(request.codexUrl.searchParams.get("path"));
+      const filePath = await visualizationFilePath(request.codexUrl.searchParams.get("path"), {
+        projectRoot: project.path,
+        allowAnyLocalFile: user.role === "admin",
+      });
       const details = await stat(filePath);
       if (!details.isFile()) throw httpError(400, "可视化路径不是文件。");
       if (details.size > MAX_VISUALIZATION_BYTES) throw httpError(413, "可视化文件不能超过 5 MB。");
@@ -1647,7 +1706,7 @@ export function isMissingRolloutError(error) {
   return /no rollout found for thread id/i.test(String(error?.message || ""));
 }
 
-async function visualizationFilePath(value) {
+async function visualizationFilePath(value, { projectRoot = null, allowAnyLocalFile = false } = {}) {
   if (typeof value !== "string" || !value.trim() || !isAbsolute(value.trim())) throw httpError(400, "可视化路径无效。");
   const extension = extname(value.trim()).toLowerCase();
   if (extension !== ".html" && extension !== ".htm") throw httpError(400, "可视化文件必须是 HTML。");
@@ -1660,10 +1719,19 @@ async function visualizationFilePath(value) {
     if (error.code === "ENOENT") throw httpError(404, "可视化文件不存在或已经清理。");
     throw error;
   }
+  if (allowAnyLocalFile) return filePath;
+
+  if (projectRoot) {
+    const resolvedProjectRoot = await realpath(projectRoot);
+    const projectRelativePath = relative(resolvedProjectRoot, filePath);
+    if (projectRelativePath && projectRelativePath !== ".." && !projectRelativePath.startsWith(`..${sep}`) && !isAbsolute(projectRelativePath)) {
+      return filePath;
+    }
+  }
   const relativePath = relative(temporaryRoot, filePath);
   const firstSegment = relativePath.split(sep)[0];
   if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath) || !/^codex-[^\\/]+$/i.test(firstSegment)) {
-    throw httpError(403, "只能查看 Codex 生成的临时可视化文件。");
+    throw httpError(403, "只能查看当前项目内或 Codex 临时目录中的可视化文件。");
   }
   return filePath;
 }

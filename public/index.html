@@ -139,6 +139,7 @@
               <button id="open-thread-menu" class="icon-button" type="button" aria-label="聊天操作" aria-controls="thread-menu" aria-expanded="false"><span class="more-dots" aria-hidden="true"></span></button>
               <div id="thread-menu" class="topbar-menu" hidden>
                 <button id="rename-thread" class="quiet-button" type="button" disabled>修改聊天名称</button>
+                <button id="fork-thread" class="quiet-button" type="button" disabled>分叉聊天</button>
                 <button id="compact-thread" class="quiet-button" type="button" disabled>压缩上下文</button>
                 <button id="delete-thread" class="danger-button" type="button" disabled>删除聊天记录</button>
               </div>
@@ -407,7 +408,10 @@
         <header class="visualization-header">
           <div class="visualization-heading">
             <span aria-hidden="true">▥</span>
-            <h2 id="visualization-name">可视化</h2>
+            <div class="visualization-heading-copy">
+              <h2 id="visualization-name">可视化</h2>
+              <a id="visualization-url" class="visualization-url" href="#" target="_blank" rel="noopener noreferrer"></a>
+            </div>
           </div>
           <button id="close-visualization" class="icon-button" type="button" aria-label="关闭交互图表">×</button>
         </header>
