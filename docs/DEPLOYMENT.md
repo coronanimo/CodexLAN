@@ -21,6 +21,16 @@ npm run service:stop
 
 The service currently runs from source and requires Node.js. There is no Windows binary package.
 
+## Start automatically at sign-in
+
+Register a per-user Windows scheduled task from PowerShell:
+
+```powershell
+& .\scripts\install-startup-task.ps1
+```
+
+The task starts the background supervisor when the current Windows user signs in, retries startup failures, and does not create a second instance when CodexLAN is already running. It resolves `node.exe` through the user's `PATH`; run the installer again after moving the repository.
+
 ## First administrator
 
 There is no default username or password. On empty application state, open the printed loopback workbench address on the server machine and create the first administrator. The setup endpoint rejects LAN clients and creates the administrator's default project at the same time.
