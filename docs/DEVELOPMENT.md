@@ -26,13 +26,17 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for runtime boundaries and data ownership
 
 ## Checks
 
+Follow the repository-root [AGENTS.md](../AGENTS.md): select checks for the behavior and risks affected by the change, and reuse applicable results. Do not compute file hashes or add verification steps merely to demonstrate that checking occurred.
+
+For the complete repository check, use:
+
 ```powershell
 npm run check
 ```
 
 This checks the JavaScript entry points and runs the Node test suite. The HTTP test starts a real CodexLAN service on loopback with temporary data, a temporary workspace, and the fake App Server.
 
-Use a real Codex CLI when changing protocol handling. Check initialization, authentication, model listing, thread creation and history, turn execution, steering, queues, interruption, reconnection, command output, file changes, token usage, and account limits.
+When changing protocol handling, use the fake App Server for focused tests and a real Codex CLI for the affected compatibility paths. Select the relevant requests, events, and recovery behavior; do not automatically repeat checks of unrelated protocol features for every change.
 
 ## Browser profiling
 
@@ -44,6 +48,16 @@ codexlanProfiler.download()
 ```
 
 The first command returns an in-memory report; the second downloads a JSON snapshot that can be attached to a bug report. Profiling is disabled by default and is not persisted unless `localStorage.setItem("codexlan-profiling", "1")` is used.
+
+## Preview a storage migration without cutting over
+
+With the configured service still running, use a new destination directory:
+
+```powershell
+node scripts/preview-workspace-migration.mjs 'C:/Temp/codexlan-migration-preview'
+```
+
+The command takes a consistent SQLite backup into that directory and migrates only the copy. It rejects an existing destination, compares reconstructed business fields during migration, and reports counts and the backup location without account/session contents. It does not restart the service or replace its data. Automatic live migration occurs on the next service startup; schedule that cutover after active work has finished. An operational rollback requires the pre-v14 database backup and the matching pre-change application code, with the service stopped; do not run old code against schema 14 or substitute a stale JSON mirror.
 
 ## Android
 

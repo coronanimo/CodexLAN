@@ -119,7 +119,7 @@ export function deriveRunDiagnostic({
   if (approvalRequests.length || flags.includes("waitingOnApproval")) {
     return { state: "waitingApproval", label: "等待审批", observedAt: runtime.activity?.observedAt || null, ageMs: age(runtime.activity?.observedAt, now), flags };
   }
-  if (userInputRequests.length || flags.includes("waitingOnUserInput")) {
+  if (userInputRequests.some((request) => request.isBlocking !== false) || flags.includes("waitingOnUserInput")) {
     return { state: "waitingInput", label: "等待你的回答", observedAt: runtime.activity?.observedAt || null, ageMs: age(runtime.activity?.observedAt, now), flags };
   }
   const metricItems = Object.values(turnMetric?.items || {}).filter((item) => item?.startedAt && !item?.completedAt);

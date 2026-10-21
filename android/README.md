@@ -33,6 +33,8 @@ The app requires Android 8.0/API 26 or newer. The small translucent native contr
 
 ### Mobile attachments
 
+File downloads stay in the current WebView. Android passes its session cookie to the system DownloadManager and saves files to Downloads; an external browser does not share the app's login. After updating the shared web client, refresh it using the control orb. Download errors are shown in the conversation or preview instead of navigating to an error response.
+
 The shared web composer remains the only editing surface. Android presents a native choice between photos/screenshots and files. Android 13 and later use the system Photo Picker for images; Android 8 through 12 use the system document provider with an image filter. CodexLAN is also an Android share target for one or multiple files, which are added to the existing composer and remain pending until the user sends the message.
 
 Conversation previews use Android's native clipboard and share surfaces when available. A conversation can be shared as a Markdown file or rendered locally into a PDF; generated files are exposed through a read-only, cache-backed content provider and are not added to the project workspace.
@@ -67,6 +69,8 @@ CODEXLAN_ANDROID_KEY_PASSWORD
 应用最低支持 Android 8.0/API 26。服务器提供主 WebView 界面；右侧的小型半透明原生悬浮球始终保留，可沿右侧边缘上下拖动并记住位置。菜单只保留刷新和服务器管理，可在最多八个已保存服务器之间切换。当前服务器离线或 WebView 空白时仍能切换服务器。
 
 ### 移动附件
+
+文件下载留在当前 WebView 中，由 Android 携带会话 Cookie 交给系统 DownloadManager，保存到“下载”目录；外部浏览器不共享 App 的登录状态。更新共用网页客户端后，通过悬浮球刷新即可加载。下载失败会在对话或预览窗口内说明原因，不再跳到错误响应页面。
 
 移动端仍然只使用共用网页输入框，不另做一套原生编辑器。点击附件后，Android 会明确提供“照片和截图”和“文件”：Android 13 及以上使用系统 Photo Picker，Android 8 至 12 使用带图片筛选的系统文件选择器。CodexLAN 同时支持接收 Android 的单文件和多文件分享；从系统分享进入的截图或文件会添加到现有输入框，仍由用户决定何时发送。
 

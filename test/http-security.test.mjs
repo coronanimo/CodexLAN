@@ -106,6 +106,13 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(officialAppThreads.body.threads.length, 205);
     assert.equal(officialAppThreads.body.threads.some((thread) => thread.name === "Official App conversation"), true);
     assert.equal(officialAppThreads.body.threads.some((thread) => thread.name === "Recovered legacy title"), true);
+    const firstThreadPage = await request(origin, `/api/projects/${initializedProjects.body.projects[0].id}/threads?limit=50`, { cookie: adminCookie });
+    assert.equal(firstThreadPage.body.threads.length, 50);
+    assert.equal(firstThreadPage.body.hasMore, true);
+    assert.equal(firstThreadPage.body.threads.some((thread) => Object.hasOwn(thread, "turns")), false);
+    const secondThreadPage = await request(origin, `/api/projects/${initializedProjects.body.projects[0].id}/threads?limit=50&cursor=${encodeURIComponent(firstThreadPage.body.nextCursor)}`, { cookie: adminCookie });
+    assert.equal(secondThreadPage.body.threads.length, 50);
+    assert.equal(secondThreadPage.body.threads.some((thread) => firstThreadPage.body.threads.some((first) => first.id === thread.id)), false);
 
     const arbitraryAdminPath = join(temporaryRoot, "admin-selected", "existing-code");
     const arbitraryAdminProject = await request(origin, "/api/projects", {
@@ -351,6 +358,85 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       answers: { daily_replacements: { answers: ["最多 10 只"] } },
     });
 
+    const createAsyncQuestion = async (extra = "") => {
+      const created = await request(origin, "/api/threads", {
+        method: "POST", cookie: adminCookie, csrf: adminCsrf,
+        body: { projectId: createdProject.body.project.id, firstMessage: "async question test", settings: { model: "gpt-5.6-sol", effort: "medium" } },
+      });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      const id = created.body.thread.id;
+      const events = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
+      await request(origin, `/api/threads/${id}/queue`, {
+        method: "POST", cookie: adminCookie, csrf: adminCsrf,
+        body: { projectId: createdProject.body.project.id, text: `[request-user-input-async] ${extra}` },
+      });
+      await readSseUntil(events.body.getReader(), (contents) => {
+        const messages = contents.split("\n\n").flatMap((frame) => {
+          const data = frame.split("\n").find((line) => line.startsWith("data: {"));
+          if (!data) return [];
+          try { return [JSON.parse(data.slice(6))]; } catch { return []; }
+        }).filter((message) => message.params?.threadId === id);
+        return messages.some((message) => message.params?.item?.delivery === "async"
+          || message.params?.liveItems?.some((item) => item.delivery === "async"))
+          && (!extra.includes("[async-complete]") || messages.some((message) => message.method === "turn/completed"));
+      });
+      const loaded = await request(origin, `/api/threads/${id}?projectId=${createdProject.body.project.id}`, { cookie: adminCookie });
+      const question = loaded.body.thread.turns.flatMap((turn) => turn.items).find((item) => item.delivery === "async");
+      assert.ok(question);
+      assert.equal(question.questions.length, 2);
+      return { id, question, loaded };
+    };
+    const answerAsyncQuestion = (question, answers, projectId = createdProject.body.project.id) => request(origin,
+      `/api/threads/${question.id}/async-user-input/${encodeURIComponent(question.question.id)}`, {
+        method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { projectId, answers },
+      });
+    const asyncAnswers = { question_1: { answers: ["先继续玩"] }, question_2: { answers: ["保留旧文件"] } };
+    const asyncQuestion = await createAsyncQuestion();
+    assert.ok(asyncQuestion.loaded.body.runtime.activeTurnId);
+    assert.equal((await answerAsyncQuestion(asyncQuestion, asyncAnswers, secondProject.body.project.id)).status, 404);
+    assert.equal((await answerAsyncQuestion(asyncQuestion, { question_1: { answers: ["先继续玩"] } })).status, 400);
+    assert.equal((await answerAsyncQuestion(asyncQuestion, { ...asyncAnswers, invented: { answers: ["bad"] } })).status, 400);
+    const resolvedAsyncSse = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
+    const asyncAnswer = await answerAsyncQuestion(asyncQuestion, asyncAnswers);
+    assert.equal(asyncAnswer.status, 200);
+    assert.equal(asyncAnswer.body.delivery, "guide");
+    assert.equal(asyncAnswer.body.turnId, asyncQuestion.loaded.body.runtime.activeTurnId);
+    const resolvedAsyncEvents = await readSseUntil(resolvedAsyncSse.body.getReader(), (contents) => contents.includes('"method":"workspace/asyncUserInput/resolved"'));
+    assert.ok(resolvedAsyncEvents.includes(asyncQuestion.question.id));
+    const reloadedAsync = await request(origin, `/api/threads/${asyncQuestion.id}?projectId=${createdProject.body.project.id}`, { cookie: adminCookie });
+    assert.ok(reloadedAsync.body.runtime.activeTurnId, "async answering must not finish the running task");
+    assert.deepEqual(reloadedAsync.body.thread.answeredAsyncUserInputIds, [asyncQuestion.question.id]);
+    const reconnectAsyncSse = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
+    const reconnectAsyncEvents = await readSseUntil(reconnectAsyncSse.body.getReader(), (contents) => (
+      contents.includes('"answeredAsyncUserInputIds":["' + asyncQuestion.question.id + '"]')
+    ));
+    assert.match(reconnectAsyncEvents, /workspace\/state/);
+    assert.equal((await answerAsyncQuestion(asyncQuestion, asyncAnswers)).status, 409);
+    const simultaneousAsync = await createAsyncQuestion();
+    const simultaneousAnswers = await Promise.all([
+      answerAsyncQuestion(simultaneousAsync, asyncAnswers), answerAsyncQuestion(simultaneousAsync, asyncAnswers),
+    ]);
+    assert.deepEqual(simultaneousAnswers.map((entry) => entry.status).sort(), [200, 409]);
+    const failedAsync = await createAsyncQuestion();
+    const failedAnswer = await answerAsyncQuestion(failedAsync, { ...asyncAnswers, question_2: { answers: ["[fail-steer]"] } });
+    assert.equal(failedAnswer.status, 500);
+    const failedQueue = await request(origin, `/api/threads/${failedAsync.id}/queue?projectId=${createdProject.body.project.id}`, { cookie: adminCookie });
+    assert.deepEqual(failedQueue.body.queue, [], "a rejected steer must not silently queue a second answer");
+    const endedAsync = await createAsyncQuestion("[async-complete]");
+    const endedAnswer = await answerAsyncQuestion(endedAsync, asyncAnswers);
+    assert.equal(endedAnswer.status, 200);
+    assert.equal(endedAnswer.body.delivery, "queued");
+    assert.match(endedAnswer.body.item.text, /我的回答：先继续玩/);
+    assert.equal((await answerAsyncQuestion(endedAsync, asyncAnswers)).status, 409);
+    const racedAsync = await createAsyncQuestion("[async-answer-race]");
+    const racedAnswer = await answerAsyncQuestion(racedAsync, asyncAnswers);
+    assert.equal(racedAnswer.status, 200);
+    assert.equal(racedAnswer.body.delivery, "queued", "handle turn completion during answer submission");
+    const asyncTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    assert.ok(asyncTrace.some((entry) => entry.method === "turn/steer" && entry.params.threadId === asyncQuestion.id
+      && entry.params.input[0].text.includes("我的回答：保留旧文件")));
+    assert.equal(asyncTrace.some((entry) => entry.responseId === asyncQuestion.question.id), false, "async questions are not JSON-RPC requests");
+
     const crossProjectQueue = await request(origin, `/api/threads/${threadId}/queue`, {
       method: "POST",
       cookie: adminCookie,
@@ -430,6 +516,9 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       body: { projectId: createdProject.body.project.id, text: "turn this into guidance" },
     });
     assert.equal(queuedForGuidance.status, 202);
+    const runtimeAfterQueueing = await request(origin, `/api/threads/${threadId}/runtime?projectId=${createdProject.body.project.id}`, { cookie: adminCookie });
+    assert.equal(runtimeAfterQueueing.status, 200);
+    assert.equal(runtimeAfterQueueing.body.runtime.activeTurnId, activeTurnId);
     const queueItem = queuedForGuidance.body.queue.find((item) => item.text === "turn this into guidance");
     assert.ok(queueItem);
     const steerPath = `/api/threads/${threadId}/queue/${queueItem.id}/steer`;
@@ -448,7 +537,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(steered[0].body.turnId, activeTurnId);
     assert.equal(steered[0].body.item.id, queueItem.id);
     const trace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
-    const steerRequests = trace.filter((entry) => entry.method === "turn/steer");
+    const steerRequests = trace.filter((entry) => entry.method === "turn/steer" && entry.params.threadId === threadId);
     assert.equal(steerRequests.length, 2);
     assert.equal(steerRequests.find((entry) => entry.params.input[0].text === "direct guidance").params.clientUserMessageId, directGuidance.body.item.id);
     assert.equal(steerRequests.find((entry) => entry.params.input[0].text === queueItem.text).params.clientUserMessageId, queueItem.id);

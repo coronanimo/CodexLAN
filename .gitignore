@@ -1,4 +1,6 @@
 generated-schema/
+.codex-schema-inspect/
+.tmp-app-server-schema/
 data/
 logs/
 android/.tools/

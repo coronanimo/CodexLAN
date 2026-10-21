@@ -98,6 +98,39 @@ export function projectForLocalFile(projects, filePath) {
     .sort((left, right) => normalizedWindowsPath(right.path).length - normalizedWindowsPath(left.path).length)[0] || null;
 }
 
+export function localFileDownloadUrl({ projects, projectId, role, path, name }) {
+  const project = projectForLocalFile(projects, path);
+  // Relative references belong to the conversation's project, including for
+  // administrators. The admin endpoint only accepts absolute paths.
+  const absolute = /^(?:\/?[a-z]:[\\/]|file:\/\/\/|[\\/]{2})/i.test(String(path || ""));
+  const endpoint = project ? `/api/projects/${encodeURIComponent(project.id)}/files/download`
+    : absolute && role === "admin" ? "/api/admin/files/download"
+      : `/api/projects/${encodeURIComponent(projectId)}/files/download`;
+  return `${endpoint}?path=${encodeURIComponent(path)}&name=${encodeURIComponent(name || "download")}`;
+}
+
+export async function downloadLocalFile(url, { fetchFile = globalThis.fetch, navigate = (target) => globalThis.location.assign(target) } = {}) {
+  // Check without buffering the file or handing an authenticated URL to a
+  // different browser. Android's WebView download listener supplies its cookie
+  // to DownloadManager when this same-WebView navigation receives the file.
+  let response;
+  try {
+    response = await fetchFile(url, { method: "HEAD", credentials: "same-origin", cache: "no-store" });
+  } catch {
+    throw new Error("无法连接服务器，请检查网络后重试下载。");
+  }
+  if (!response.ok) {
+    const message = {
+      401: "登录已失效，请重新登录工作台后下载。",
+      403: "当前账号无权下载此文件，请确认文件位于你有权限的项目中。",
+      404: "文件不存在或已经移动，请让助手重新生成文件。",
+      409: "项目目录当前不可用，恢复目录后再下载。",
+    }[response.status];
+    throw new Error(message || `文件暂时无法下载（${response.status}），请确认文件路径后重试。`);
+  }
+  navigate(url);
+}
+
 function localFileTarget(target) {
   let value = String(target || "").trim();
   try {

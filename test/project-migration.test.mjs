@@ -13,6 +13,7 @@ test("repairs a legacy member project path without dropping its thread binding",
   const target = join(workspace, "li", "默认项目");
   const stateFile = join(dataRoot, "workspace-state.json");
   const now = new Date().toISOString();
+  let store;
   try {
     await Promise.all([mkdir(dataRoot), mkdir(target, { recursive: true })]);
     await writeFile(stateFile, `${JSON.stringify({
@@ -47,7 +48,7 @@ test("repairs a legacy member project path without dropping its thread binding",
       sessions: {},
     }, null, 2)}\n`, "utf8");
 
-    const store = new WorkspaceStore({ dataRoot, stateFile, workspace });
+    store = new WorkspaceStore({ dataRoot, stateFile, workspace });
     await store.ready;
     const [project] = await store.listProjects("22222222-2222-4222-8222-222222222222");
     assert.equal(project.path, target);
@@ -55,6 +56,7 @@ test("repairs a legacy member project path without dropping its thread binding",
     const persisted = JSON.parse(await readFile(stateFile, "utf8"));
     assert.equal(persisted.projects[0].path, target);
   } finally {
+    store?.close();
     await rm(root, { recursive: true, force: true });
   }
 });

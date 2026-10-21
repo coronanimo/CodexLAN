@@ -19,8 +19,9 @@ html.android-shell, html.android-shell body { overscroll-behavior: none; }
   .visualization-stage { padding: 0 0 env(safe-area-inset-bottom); background: var(--surface-control); }
   .visualization-frame { border: 0; border-radius: 0; }
   .markdown-preview-header { gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 10px 10px 14px; }
-  .markdown-preview-heading code { max-width: 34vw; }
-  .markdown-preview-actions { gap: 4px; }
+  .markdown-preview-heading { flex: 1 0 100%; }
+  .markdown-preview-heading code { max-width: 90vw; }
+  .markdown-preview-actions { gap: 4px; margin-left: auto; }
   .markdown-preview-actions .quiet-button { padding: 7px 6px; font-size: 10px; }
   .markdown-preview-scroll { padding: 0; background: var(--surface); }
   .markdown-document { min-height: 100%; border: 0; border-radius: 0; padding: 24px 18px calc(30px + env(safe-area-inset-bottom)); box-shadow: none; font-size: 14px; }

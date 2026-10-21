@@ -94,6 +94,7 @@ input.on("line", (line) => {
         emitCommandOutputBurst(message.params, result);
         emitLargeMcpToolCall(message.params, result);
         emitUserInputRequest(message.params, result);
+        emitAsyncUserInputRequest(message.params, result);
       }
       if (message.method === "turn/steer") emitUserMessage(message.params, { turn: { id: result.turnId } });
       if (message.method === "thread/compact/start") emitContextCompaction(message.params);
@@ -223,6 +224,24 @@ function emitUserInputRequest(params, result) {
       }],
     },
   })}\n`);
+}
+
+function emitAsyncUserInputRequest(params, result) {
+  const text = (params.input || []).map((item) => item.text || "").join("\n");
+  if (!text.includes("[request-user-input-async]")) return;
+  const thread = threads.get(params.threadId);
+  const turn = thread?.turns.find((entry) => entry.id === result?.turn?.id);
+  if (!turn) return;
+  const item = { id: `call_${randomUUID()}`, type: "agentMessage", phase: "final_answer", delivery: "async",
+    text: "游戏正在运行，现在退出还是继续玩？\n- 现在退出\n- 先继续玩",
+    questions: [
+      { title: "游戏正在运行，现在退出还是继续玩？", options: ["现在退出", "先继续玩"] },
+      { title: "还有什么补充要求？" },
+    ] };
+  turn.items.push(copy(item));
+  if (text.includes("[async-answer-race]")) thread.asyncAnswerRace = true;
+  process.stdout.write(`${JSON.stringify({ method: "item/completed", params: { threadId: params.threadId, turnId: turn.id, item } })}\n`);
+  if (text.includes("[async-complete]")) completeTurn(params.threadId, turn, "可以稍后回答，当前任务已结束。");
 }
 
 function handleClientResponse(message) {
@@ -434,7 +453,9 @@ function fakeResult(method, params = {}) {
     return { thread: params.excludeTurns ? { ...copy(thread), turns: [] } : copy(thread) };
   }
   if (method === "thread/list") {
-    const matching = [...threads.values()].filter((thread) => thread.cwd === params.cwd);
+    const key = params.sortKey === "updated_at" ? "updatedAt" : "createdAt";
+    const matching = [...threads.values()].filter((thread) => thread.cwd === params.cwd)
+      .sort((a, b) => (Number(b[key]) || 0) - (Number(a[key]) || 0));
     const offset = Number(params.cursor || 0);
     const limit = Math.max(1, Number(params.limit || 100));
     const nextOffset = offset + limit;
@@ -468,6 +489,7 @@ function fakeResult(method, params = {}) {
       throw new Error(`thread ${params.threadId} is not materialized yet; includeTurns is unavailable before first user message`);
     }
     const read = copy(thread);
+    if (method === "thread/read" && params.includeTurns === false) read.turns = [];
     if (read.legacyReadName) read.name = read.legacyReadName;
     delete read.legacyReadName;
     return { thread: read };
@@ -506,6 +528,11 @@ function fakeResult(method, params = {}) {
   if (method === "turn/steer") {
     const thread = threads.get(params.threadId);
     if (!thread || !thread.turns.some((turn) => turn.id === params.expectedTurnId)) throw new Error("turn not found");
+    if (thread.asyncAnswerRace && params.input?.some((item) => item.text?.startsWith("[CodexLAN async answer:"))) {
+      thread.asyncAnswerRace = false;
+      completeTurn(params.threadId, thread.turns.find((turn) => turn.id === params.expectedTurnId), "任务刚刚结束。");
+      throw new Error("no active turn");
+    }
     if (params.input?.some((item) => item.text?.includes("[fail-steer]"))) throw new Error("forced steer failure");
     return { turnId: params.expectedTurnId };
   }

@@ -9,8 +9,10 @@ import { isActiveThreadStatus } from "../public/workspace.js";
 import { turnPlanSnapshot } from "../public/plan.js";
 import { isActiveGoal } from "../public/goal.js";
 import { activityFromNotification, mergeRuntimeActivity } from "../public/run-diagnostics.js";
+import { asyncUserInputRequest, asyncAnswerMessage, answeredAsyncRequestIds } from "../public/async-user-input.js";
 import { json, readJson, validateId, validateText } from "./http.mjs";
 import { createThreadTitleService, isMiniModel, shouldGenerateThreadTitle } from "./thread-titles.mjs";
+import { LiveThreadState } from "./live-thread-state.mjs";
 import {
   SESSION_TIMER_MAX_MS,
   cleanSettings,
@@ -43,14 +45,25 @@ export function createConversations({ store, codex, autoApprove = false }) {
   const eventClients = new Set();
   const commandOutputBatches = new Map();
   const commandOutputTails = new Map();
+  const textDeltaBatches = new Map();
   const threadState = new Map();
   const queueAdvances = new Map();
   const queueSteerJobs = new Map();
   const threadTokenUsage = new Map();
   const threadGoals = new Map();
+  const goalReadTimes = new Map();
+  const goalVersions = new Map();
+  const goalReads = new Map();
+  const workspaceCatalogs = new Map();
+  const threadPaths = new Map();
+  const liveThreads = new LiveThreadState();
+  const summaryTimers = new Map();
+  const threadRevisions = new Map();
+  const eventEpoch = randomUUID();
   const effectiveThreadNames = new Map();
   const resolvedLegacyThreadNames = new Set();
   const userInputRequests = new Map();
+  const asyncInputJobs = new Set();
   const approvalRequests = new Map();
   const MAX_THREAD_TOKEN_USAGE = 300;
   const DEFAULT_REASONING_SUMMARY = "detailed";
@@ -64,7 +77,11 @@ export function createConversations({ store, codex, autoApprove = false }) {
   let collaborationModeCache = { expiresAt: 0, data: [] };
   let accountRateLimitsCache = { expiresAt: 0, data: null };
   codex.events.on("notification", (message) => {
-    if (message.method === "account/rateLimits/updated") accountRateLimitsCache.expiresAt = 0;
+    if (message.method === "account/rateLimits/updated") {
+      accountRateLimitsCache.expiresAt = 0;
+      // Quotas are account-wide, not attached to a selected thread.
+      broadcastServer({ rateLimitsChanged: true });
+    }
     if (message.method === "serverRequest/resolved") {
       const requestId = String(message.params?.requestId ?? "");
       userInputRequests.delete(requestId);
@@ -73,6 +90,11 @@ export function createConversations({ store, codex, autoApprove = false }) {
     }
     const threadId = message.params?.threadId;
     if (!threadId) return;
+    if (["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta"].includes(message.method)) {
+      queueTextDelta(message);
+      return;
+    }
+    flushTextDeltas(threadId);
     if (message.method === "item/commandExecution/outputDelta") {
       queueCommandOutput(message);
       return;
@@ -142,6 +164,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       turnId: validateId(params.turnId, "turnId"),
       itemId: validateId(params.itemId, "itemId"),
       autoResolutionMs: Number.isInteger(params.autoResolutionMs) && params.autoResolutionMs >= 0 ? params.autoResolutionMs : null,
+      isBlocking: params.isBlocking !== false,
       questions: normalizeUserInputQuestions(params.questions),
       resolving: false,
     };
@@ -153,6 +176,32 @@ export function createConversations({ store, codex, autoApprove = false }) {
     void handleCodexNotification(message, receivedAt).catch((error) => {
       process.stderr.write(`[web] 无法处理 Codex 通知：${error.message}\n`);
     });
+  }
+
+  function queueTextDelta(message) {
+    const params = message.params;
+    const key = JSON.stringify([params.threadId, params.turnId, params.itemId, message.method, params.summaryIndex, params.contentIndex]);
+    let batch = textDeltaBatches.get(key);
+    if (!batch) {
+      batch = { message, delta: "", receivedAt: Date.now(), timer: null };
+      batch.timer = setTimeout(() => flushTextDelta(key), 50);
+      batch.timer.unref?.();
+      textDeltaBatches.set(key, batch);
+    }
+    batch.delta += params.delta || "";
+    if (Buffer.byteLength(batch.delta, "utf8") >= 16 * 1024) flushTextDelta(key);
+  }
+
+  function flushTextDelta(key) {
+    const batch = textDeltaBatches.get(key);
+    if (!batch) return;
+    clearTimeout(batch.timer);
+    textDeltaBatches.delete(key);
+    dispatchCodexNotification({ ...batch.message, params: { ...batch.message.params, delta: batch.delta } }, batch.receivedAt);
+  }
+
+  function flushTextDeltas(threadId) {
+    for (const [key, batch] of textDeltaBatches) if (batch.message.params.threadId === threadId) flushTextDelta(key);
   }
 
   function queueCommandOutput(message) {
@@ -219,6 +268,10 @@ export function createConversations({ store, codex, autoApprove = false }) {
     if (!projectId) return;
     if (message.method === "thread/goal/updated") threadGoals.set(threadId, message.params.goal);
     if (message.method === "thread/goal/cleared") threadGoals.set(threadId, null);
+    if (message.method === "thread/goal/updated" || message.method === "thread/goal/cleared") {
+      goalVersions.set(threadId, (goalVersions.get(threadId) || 0) + 1);
+      goalReadTimes.set(threadId, Date.now());
+    }
     if (message.method === "thread/name/updated") {
       const name = normalizedThreadName(message.params.threadName ?? message.params.name);
       if (name) effectiveThreadNames.set(threadId, name);
@@ -272,7 +325,9 @@ export function createConversations({ store, codex, autoApprove = false }) {
     if (runtime) {
       message = { ...message, params: { ...message.params, runtime } };
     }
-    broadcast(threadId, compactNotification(message));
+    const compacted = compactNotification(message);
+    liveThreads.receive({ ...compacted, revision: (threadRevisions.get(threadId) || 0) + 1 });
+    broadcast(threadId, compacted);
     if (message.method === "thread/goal/cleared"
       || (message.method === "thread/goal/updated" && !isActiveGoal(message.params.goal))) {
       void advanceQueue(threadId);
@@ -282,6 +337,9 @@ export function createConversations({ store, codex, autoApprove = false }) {
   codex.events.on("offline", (details) => {
     userInputRequests.clear();
     approvalRequests.clear();
+    liveThreads.turns.clear();
+    workspaceCatalogs.clear();
+    goalReadTimes.clear();
     broadcastServer({ status: codex.state, ...details });
   });
   
@@ -295,6 +353,27 @@ export function createConversations({ store, codex, autoApprove = false }) {
   });
 
   function registerRoutes(application) {
+    application.get("/api/workspace/threads", async (request, response) => {
+      const user = request.identity.user;
+      const summaries = (await workspaceThreadCatalog(user)).map((thread) => ({ ...thread,
+        accessedAt: store.threadAccess(user.id, thread.id),
+        queueCount: store.queues[thread.id]?.length || 0, queueRevision: store.queueRevisions[thread.id] || 0,
+      }));
+      const sorted = summaries.slice().sort((a, b) => {
+        const aa = timestampMilliseconds(a.accessedAt), ba = timestampMilliseconds(b.accessedAt);
+        return Number(Boolean(ba)) - Number(Boolean(aa)) || (ba || timestampMilliseconds(b.updatedAt) || 0) - (aa || timestampMilliseconds(a.updatedAt) || 0);
+      });
+      const limit = Number(request.codexUrl.searchParams.get("limit") || 50);
+      const offset = Number(request.codexUrl.searchParams.get("cursor") || 0);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0) throw httpError(400, "全局会话列表位置或数量无效。");
+      const ordered = request.codexUrl.searchParams.get("order") === "recent" ? sorted : summaries;
+      const page = ordered.slice(offset, offset + limit);
+      const included = new Set([...sorted.slice(0, 30), ...page].map((thread) => thread.id));
+      const nextCursor = offset + limit < ordered.length ? String(offset + limit) : null;
+      json(response, 200, { threads: summaries.filter((thread) => included.has(thread.id)
+        || isActiveThreadStatus(thread.runtime?.status) || thread.runtime?.activeTurnId || isActiveGoal(thread.goal) || thread.queueCount),
+        pageThreadIds: page.map((thread) => thread.id), nextCursor, hasMore: Boolean(nextCursor) });
+    });
     application.get("/api/account/rate-limits", async (request, response) => {
       try {
         json(response, 200, { available: true, ...await readAccountRateLimits() });
@@ -329,6 +408,8 @@ export function createConversations({ store, codex, autoApprove = false }) {
       await store.setThreadSettings(result.thread.id, settings);
       const runtime = { projectId: project.id, activeTurnId: null, status: "idle" };
       const thread = { ...result.thread, accessedAt, status: result.thread.status || "idle", turns: result.thread.turns || [], settings, goal: null, runtime, ...(requestedName ? { name: requestedName } : {}) };
+      effectiveThreadNames.set(thread.id, thread.name || "");
+      broadcast(thread.id, { method: "workspace/thread", params: { threadId: thread.id, name: thread.name || null, runtime } });
       json(response, 201, {
         thread,
         runtime,
@@ -404,17 +485,18 @@ export function createConversations({ store, codex, autoApprove = false }) {
         let metrics = {};
         if (requestedActiveTurnId) {
           const activeTurnId = validateId(requestedActiveTurnId, "activeTurnId");
-          const storedMetrics = await store.getTurnMetrics(threadId);
+          const storedMetrics = await store.getTurnMetrics(threadId, [activeTurnId]);
           if (storedMetrics[activeTurnId]) metrics = { [activeTurnId]: storedMetrics[activeTurnId] };
         }
-        return json(response, 200, { accessedAt, metrics });
+        return json(response, 200, { accessedAt, metrics, answeredAsyncUserInputIds: await store.getAsyncInputAnswers(threadId) });
       }
+      const eventRevision = threadRevisions.get(threadId) || 0;
       const page = await loadThreadPage(threadId, request.codexUrl.searchParams);
       let thread = page.thread;
       const history = page.history;
       const activeTurn = activeTurnFromThread(thread);
-      const storedMetrics = await store.getTurnMetrics(threadId);
-      const recoveredActiveTurn = activeTurn || activeTurnFromMetrics(storedMetrics);
+      const storedMetrics = await store.getTurnMetrics(threadId, history.turns.map((turn) => turn.id));
+      const recoveredActiveTurn = activeTurn || (isActiveThreadStatus(thread.status) ? activeTurnFromMetrics(await store.getTurnMetricTimings(threadId)) : null);
       const runtime = updateThreadRuntime(threadId, {
         projectId: project.id,
         status: thread.status || "idle",
@@ -431,7 +513,10 @@ export function createConversations({ store, codex, autoApprove = false }) {
       const metrics = Object.fromEntries(history.turns.flatMap((turn) => storedMetrics[turn.id] ? [[turn.id, storedMetrics[turn.id]]] : []));
       const accessedAt = await store.recordThreadAccess(user.id, threadId, { deferred: true });
       json(response, 200, {
-        thread: { ...thread, settings, goal, accessedAt },
+        eventRevision,
+        thread: { ...thread, settings, goal, accessedAt, answeredAsyncUserInputIds: [...new Set([
+          ...await store.getAsyncInputAnswers(threadId), ...answeredAsyncRequestIds(page.allTurns, queueSnapshot.queue),
+        ])] },
         ...queueSnapshot,
         runtime,
         metrics,
@@ -582,6 +667,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
         throw httpError(409, "聊天队列正在处理，请完成后再删除。");
       }
       await codex.request("thread/delete", { threadId });
+      broadcast(threadId, { method: "thread/deleted", params: { threadId } });
       await store.removeThread(threadId);
       effectiveThreadNames.delete(threadId);
       resolvedLegacyThreadNames.delete(threadId);
@@ -720,6 +806,65 @@ export function createConversations({ store, codex, autoApprove = false }) {
       json(response, 202, { ok: true });
     });
 
+    application.post("/api/threads/:threadId/async-user-input/:itemId", async (request, response) => {
+      const user = request.identity.user;
+      const { threadId, itemId } = request.params;
+      const body = await readJson(request);
+      const project = await store.getProject(body.projectId, user.id);
+      await store.requireThreadOwner(threadId, user.id, project.id);
+      const key = `${threadId}:${itemId}`;
+      if (asyncInputJobs.has(key)) throw httpError(409, "回答正在提交，请勿重复提交。");
+      asyncInputJobs.add(key);
+      try {
+        await ensureThreadLoaded(threadId, project);
+        const { thread } = await codex.request("thread/read", { threadId, includeTurns: true });
+        const turns = thread?.turns || [];
+        const turn = turns.find((entry) => entry.items?.some((item) => item.id === itemId));
+        const pending = asyncUserInputRequest(turn?.items.find((item) => item.id === itemId), { threadId, turnId: turn?.id });
+        if (!pending) throw httpError(409, "这个异步问题不存在或已不可用。");
+        const snapshot = await store.getQueueSnapshot(threadId);
+        if ((await store.getAsyncInputAnswers(threadId)).includes(itemId) || answeredAsyncRequestIds(turns, snapshot.queue).includes(itemId)) {
+          throw httpError(409, "这个问题已经回答过了。");
+        }
+        const answers = validateUserInputAnswers(pending.questions, body.answers);
+        const text = validateText(asyncAnswerMessage(pending, answers));
+        const activeTurn = activeTurnFromThread(thread);
+        let result = null;
+        if (activeTurn) {
+          const messageId = randomUUID();
+          try {
+            const steered = await codex.request("turn/steer", {
+              threadId, expectedTurnId: activeTurn.id, clientUserMessageId: messageId,
+              input: [{ type: "text", text }],
+            }, { timeoutMs: 10_000 });
+            result = { delivery: "guide", turnId: steered.turnId || activeTurn.id,
+              item: { id: messageId, clientId: messageId, type: "userMessage", content: [{ type: "text", text }], clientPending: true } };
+          } catch (error) {
+            // Only retry as a new turn after a definite rejection. A timeout
+            // may already have delivered the answer and must not be replayed.
+            if (!/no active turn|not active|turn.*(mismatch|does not match)|expected.*turn/i.test(error.message)) throw error;
+            const latest = await codex.request("thread/read", { threadId, includeTurns: true });
+            if (activeTurnFromThread(latest.thread) || isActiveThreadStatus(latest.thread?.status)) throw error;
+          }
+        } else if (isActiveThreadStatus(thread?.status)) {
+          throw httpError(409, "当前任务状态正在更新，请稍后重试。");
+        }
+        if (!result) {
+          const item = await store.enqueue(threadId, project.id, text);
+          result = { delivery: "queued", item, ...await store.getQueueSnapshot(threadId) };
+        }
+        await store.recordAsyncInputAnswer(threadId, itemId);
+        broadcast(threadId, { method: "workspace/asyncUserInput/resolved", params: { threadId, itemId, turnId: pending.turnId } });
+        if (result.delivery === "queued") {
+          broadcastQueue(threadId);
+          void advanceQueue(threadId);
+        }
+        json(response, 200, result);
+      } finally {
+        asyncInputJobs.delete(key);
+      }
+    });
+
     application.post("/api/threads/:threadId/user-input/:requestId", async (request, response) => {
       const user = request.identity.user;
       const threadId = request.params.threadId;
@@ -757,7 +902,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
     });
   
     application.get("/api/events", (request, response) => {
-      return openEventStream(response, request.identity);
+      return openEventStream(response, request.identity, request.codexUrl.searchParams);
     });
   }
   
@@ -791,11 +936,39 @@ export function createConversations({ store, codex, autoApprove = false }) {
     return data;
   }
 
-  async function readThreadGoal(threadId) {
-    const result = await codex.request("thread/goal/get", { threadId });
-    const goal = result?.goal || null;
-    threadGoals.set(threadId, goal);
-    return goal;
+  async function readThreadGoal(threadId, { cached = false } = {}) {
+    if (cached && threadGoals.has(threadId) && goalReadTimes.get(threadId) > Date.now() - 30_000) return threadGoals.get(threadId);
+    if (goalReads.has(threadId)) return goalReads.get(threadId);
+    const previous = goalVersions.get(threadId) || 0;
+    const read = codex.request("thread/goal/get", { threadId }).then((result) => {
+      if ((goalVersions.get(threadId) || 0) === previous || !threadGoals.has(threadId)) threadGoals.set(threadId, result?.goal || null);
+      goalReadTimes.set(threadId, Date.now());
+      return threadGoals.get(threadId);
+    }).finally(() => goalReads.delete(threadId));
+    goalReads.set(threadId, read);
+    return read;
+  }
+
+  async function workspaceThreadCatalog(user) {
+    let catalog = workspaceCatalogs.get(user.id);
+    if (catalog?.expiresAt > Date.now()) return catalog.data;
+    if (catalog?.job) return catalog.job;
+    catalog ||= { data: [], expiresAt: 0, job: null };
+    workspaceCatalogs.set(user.id, catalog);
+    catalog.job = (async () => {
+      const projects = (await store.listProjects(user.id)).filter((project) => project.available);
+      const summaries = [];
+      // A metadata-only discovery pass preserves old Goal and relocated-thread
+      // visibility. Foreground project paging never waits for this scan.
+      for (const project of projects) {
+        const threads = await listProjectThreads(project, user);
+        for (const thread of threads) summaries.push({ projectId: project.id, ...threadSummary(thread) });
+      }
+      catalog.data = summaries;
+      catalog.expiresAt = Date.now() + 30_000;
+      return summaries;
+    })().finally(() => { catalog.job = null; });
+    return catalog.job;
   }
 
   function validateGoalPatch(threadId, candidate) {
@@ -828,9 +1001,18 @@ export function createConversations({ store, codex, autoApprove = false }) {
     do {
       const result = await codex.request("thread/list", { cwd, limit: 100, ...(cursor ? { cursor } : {}) });
       threads.push(...(result.data || []));
+      for (const thread of result.data || []) threadPaths.set(thread.id, thread.cwd);
       cursor = result.nextCursor || null;
     } while (cursor);
-    return Promise.all(threads.map(resolveListedThreadName));
+    return mapThreadMetadata(threads, resolveListedThreadName);
+  }
+
+  async function mapThreadMetadata(threads, read) {
+    const result = [];
+    for (let offset = 0; offset < threads.length; offset += 50) {
+      result.push(...await Promise.all(threads.slice(offset, offset + 50).map(read)));
+    }
+    return result;
   }
 
   async function resolveListedThreadName(thread) {
@@ -864,25 +1046,25 @@ export function createConversations({ store, codex, autoApprove = false }) {
     const listedThreads = await listCodexThreadsAtPath(project.path);
     const ownedThreads = await store.bindProjectThreads(listedThreads, user.id, project.id);
     const listedIds = new Set(ownedThreads.map((thread) => thread.id));
-    const relocatedThreads = await Promise.all(store.threadIdsForProject(project.id)
-      .filter((threadId) => !listedIds.has(threadId))
-      .map(async (threadId) => {
+    const relocatedThreads = await mapThreadMetadata(store.threadIdsForProject(project.id)
+      .filter((threadId) => !listedIds.has(threadId)), async (threadId) => {
         try {
-          return (await codex.request("thread/read", { threadId, includeTurns: false })).thread || null;
+          const thread = (await codex.request("thread/read", { threadId, includeTurns: false })).thread || null;
+          threadPaths.set(threadId, thread?.cwd || null);
+          return thread;
         } catch {
           return null;
         }
-      }));
+      });
     ownedThreads.push(...relocatedThreads.filter(Boolean));
-    return Promise.all(ownedThreads.map(async (thread) => {
-      const [queueSnapshot, settings, goal] = await Promise.all([
-        store.getQueueSnapshot(thread.id),
+    return mapThreadMetadata(ownedThreads, async (thread) => {
+      const [settings, goal] = await Promise.all([
         store.getThreadSettings(thread.id, project.settings),
-        readThreadGoal(thread.id),
+        readThreadGoal(thread.id, { cached: true }),
       ]);
       const knownRuntime = threadState.get(thread.id);
       const storedActiveTurn = !knownRuntime?.activeTurnId && isActiveThreadStatus(thread.status)
-        ? activeTurnFromMetrics(await store.getTurnMetrics(thread.id))
+        ? activeTurnFromMetrics(await store.getTurnMetricTimings(thread.id))
         : null;
       const runtime = updateThreadRuntime(thread.id, {
         projectId: project.id,
@@ -894,11 +1076,94 @@ export function createConversations({ store, codex, autoApprove = false }) {
         accessedAt: store.threadAccess(user.id, thread.id),
         runtime,
         goal,
-        queueCount: queueSnapshot.queue.length,
-        queueRevision: queueSnapshot.queueRevision,
+        queueCount: store.queues[thread.id]?.length || 0,
+        queueRevision: store.queueRevisions[thread.id] || 0,
         settings,
       };
-    }));
+    });
+  }
+
+  function threadSummary(thread) {
+    return {
+      id: thread.id, name: thread.name || null, createdAt: thread.createdAt, updatedAt: thread.updatedAt,
+      accessedAt: thread.accessedAt, status: thread.status, runtime: thread.runtime,
+      queueCount: thread.queueCount || 0, queueRevision: thread.queueRevision || 0,
+      goal: thread.goal ? { status: thread.goal.status } : null,
+      goalIsSummary: true,
+    };
+  }
+
+  async function listProjectThreadPage(project, user, searchParams) {
+    const limit = Number(searchParams.get("limit") || 50);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw httpError(400, "会话列表每页数量必须是 1 到 100。");
+    const cursor = searchParams.get("cursor");
+    const boundPrefix = "codexlan-bound:";
+    const accessPrefix = "codexlan-access:";
+    const recentPrefix = "codexlan-recent-native:";
+    const recent = searchParams.get("order") === "recent";
+    const accessedIds = recent ? Object.entries(store.threadAccesses[user.id] || {})
+      .filter(([id]) => store.threadProjects[id] === project.id)
+      .sort((a, b) => Date.parse(b[1]) - Date.parse(a[1])).map(([id]) => id) : [];
+    const readMetadata = async (threadId) => {
+      try {
+        const thread = (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
+        threadPaths.set(threadId, thread?.cwd || null);
+        return thread;
+      } catch (error) { if (/not found|not exist|no rollout/i.test(error.message)) return null; throw error; }
+    };
+    let threads, nextCursor;
+    if (recent && accessedIds.length && (!cursor || cursor.startsWith(accessPrefix))) {
+      const offset = cursor ? Number(cursor.slice(accessPrefix.length)) : 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) throw httpError(400, "会话列表位置无效。");
+      threads = (await Promise.all(accessedIds.slice(offset, offset + limit).map(readMetadata))).filter(Boolean);
+      nextCursor = offset + limit < accessedIds.length ? `${accessPrefix}${offset + limit}` : recentPrefix;
+    } else if (cursor?.startsWith(boundPrefix)) {
+      const offset = Number(cursor.slice(boundPrefix.length));
+      if (!Number.isSafeInteger(offset) || offset < 0) throw httpError(400, "会话列表位置无效。");
+      const ids = store.threadIdsForProject(project.id).filter((id) => !accessedIds.includes(id)
+        && (!threadPaths.has(id) || threadPaths.get(id) && !sameThreadPath(threadPaths.get(id), project.path)));
+      const pageIds = ids.slice(offset, offset + limit);
+      threads = (await Promise.all(pageIds.map(readMetadata))).filter((thread) => thread && !sameThreadPath(thread.cwd, project.path));
+      nextCursor = offset + limit < ids.length ? `${boundPrefix}${offset + limit}` : null;
+    } else {
+      const nativeCursor = recent && cursor?.startsWith(recentPrefix) ? cursor.slice(recentPrefix.length) : cursor;
+      const result = await codex.request("thread/list", { cwd: project.path, limit, ...(recent ? { sortKey: "updated_at" } : {}), ...(nativeCursor ? { cursor: nativeCursor } : {}) });
+      for (const thread of result.data || []) threadPaths.set(thread.id, thread.cwd);
+      threads = await store.bindProjectThreads(await Promise.all((result.data || []).filter((thread) => !accessedIds.includes(thread.id)).map(resolveListedThreadName)), user.id, project.id);
+      const hasRelocated = store.threadIdsForProject(project.id).some((id) => !accessedIds.includes(id) && (!threadPaths.has(id) || threadPaths.get(id) && !sameThreadPath(threadPaths.get(id), project.path)));
+      nextCursor = result.nextCursor ? `${recent ? recentPrefix : ""}${result.nextCursor}` : hasRelocated ? `${boundPrefix}0` : null;
+    }
+    const summarize = async (thread) => {
+      const [settings, goal] = await Promise.all([store.getThreadSettings(thread.id, project.settings), readThreadGoal(thread.id, { cached: true })]);
+      const previous = threadState.get(thread.id);
+      const runtime = updateThreadRuntime(thread.id, { projectId: project.id, status: thread.status || "idle", ...(previous ? { activeTurnId: previous.activeTurnId, startedAt: previous.startedAt } : {}) });
+      return threadSummary({ ...thread, settings, goal, runtime, accessedAt: store.threadAccess(user.id, thread.id),
+        queueCount: store.queues[thread.id]?.length || 0, queueRevision: store.queueRevisions[thread.id] || 0 });
+    };
+    const summaries = await Promise.all(threads.map(summarize));
+    let preferredThread = null;
+    if (!cursor && !recent) {
+      // Preserve the old "open my most recently accessed/updated conversation"
+      // behavior even when it falls outside the first creation-order page.
+      const accessed = Object.entries(store.threadAccesses[user.id] || {})
+        .filter(([id]) => store.threadProjects[id] === project.id).sort((a, b) => Date.parse(b[1]) - Date.parse(a[1]));
+      let preferred;
+      for (const [id] of accessed) {
+        preferred = threads.find((thread) => thread.id === id) || await readMetadata(id);
+        if (preferred) break;
+      }
+      if (!preferred) {
+        const latest = await codex.request("thread/list", { cwd: project.path, limit: 1, sortKey: "updated_at" });
+        preferred = latest.data?.[0];
+        if (preferred) [preferred] = await store.bindProjectThreads([preferred], user.id, project.id);
+      }
+      if (preferred) preferredThread = summaries.find((thread) => thread.id === preferred.id) || await summarize(await resolveListedThreadName(preferred));
+    }
+    return { threads: summaries, preferredThread, nextCursor, hasMore: Boolean(nextCursor) };
+  }
+
+  function sameThreadPath(left, right) {
+    return typeof left === "string" && (process.platform === "win32" ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right));
   }
   
   async function validateSettings(candidate = {}) {
@@ -971,6 +1236,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
     let legacyTurns = turns;
     if (fullLegacyCheck) {
       const canonical = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
+      await store.reconcileExecutionSupplements(threadId, canonical.turns || []);
       legacyTurns = canonical.turns || turns;
       if (!shouldGenerateThreadTitle(canonical, legacyTurns)) return null;
       titleTurns = legacyTurns;
@@ -1085,11 +1351,17 @@ export function createConversations({ store, codex, autoApprove = false }) {
         logTurnTiming(threadId, "thread-state-ready", timingStarted);
         const activeTurn = activeTurnFromThread(canonicalThread);
         if (activeTurn || isActiveThreadStatus(canonicalThread?.status)) {
+          const previousRuntime = threadState.get(threadId);
+          const recoveredActiveTurn = activeTurn
+            || (previousRuntime?.activeTurnId ? {
+              id: previousRuntime.activeTurnId,
+              startedAt: previousRuntime.startedAt,
+            } : activeTurnFromMetrics(await store.getTurnMetricTimings(threadId)));
           updateThreadRuntime(threadId, {
             projectId: project.id,
             status: canonicalThread.status,
-            activeTurnId: activeTurn?.id || null,
-            startedAt: timestampMilliseconds(activeTurn?.startedAt) || Date.now(),
+            activeTurnId: recoveredActiveTurn?.id || null,
+            startedAt: timestampMilliseconds(recoveredActiveTurn?.startedAt) || Date.now(),
           });
           return;
         }
@@ -1238,6 +1510,9 @@ export function createConversations({ store, codex, autoApprove = false }) {
   }
   
   function forgetThreadRuntime(threadId) {
+    liveThreads.forget(threadId);
+    clearTimeout(summaryTimers.get(threadId));
+    summaryTimers.delete(threadId);
     discardCommandOutputBatches(threadId);
     threadState.delete(threadId);
     threadTokenUsage.delete(threadId);
@@ -1290,8 +1565,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       const itemId = params.itemId || params.item?.id;
       const output = commandOutputTails.get(commandOutputKey(params));
       if (!turnId || !itemId || !output) return;
-      const storedMetrics = await store.getTurnMetrics(threadId, [turnId]);
-      const current = storedMetrics?.[turnId]?.items?.[itemId]?.snapshot || {};
+      const current = (await store.getItemMetric(threadId, turnId, itemId)).snapshot || {};
       await store.recordItemMetric(threadId, turnId, itemId, {
         type: "commandExecution",
         snapshot: {
@@ -1301,7 +1575,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
           aggregatedOutput: output.text,
           ...(output.truncated ? { outputTruncated: true } : {}),
         },
-      });
+      }, { deferred: true });
       return;
     }
     if (message.method === "turn/started") {
@@ -1362,10 +1636,68 @@ export function createConversations({ store, codex, autoApprove = false }) {
     const projectId = store.threadProjects[threadId];
     const ownerId = store.projects.find((project) => project.id === projectId)?.ownerId;
     if (!ownerId) return;
+    const revision = (threadRevisions.get(threadId) || 0) + 1;
+    threadRevisions.set(threadId, revision);
+    const event = { ...message, revision, params: { ...message.params, projectId } };
+    const catalog = workspaceCatalogs.get(ownerId);
+    if (catalog?.data) {
+      const index = catalog.data.findIndex((thread) => thread.id === threadId);
+      if (message.method === "thread/deleted") {
+        if (index >= 0) catalog.data.splice(index, 1);
+      } else if (index >= 0 || message.method === "workspace/thread") {
+        const previous = catalog.data[index] || { id: threadId, projectId };
+        const goal = threadGoals.get(threadId);
+        const summary = { ...previous, name: effectiveThreadNames.get(threadId) || previous.name,
+          runtime: threadState.get(threadId) || message.params.runtime || null,
+          ...(threadGoals.has(threadId) ? { goal: goal ? { status: goal.status } : null } : {}),
+          queueCount: store.queues[threadId]?.length || 0, queueRevision: store.queueRevisions[threadId] || 0,
+          accessedAt: store.threadAccess(ownerId, threadId),
+          ...(["turn/started", "turn/completed"].includes(message.method) ? { updatedAt: Date.now() } : {}),
+        };
+        if (index >= 0) catalog.data[index] = summary;
+        else catalog.data.unshift(summary);
+      }
+    }
+    let payload;
+    const fullPayload = () => payload ||= `event: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of eventClients) {
       if (client.userId !== ownerId) continue;
-      writeEvent(client, `event: ${eventName}\ndata: ${JSON.stringify(message)}\n\n`);
+      if (!client.scoped || client.threadId === threadId) writeEvent(client, fullPayload());
+      else if (["turn/started", "turn/completed"].includes(message.method)) {
+        const { items, ...turn } = message.params.turn || {};
+        writeEvent(client, `event: ${eventName}\ndata: ${JSON.stringify({ ...event, params: { ...event.params, turn, summaryOnly: true } })}\n\n`);
+      } else if (!isThreadBodyEvent(message) && message.method !== "queue/updated" && !message.method.startsWith("thread/goal/")) {
+        // Approval/input controls remain available globally, including async
+        // question cards; bulk transcript and command bodies do not.
+        writeEvent(client, fullPayload());
+      }
     }
+    if (message.method === "thread/deleted") return;
+    const highFrequency = isThreadBodyEvent(message) && message.method !== "item/completed";
+    if (highFrequency) {
+      if (!summaryTimers.has(threadId)) {
+        const timer = setTimeout(() => { summaryTimers.delete(threadId); broadcastThreadSummary(threadId, ownerId); }, 100);
+        timer.unref?.();
+        summaryTimers.set(threadId, timer);
+      }
+    } else {
+      clearTimeout(summaryTimers.get(threadId));
+      summaryTimers.delete(threadId);
+      broadcastThreadSummary(threadId, ownerId);
+    }
+  }
+
+  function isThreadBodyEvent(message) {
+    if (message.method === "item/completed" && asyncUserInputRequest(message.params?.item)) return false;
+    return message.method.startsWith("item/") && !message.method.includes("requestApproval")
+      && message.method !== "item/tool/requestUserInput" || message.method === "turn/plan/updated" || message.method === "turn/diff/updated";
+  }
+
+  function broadcastThreadSummary(threadId, ownerId) {
+    if (![...eventClients].some((client) => client.userId === ownerId && client.scoped && client.threadId !== threadId)) return;
+    const event = { method: "workspace/summary", revision: threadRevisions.get(threadId) || 0, params: workspaceSnapshot(threadId, false) };
+    const payload = `event: codex\ndata: ${JSON.stringify(event)}\n\n`;
+    for (const client of eventClients) if (client.userId === ownerId && client.scoped && client.threadId !== threadId) writeEvent(client, payload);
   }
 
   function broadcastServer(message) {
@@ -1406,6 +1738,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       turnId: request.turnId,
       itemId: request.itemId,
       autoResolutionMs: request.autoResolutionMs,
+      isBlocking: request.isBlocking,
       questions: request.questions,
     };
   }
@@ -1418,8 +1751,18 @@ export function createConversations({ store, codex, autoApprove = false }) {
     };
   }
   
-  async function openEventStream(response, identity) {
+  async function openEventStream(response, identity, searchParams) {
     const user = identity.user;
+    const scoped = searchParams?.get("scope") === "workspace";
+    const threadId = scoped && searchParams.get("threadId") ? validateId(searchParams.get("threadId"), "threadId") : null;
+    if (threadId) await store.requireThreadOwner(threadId, user.id);
+    if (threadId && codex.state === "ready") {
+      const before = threadRevisions.get(threadId) || 0;
+      const result = await codex.request("thread/read", { threadId, includeTurns: false }, { timeoutMs: 5_000 });
+      if ((threadRevisions.get(threadId) || 0) === before) {
+        updateThreadRuntime(threadId, { projectId: store.threadProjects[threadId], status: result.thread?.status || "idle" });
+      }
+    }
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
@@ -1427,13 +1770,14 @@ export function createConversations({ store, codex, autoApprove = false }) {
       "X-Accel-Buffering": "no",
     });
     response.write("retry: 2000\n\n");
-    const client = { response, userId: user.id };
+    const afterRevision = Number(searchParams?.get("afterRevision") || 0);
+    const client = { response, userId: user.id, scoped, threadId, afterRevision: Number.isSafeInteger(afterRevision) && afterRevision >= 0 ? afterRevision : 0 };
     eventClients.add(client);
     const expiryTimer = setTimeout(
       () => response.end(),
       Math.max(1, Math.min(SESSION_TIMER_MAX_MS, identity.session.expiresAt - Date.now())),
     );
-    writeEvent(client, `event: server\ndata: ${JSON.stringify({ status: codex.state })}\n\n`);
+    writeEvent(client, `event: server\ndata: ${JSON.stringify({ status: codex.state, epoch: eventEpoch })}\n\n`);
     void sendInitialWorkspaceState(client, user.id).catch((error) => {
       process.stderr.write(`[web] 无法同步实时工作区状态：${error.message}\n`);
     });
@@ -1450,39 +1794,64 @@ export function createConversations({ store, codex, autoApprove = false }) {
   }
 
   async function sendInitialWorkspaceState(client, userId) {
+    await store.ready;
     const { response } = client;
     const threadIds = new Set([
       ...threadState.keys(),
       ...threadGoals.keys(),
       ...await store.listQueuedThreadIds(),
       ...[...userInputRequests.values()].map((request) => request.threadId),
+      ...[...approvalRequests.values()].map((request) => request.threadId),
+      ...(client.threadId ? [client.threadId] : []),
     ]);
     for (const threadId of threadIds) {
       const projectId = store.threadProjects[threadId];
       const ownerId = store.projects.find((project) => project.id === projectId)?.ownerId;
       if (ownerId !== userId) continue;
-      const [snapshot, metrics] = await Promise.all([store.getQueueSnapshot(threadId), store.getTurnMetrics(threadId)]);
       if (response.writableEnded || response.destroyed) return;
-      const runtime = threadState.get(threadId) || null;
-      const activeTurn = metrics?.[runtime?.activeTurnId];
+      const full = !client.scoped || client.threadId === threadId;
+      const snapshot = workspaceSnapshot(threadId, full, client.afterRevision);
+      if (!client.scoped) delete snapshot.liveItems;
+      if (!full && !snapshot.runtime && !isActiveGoal(snapshot.goal) && !snapshot.queueCount
+        && !snapshot.userInputRequests.length && !snapshot.approvalRequests.length) continue;
       if (!writeEvent(client, `event: codex\ndata: ${JSON.stringify({
-        method: "workspace/state",
-        params: {
-          threadId,
-          ...snapshot,
-          runtime,
-          ...(threadGoals.has(threadId) ? { goal: threadGoals.get(threadId) } : {}),
-          activeItems: activeExecutionSnapshots(activeTurn, runtime?.activeTurnId),
-          activePlan: activeTurn?.plan || null,
-          userInputRequests: [...userInputRequests.values()]
-            .filter((entry) => entry.threadId === threadId)
-            .map(publicUserInputRequest),
-          approvalRequests: [...approvalRequests.values()]
-            .filter((entry) => entry.threadId === threadId)
-            .map(publicApprovalRequest),
-        },
+        method: full ? "workspace/state" : "workspace/summary",
+        revision: threadRevisions.get(threadId) || 0,
+        params: snapshot,
       })}\n\n`)) return;
     }
+  }
+
+  function workspaceSnapshot(threadId, full, afterRevision = 0) {
+    // Everything below is captured synchronously, so a live event cannot slip
+    // between reading the snapshot and writing it to this SSE connection.
+    const projectId = store.threadProjects[threadId];
+    const runtime = threadState.get(threadId) || null;
+    const activeTurn = store.turnMetrics[threadId]?.[runtime?.activeTurnId];
+    const goal = threadGoals.get(threadId);
+    return {
+      threadId, projectId, name: effectiveThreadNames.get(threadId), runtime,
+      ...(threadGoals.has(threadId) ? { goal: full || !goal ? goal : { status: goal.status } } : {}),
+      queueCount: store.queues[threadId]?.length || 0, queueRevision: store.queueRevisions[threadId] || 0,
+      ...(full ? {
+        queue: structuredClone(store.queues[threadId] || []),
+        activeItems: activeExecutionSnapshots(activeTurn, runtime?.activeTurnId),
+        liveItems: liveThreads.items(threadId, runtime?.activeTurnId, afterRevision).map((item) => {
+          if (item.type !== "commandExecution") return item;
+          const snapshot = activeTurn?.items?.[item.id]?.snapshot;
+          const output = commandOutputTails.get(commandOutputKey({ threadId, turnId: runtime?.activeTurnId, itemId: item.id }));
+          return { ...snapshot, ...item,
+            aggregatedOutput: output?.text || item.aggregatedOutput || snapshot?.aggregatedOutput || "",
+            outputTruncated: output?.truncated || item.outputTruncated || snapshot?.outputTruncated || false };
+        }),
+        activePlan: activeTurn?.plan || null,
+        answeredAsyncUserInputIds: [...(store.asyncInputAnswers[threadId] || [])],
+      } : {}),
+      userInputRequests: [...userInputRequests.values()].filter((entry) => entry.threadId === threadId)
+        .map((entry) => full ? publicUserInputRequest(entry) : { requestId: entry.requestId, threadId, isBlocking: entry.isBlocking }),
+      approvalRequests: [...approvalRequests.values()].filter((entry) => entry.threadId === threadId)
+        .map((entry) => full ? publicApprovalRequest(entry) : { requestId: entry.requestId, threadId, method: entry.method }),
+    };
   }
   
   function closeUserEventStreams(userId) {
@@ -1505,7 +1874,9 @@ export function createConversations({ store, codex, autoApprove = false }) {
           ...(cursor ? { cursor } : {}),
         }),
       ]);
-      const turns = (Array.isArray(page?.data) ? page.data : [])
+      const canonicalTurns = Array.isArray(page?.data) ? page.data : [];
+      await store.reconcileExecutionSupplements(threadId, canonicalTurns);
+      const turns = canonicalTurns
         .slice()
         .reverse()
         .map(compactHistoryTurn);
@@ -1523,6 +1894,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       if (!isUnsupportedTurnsListError(error)) throw error;
       const result = await codex.request("thread/read", { threadId, includeTurns: true });
       const allTurns = result.thread.turns || [];
+      await store.reconcileExecutionSupplements(threadId, allTurns);
       const history = paginateTurns(allTurns, searchParams);
       return {
         thread: { ...result.thread, turns: history.turns.map(compactHistoryTurn) },
@@ -1609,6 +1981,10 @@ export function createConversations({ store, codex, autoApprove = false }) {
 
   function closeEventStreams() {
     discardCommandOutputBatches();
+    for (const batch of textDeltaBatches.values()) clearTimeout(batch.timer);
+    textDeltaBatches.clear();
+    for (const timer of summaryTimers.values()) clearTimeout(timer);
+    summaryTimers.clear();
     for (const client of eventClients) client.response.end();
     eventClients.clear();
   }
@@ -1663,6 +2039,8 @@ export function createConversations({ store, codex, autoApprove = false }) {
     closeUserEventStreams,
     forgetProject: forgetProjectRuntime,
     listProjectThreads,
+    listProjectThreadPage,
+    invalidateWorkspaceCatalog: (ownerId) => workspaceCatalogs.delete(ownerId),
     projectHasActiveThread,
     registerRoutes,
     validateSettings,

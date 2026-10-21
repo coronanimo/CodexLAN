@@ -1,20 +1,22 @@
-import { downloadableFiles, projectForLocalFile, textPreviewKind } from "./file-downloads.js";
+import { downloadableFiles, downloadLocalFile, localFileDownloadUrl, textPreviewKind } from "./file-downloads.js";
 import { renderMarkdownDocument } from "./markdown-preview.js";
 import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
 import { commandDisplayText, commandOutputTail, executionBodyHasContent, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeRefreshedThreads, mergeTurnItems, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName, userMessageClientId, visibleServiceTiers } from "./workspace.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeThreadListPage, mergeThreadSummaryPage, mergeTurnItems, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName, userMessageClientId, visibleServiceTiers } from "./workspace.js";
 import { appendAnsiOutput, renderAnsiOutput } from "./ansi-output.js";
 import { diffLineStats, renderFileChanges, unifiedDiffChanges } from "./diff-output.js";
 import { clipboardImageFiles, clipboardImageName, isMobileComposer, messageWithAttachments, resizeComposerInput } from "./composer.js";
 import { createTurnPlanView, planShortcut, updateTurnPlanView } from "./plan.js";
 import { goalPresentation, goalShortcut, isActiveGoal } from "./goal.js";
 import { createWorkbenchLayout } from "./layout.js";
-import { copyTextToClipboard, fileChangesText, isPreviewableImage, openDownloadExternally, printableMarkdownHtml, shareMarkdown } from "./mobile-actions.js";
+import { copyTextToClipboard, fileChangesText, isPreviewableImage, printableMarkdownHtml, shareMarkdown } from "./mobile-actions.js";
 
 import { EVENT_STREAM_WATCHDOG_INTERVAL_MS, eventStreamNeedsRestart } from "./event-stream.js";
 import { profileMark, profileSpan } from "./profiling.js";
 import { deriveRunDiagnostic } from "./run-diagnostics.js";
+import { renderInTimelinePosition, moveExistingTurnContentIntoExecutionGroup } from "./conversation-order.js";
+import { asyncUserInputRequest, asyncAnswerRequestId, answeredAsyncRequestIds, displayUserInputText, asyncQuestionDeferred, setAsyncQuestionDeferred, deliverAsyncUserInput } from "./async-user-input.js";
 
 const $ = (selector) => document.querySelector(selector);
 const MAX_RENDERED_COMMAND_OUTPUT = 16_000;
@@ -235,6 +237,9 @@ const state = {
   accountRateLimits: null,
   threadTokenUsage: new Map(),
   threads: new Map(),
+  threadPages: new Map(),
+  globalThreadPage: null,
+  globalThreadRefresh: null,
   selectedProjectId: null,
   selectedThreadId: null,
   threadSelectionId: 0,
@@ -248,12 +253,12 @@ const state = {
   goalDialogThreadId: null,
   goalMutating: false,
   userInputRequests: new Map(),
+  asyncInputCards: new Map(),
   approvalRequests: new Map(),
   editingQueueItemId: null,
   mode: "queue",
   runStripOpen: false,
   workspaceRefreshPromise: null,
-  threadRefreshGeneration: 0,
   materializingThread: false,
   submittingMessage: false,
   submittingThreadIds: new Set(),
@@ -265,6 +270,10 @@ const state = {
   scrollCommandUntil: 0,
   renderingConversation: false,
   eventStream: null,
+  eventEpoch: null,
+  eventRevisions: new Map(),
+  eventDetailRevisions: new Map(),
+  eventStreamReconnectTimer: null,
   eventStreamLastActivityAt: 0,
   eventStreamInterrupted: false,
   eventStreamWatchdogTimer: null,
@@ -286,6 +295,7 @@ const state = {
   codexReady: false,
   codexStatusTimer: null,
   workspaceRoot: null,
+  workspaceSyncVersion: 0,
   sidebarView: "projects",
   sidebarOrder: "original",
   completionNotificationsEnabled: false,
@@ -474,26 +484,51 @@ function renderContextUsage() {
 }
 
 async function refreshAllThreads({ foregroundProjectId = null } = {}) {
-  const projectIds = state.projects.map((project) => project.id);
-  const foreground = projectIds.includes(foregroundProjectId) ? foregroundProjectId : null;
-  const generation = ++state.threadRefreshGeneration;
-  if (!foreground) {
-    await Promise.all(projectIds.map((projectId) => refreshProjectThreads(projectId)));
-  } else {
-    await refreshProjectThreads(foreground);
-    const remaining = projectIds.filter((projectId) => projectId !== foreground);
-    void (async () => {
-      for (const projectId of remaining) {
-        if (generation !== state.threadRefreshGeneration) return;
-        await refreshProjectThreads(projectId);
-      }
-    })().catch((error) => showActivity(`其他项目刷新失败：${error.message}`, true));
-  }
+  const foreground = foregroundProjectId || state.selectedProjectId || state.projects[0]?.id;
+  if (foreground) await refreshProjectThreads(foreground);
+  void refreshGlobalThreads().catch((error) => showActivity(`跨项目摘要刷新失败：${error.message}`, true));
   ensureEventStream();
   renderRunStrip();
 }
 
-async function refreshProjectThreads(projectId) {
+async function refreshGlobalThreads({ cursor = null, append = false } = {}) {
+  if (state.globalThreadRefresh) return state.globalThreadRefresh;
+  const order = state.sidebarOrder;
+  const baseline = new Map([...state.threads].map(([id, threads]) => [id, [...threads]]));
+  const refresh = (async () => {
+    // Static assets can update before the running service is restarted. Keep
+    // that existing server usable until it advertises the new sync contract.
+    if (state.workspaceSyncVersion < 2) {
+      for (const project of state.projects) if (project.id !== state.selectedProjectId) await refreshProjectThreads(project.id);
+      state.globalThreadPage = { ids: [...state.threads.values()].flatMap((threads) => threads.map((thread) => thread.id)), nextCursor: null, order };
+      renderThreads();
+      renderRunStrip();
+      return;
+    }
+    const query = new URLSearchParams({ limit: "50", order });
+    if (cursor) query.set("cursor", cursor);
+    const result = await api(`/api/workspace/threads?${query}`);
+    if (state.sidebarOrder !== order) return;
+    for (const project of state.projects) {
+      const listed = (result.threads || []).filter((thread) => thread.projectId === project.id);
+      state.threads.set(project.id, mergeThreadSummaryPage(baseline.get(project.id), state.threads.get(project.id), listed));
+    }
+    state.globalThreadPage = mergeThreadListPage(state.globalThreadPage, result.pageThreadIds || [], result.nextCursor, { order, append });
+    renderProjects();
+    renderThreads();
+    renderRunStrip();
+  })();
+  state.globalThreadRefresh = refresh;
+  if (state.sidebarView === "recent") renderThreads();
+  try { await refresh; }
+  finally {
+    if (state.globalThreadRefresh === refresh) state.globalThreadRefresh = null;
+    renderThreads();
+    if (state.sidebarOrder !== order && state.sidebarView === "recent") void refreshGlobalThreads().catch(showError);
+  }
+}
+
+async function refreshProjectThreads(projectId, { cursor = null, append = false } = {}) {
   const project = state.projects.find((entry) => entry.id === projectId);
   if (project?.available === false) {
     state.threads.set(projectId, []);
@@ -501,23 +536,43 @@ async function refreshProjectThreads(projectId) {
     else if (state.sidebarOrder === "recent") renderProjects();
     return [];
   }
+  const order = state.sidebarOrder;
+  const existing = state.threadPages.get(projectId);
+  if (existing?.loading && existing.order === order) return existing.loading;
+  const page = { ...(existing?.order === order ? existing : {}), ids: existing?.order === order ? existing.ids : [], order, loading: null };
+  state.threadPages.set(projectId, page);
   const baselineThreads = [...(state.threads.get(projectId) || [])];
-  const result = await api(`/api/projects/${encodeURIComponent(projectId)}/threads`);
-  const currentThreads = state.threads.get(projectId) || [];
-  const merged = mergeRefreshedThreads(baselineThreads, currentThreads, result.threads || []);
-  const threads = merged.threads.map((thread) => {
-    const normalized = thread;
-    const snapshot = state.queueSnapshots.get(thread.id);
-    if (!snapshot || snapshot.revision === null || snapshot.revision === undefined || !Number.isInteger(normalized.queueRevision)) return normalized;
-    if (normalized.queueRevision >= snapshot.revision) return normalized;
-    return { ...normalized, queueCount: snapshot.queue.length, queueRevision: snapshot.revision };
-  });
-  for (const threadId of merged.removedThreadIds) forgetClientThread(threadId);
-  state.threads.set(projectId, threads);
-  if (projectId === state.selectedProjectId || state.sidebarView === "recent") renderThreads();
-  else if (state.sidebarOrder === "recent") renderProjects();
-  renderRunStrip();
-  return threads;
+  const load = (async () => {
+    const query = new URLSearchParams({ limit: "50", order });
+    if (cursor) query.set("cursor", cursor);
+    let result;
+    do {
+      result = await api(`/api/projects/${encodeURIComponent(projectId)}/threads${state.workspaceSyncVersion >= 2 ? `?${query}` : ""}`);
+      if (!result.threads?.length && result.nextCursor) query.set("cursor", result.nextCursor);
+    } while (!result.threads?.length && result.nextCursor);
+    if (state.threadPages.get(projectId) !== page) return state.threads.get(projectId) || [];
+    const currentThreads = state.threads.get(projectId) || [];
+    const listed = [...(result.threads || []), ...(result.preferredThread ? [result.preferredThread] : [])];
+    const threads = mergeThreadSummaryPage(baselineThreads, currentThreads, listed).map((thread) => {
+      const snapshot = state.queueSnapshots.get(thread.id);
+      if (!snapshot || snapshot.revision === null || snapshot.revision === undefined || !Number.isInteger(thread.queueRevision)) return thread;
+      if (thread.queueRevision >= snapshot.revision) return thread;
+      return { ...thread, queueCount: snapshot.queue.length, queueRevision: snapshot.revision };
+    });
+    Object.assign(page, mergeThreadListPage(existing, (result.threads || []).map((thread) => thread.id), result.nextCursor, { order, append }));
+    state.threads.set(projectId, threads);
+    if (projectId === state.selectedProjectId || state.sidebarView === "recent") renderThreads();
+    else if (state.sidebarOrder === "recent") renderProjects();
+    renderRunStrip();
+    return threads;
+  })();
+  page.loading = load;
+  if (projectId === state.selectedProjectId) renderThreads();
+  try { return await load; }
+  finally {
+    page.loading = null;
+    if (state.threadPages.get(projectId) === page) renderThreads();
+  }
 }
 
 async function selectProject(projectId, { keepSidebarOpen = false, preserveFollowLatest = false, threadId = null } = {}) {
@@ -540,6 +595,10 @@ async function selectProject(projectId, { keepSidebarOpen = false, preserveFollo
     clearThread();
     showActivity("项目目录当前不可用；恢复目录后刷新工作台。", true);
     return;
+  }
+  if (state.threadPages.get(project.id)?.order !== state.sidebarOrder) {
+    await refreshProjectThreads(project.id);
+    if (state.selectedProjectId !== project.id) return;
   }
   const threads = state.threads.get(project.id) || [];
   const requestedThreadId = threadId || (!changedProject ? currentThreadId : null);
@@ -605,15 +664,10 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
   if (hasCachedHistory && !mergeHistory) {
     try {
       const activeTurnId = isActiveThreadRuntime(listedThread?.runtime) ? listedThread.runtime.activeTurnId : null;
-      const refreshRuntime = activeTurnId
-        ? refreshProjectThreads(project.id)
-        : Promise.resolve(null);
       const activeMetrics = activeTurnId ? `&activeTurnId=${encodeURIComponent(activeTurnId)}` : "";
-      const [result] = await Promise.all([
-        api(`/api/threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(project.id)}&history=none${activeMetrics}`, { signal: controller.signal }),
-        refreshRuntime,
-      ]);
+      const result = await api(`/api/threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(project.id)}&history=none${activeMetrics}`, { signal: controller.signal });
       ingestTurnMetrics(result.metrics);
+      for (const itemId of result.answeredAsyncUserInputIds || []) markAsyncQuestionAnswered(threadId, itemId);
       if (selectionId === state.threadSelectionId && result.accessedAt) {
         updateThreadInState(project.id, { ...findThread(project.id, threadId), accessedAt: result.accessedAt });
       }
@@ -646,6 +700,7 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
     if (state.threadSelectionController === controller) state.threadSelectionController = null;
   }
   if (selectionId !== state.threadSelectionId) return;
+  state.eventDetailRevisions.set(threadId, result.eventRevision || 0);
   ingestTurnMetrics(result.metrics);
   if (result.tokenUsage) rememberThreadTokenUsage(threadId, result.tokenUsage);
   const selected = currentThread();
@@ -660,6 +715,8 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
     ...result.thread,
     turns,
     history,
+    historyRevision: result.eventRevision || 0,
+    historySnapshotId: selectionId,
     syncedUpdatedAt: result.thread.updatedAt ?? listedThread?.updatedAt,
     historyLive: false,
     runtime: result.runtime || result.thread.runtime,
@@ -884,7 +941,16 @@ function renderThreads() {
     ui.threadList.append(unavailable);
     return;
   }
-  const entries = sidebarThreadEntries(state.projects, state.threads, {
+  const page = crossProject ? state.globalThreadPage : state.threadPages.get(project.id);
+  const pageIds = new Set(page?.ids || []);
+  const visibleThreads = new Map([...state.threads].map(([id, threads]) => {
+    const byId = new Map(threads.map((thread) => [thread.id, thread]));
+    const ordered = (page?.ids || []).flatMap((threadId) => byId.has(threadId) ? [byId.get(threadId)] : []);
+    const pinned = !crossProject && id === project.id ? threads.filter((thread) => !pageIds.has(thread.id)
+      && (isLocalThreadId(thread.id) || thread.id === state.selectedThreadId)) : [];
+    return [id, [...pinned, ...ordered]];
+  }));
+  const entries = sidebarThreadEntries(state.projects, visibleThreads, {
     view: state.sidebarView,
     order: state.sidebarOrder,
     projectId: project.id,
@@ -892,8 +958,9 @@ function renderThreads() {
   if (!entries.length) {
     const empty = document.createElement("p");
     empty.className = "sidebar-empty";
-    empty.textContent = crossProject ? "还没有可显示的对话" : "这个项目还没有聊天";
+    empty.textContent = page?.loading || crossProject && state.globalThreadRefresh ? "正在加载对话…" : crossProject ? "还没有可显示的对话" : "这个项目还没有聊天";
     ui.threadList.append(empty);
+    appendThreadLoadMore(page, crossProject, project.id);
     renderRecentThreads();
     return;
   }
@@ -901,6 +968,7 @@ function renderThreads() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "thread-item";
+    button.dataset.threadId = thread.id;
     if (crossProject) button.classList.add("cross-project");
     if (thread.id === state.selectedThreadId) button.classList.add("active");
     if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
@@ -922,7 +990,37 @@ function renderThreads() {
     });
     ui.threadList.append(button);
   }
+  appendThreadLoadMore(page, crossProject, project.id);
   renderRecentThreads();
+}
+
+function appendThreadLoadMore(page, crossProject, projectId) {
+  if (!page?.nextCursor || page.order !== state.sidebarOrder) return;
+  const loading = Boolean(page.loading) || crossProject && Boolean(state.globalThreadRefresh);
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "thread-load-more";
+  more.disabled = loading;
+  more.setAttribute("aria-busy", String(loading));
+  more.innerHTML = '<span></span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>';
+  more.firstChild.textContent = loading ? "正在加载…" : "显示更多对话";
+  more.addEventListener("click", async (event) => {
+    const scroller = ui.threadList.closest(".sidebar-navigation-body");
+    const scrollTop = scroller?.scrollTop;
+    const options = { cursor: page.nextCursor, append: true };
+    try {
+      if (crossProject) await refreshGlobalThreads(options);
+      else await refreshProjectThreads(projectId, options);
+      if ((state.sidebarView === "recent") !== crossProject || !crossProject && state.selectedProjectId !== projectId) return;
+      if (scroller) scroller.scrollTop = scrollTop;
+      if (event.detail === 0) {
+        const known = new Set(page.ids);
+        const firstNew = [...ui.threadList.querySelectorAll(".thread-item")].find((button) => !known.has(button.dataset.threadId));
+        firstNew?.focus({ preventScroll: true });
+      }
+    } catch (error) { showError(error); }
+  });
+  ui.threadList.append(more);
 }
 
 function renderSidebarControls() {
@@ -953,6 +1051,8 @@ function setSidebarNavigation(view, order) {
   localStorage.setItem(userStorageKey("sidebar-order"), state.sidebarOrder);
   renderProjects();
   renderThreads();
+  if (state.sidebarView === "recent") void refreshGlobalThreads().catch(showError);
+  else if (state.selectedProjectId && (order || state.threadPages.get(state.selectedProjectId)?.order !== state.sidebarOrder)) void refreshProjectThreads(state.selectedProjectId).catch(showError);
 }
 
 function renderRecentThreads() {
@@ -1252,6 +1352,10 @@ function renderConversationProfiled(turns) {
   const previousScrollTop = ui.conversation.scrollTop;
   const liveMetricsByTurn = captureRenderedExecutionItems();
   state.renderingConversation = true;
+  const thread = currentThread();
+  if (thread) thread.answeredAsyncUserInputIds = [...new Set([
+    ...(thread.answeredAsyncUserInputIds || []), ...answeredAsyncRequestIds(turns || [], currentQueue()),
+  ])];
   ui.conversation.replaceChildren();
   state.messageElements.clear();
   state.executionGroups.clear();
@@ -1282,7 +1386,6 @@ function renderConversationProfiled(turns) {
       }
     }
     renderTurnPlan(turn.id, state.turnMetrics.get(turn.id)?.plan, turn.status);
-    moveFinalMessagesToEnd(state.executionGroups.get(turn.id));
   }
   for (const request of state.userInputRequests.values()) {
     if (request.threadId === state.selectedThreadId) renderUserInputRequest(request);
@@ -1304,19 +1407,19 @@ function renderConversationProfiled(turns) {
   }
 }
 
-function renderUserInputRequest(request) {
+function renderUserInputRequest(request, { inlineAsync = false } = {}) {
   if (!request?.requestId || request.threadId !== state.selectedThreadId) return;
-  removeUserInputCard(request.requestId);
+  if (!inlineAsync) removeUserInputCard(request.requestId);
   ui.conversation.querySelector(".empty-state")?.remove();
   const form = document.createElement("form");
-  form.className = "user-input-card";
+  form.className = inlineAsync ? "user-input-card async-question-card" : "user-input-card";
   form.dataset.requestId = request.requestId;
   const heading = document.createElement("div");
   heading.className = "user-input-heading";
   const title = document.createElement("strong");
-  title.textContent = "需要你的回答";
+  title.textContent = inlineAsync ? "异步提问 · 待回答" : "需要你的回答";
   const note = document.createElement("span");
-  note.textContent = "回答后 Codex 会继续当前任务";
+  note.textContent = request.isBlocking === false ? "你可以稍后回答，Codex 会继续执行" : "回答后 Codex 会继续当前任务";
   heading.append(title, note);
   const controls = [];
   form.append(heading);
@@ -1342,11 +1445,13 @@ function renderUserInputRequest(request) {
         otherText.type = question.isSecret ? "password" : "text";
         otherText.placeholder = "输入你的回答";
         otherText.autocomplete = "off";
+        otherText.setAttribute("aria-label", `${question.header}：其他回答`);
         otherText.disabled = true;
         other.append(otherText);
         field.append(other);
       }
       const radios = [...field.querySelectorAll('input[type="radio"]')];
+      if (inlineAsync && radios.length) radios[0].checked = true;
       for (const radio of radios) {
         radio.required = true;
         radio.addEventListener("change", () => {
@@ -1368,6 +1473,7 @@ function renderUserInputRequest(request) {
       input.className = "user-input-text";
       input.type = question.isSecret ? "password" : "text";
       input.autocomplete = "off";
+      input.setAttribute("aria-label", question.question);
       input.required = true;
       field.append(input);
       controls.push({ question, input });
@@ -1383,14 +1489,109 @@ function renderUserInputRequest(request) {
   submit.type = "submit";
   submit.textContent = "提交回答";
   footer.append(error, submit);
+  if (inlineAsync) {
+    const later = document.createElement("button");
+    later.className = "quiet-button";
+    later.type = "button";
+    later.textContent = "稍后回答";
+    later.dataset.action = "defer";
+    footer.prepend(later);
+  }
   form.append(footer);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     void submitUserInputRequest(request, form, controls, error, submit);
   });
+  if (inlineAsync) return form;
   ui.conversation.append(form);
   placeTurnContent(request.turnId, { root: form });
   followNewContent();
+}
+
+function renderAsyncUserInput(item, turnId) {
+  const request = asyncUserInputRequest(item, { threadId: state.selectedThreadId, turnId });
+  if (!request) return null;
+  const key = `${request.threadId}:${request.requestId}`;
+  const answered = currentThread()?.answeredAsyncUserInputIds?.includes(request.requestId);
+  let view = state.asyncInputCards.get(key);
+  if (!answered && !view) {
+    const root = renderUserInputRequest(request, { inlineAsync: true });
+    root.dataset.asyncRequestId = request.requestId;
+    root.setAttribute("aria-label", "Codex 异步提问");
+    const resume = document.createElement("button");
+    resume.type = "button";
+    resume.className = "quiet-button";
+    resume.textContent = "继续回答";
+    root.querySelector(".user-input-heading").append(resume);
+    const summary = document.createElement("p");
+    summary.textContent = request.questions.map((question) => question.question).join("\n\n");
+    root.querySelector(".user-input-heading").after(summary);
+    view = { request, root, resume, summary, collapsed: false };
+    state.asyncInputCards.set(key, view);
+    root.querySelector('[data-action="defer"]').addEventListener("click", () => {
+      collapseAsyncQuestion(view, true);
+      resume.focus();
+    });
+    resume.addEventListener("click", () => collapseAsyncQuestion(view, false));
+    collapseAsyncQuestion(view, asyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), key), { persist: false });
+  }
+  const root = view?.root || document.createElement("section");
+  if (answered) {
+    renderAnsweredAsyncQuestion(root, request);
+    state.asyncInputCards.delete(key);
+  } else updateAsyncQuestionNote(view);
+  if (!root.parentNode?.isConnected) ui.conversation.append(root);
+  return { root };
+}
+
+function collapseAsyncQuestion(view, collapsed, { persist = true } = {}) {
+  view.collapsed = collapsed;
+  for (const field of view.root.querySelectorAll(".user-input-question, .user-input-footer")) field.hidden = collapsed;
+  view.resume.hidden = !collapsed;
+  view.summary.hidden = !collapsed;
+  view.resume.setAttribute("aria-expanded", String(!collapsed));
+  if (persist) setAsyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), `${view.request.threadId}:${view.request.requestId}`, collapsed);
+  updateAsyncQuestionNote(view);
+}
+
+function updateAsyncQuestionNote(view) {
+  const thread = findThread(findProjectForThread(view.request.threadId), view.request.threadId);
+  view.root.querySelector(".user-input-heading span").textContent = view.collapsed ? "已选择稍后回答；展开卡片即可继续"
+    : isActiveThreadRuntime(thread?.runtime)
+    ? "你可以稍后回答，Codex 会继续执行"
+    : "当前任务已结束；提交回答后会开始下一轮";
+}
+
+function renderAnsweredAsyncQuestion(root, request) {
+  root.className = "user-input-card async-question-card";
+  root.dataset.asyncRequestId = request.requestId;
+  const title = document.createElement("strong");
+  title.textContent = "异步提问 · 已回答";
+  const prompt = document.createElement("p");
+  prompt.textContent = request.questions.map((question) => question.question).join("\n\n");
+  root.replaceChildren(title, prompt);
+}
+
+function markAsyncQuestionAnswered(threadId, requestId) {
+  if (!requestId) return;
+  const projectId = findProjectForThread(threadId);
+  const thread = findThread(projectId, threadId);
+  if (thread) updateThreadInState(projectId, { id: threadId,
+    answeredAsyncUserInputIds: [...new Set([...(thread.answeredAsyncUserInputIds || []), requestId])] });
+  const key = `${threadId}:${requestId}`;
+  const view = state.asyncInputCards.get(key);
+  if (view) {
+    renderAnsweredAsyncQuestion(view.root, view.request);
+    state.asyncInputCards.delete(key);
+  }
+  setAsyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), key, false);
+  if (state.selectedThreadId === threadId) {
+    for (const card of ui.conversation.querySelectorAll(".async-question-card")) {
+      if (card.dataset.asyncRequestId !== requestId) continue;
+      card.querySelector("strong").textContent = "异步提问 · 已回答";
+      for (const button of card.querySelectorAll("button")) button.disabled = true;
+    }
+  }
 }
 
 function userInputOption(name, label, description, other = false) {
@@ -1433,6 +1634,17 @@ async function submitUserInputRequest(request, form, controls, error, submit) {
   submit.textContent = "正在提交…";
   for (const element of form.elements) element.disabled = true;
   try {
+    if (request.delivery === "async") {
+      const result = await deliverAsyncUserInput({ request, answers, projectId: project.id, api });
+      markAsyncQuestionAnswered(request.threadId, request.requestId);
+      if (result.delivery === "guide") acceptGuideMessage(request.threadId, result.turnId, result.item);
+      else {
+        applyQueueSnapshot(request.threadId, result.queue, result.queueRevision);
+        if (state.selectedThreadId === request.threadId) renderQueue();
+      }
+      showActivity("回答已送达。", false);
+      return;
+    }
     await api(`/api/threads/${encodeURIComponent(request.threadId)}/user-input/${encodeURIComponent(request.requestId)}`, {
       method: "POST",
       body: { projectId: project.id, answers },
@@ -1442,6 +1654,9 @@ async function submitUserInputRequest(request, form, controls, error, submit) {
     scheduleTurnActivity(request.turnId, 0);
   } catch (submitError) {
     for (const element of form.elements) element.disabled = false;
+    for (const control of controls) {
+      if (control.otherText) control.otherText.disabled = !control.field.querySelector('input[data-other="true"]:checked');
+    }
     submit.textContent = "提交回答";
     error.textContent = submitError.message;
   }
@@ -1464,7 +1679,7 @@ function syncUserInputRequests(threadId, requests) {
   }
   for (const request of requests || []) state.userInputRequests.set(String(request.requestId), request);
   if (state.selectedThreadId !== threadId) return;
-  for (const card of ui.conversation.querySelectorAll(".user-input-card")) card.remove();
+  for (const card of ui.conversation.querySelectorAll(".user-input-card:not(.approval-card):not(.async-question-card)")) card.remove();
   for (const request of state.userInputRequests.values()) {
     if (request.threadId === threadId) renderUserInputRequest(request);
   }
@@ -1670,9 +1885,17 @@ function renderHistoryItem(item, { turnId = null, guide = false } = {}) {
     placeTurnContent(turnId, message, { beforeExecution: !guide });
     return message;
   } else if (item.type === "agentMessage" || item.type === "plan") {
-    const message = item.type === "agentMessage" && item.phase === "commentary"
-      ? addProgressMessage(item.id, item.text || "")
-      : addMessage(item.id, "Codex", item.text || "", "assistant", messageTimestamp(item, turnId));
+    const previousRoot = state.messageElements.get(item.id)?.root
+      || state.asyncInputCards.get(`${state.selectedThreadId}:${item.id}`)?.root;
+    const message = renderInTimelinePosition(previousRoot, () => {
+      if (item.delivery === "async") {
+        removeRenderedMessage(item.id);
+        return renderAsyncUserInput(item, turnId);
+      }
+      return item.type === "agentMessage" && item.phase === "commentary"
+        ? addProgressMessage(item.id, item.text || "")
+        : addMessage(item.id, "Codex", item.text || "", "assistant", messageTimestamp(item, turnId));
+    });
     placeTurnContent(turnId, message);
     return message;
   }
@@ -1685,7 +1908,11 @@ function placeTurnContent(turnId, message, { beforeExecution = false } = {}) {
   if (turnId) message.root.dataset.turnId = turnId;
   if (message.root.classList.contains("user")) {
     if (group?.root?.parentNode === ui.conversation) group.root.before(message.root);
-    else if (message.root.parentNode !== ui.conversation) ui.conversation.append(message.root);
+    else {
+      const question = [...ui.conversation.querySelectorAll(".async-question-card")].find((root) => root.dataset.turnId === turnId);
+      if (question) question.before(message.root);
+      else if (message.root.parentNode !== ui.conversation) ui.conversation.append(message.root);
+    }
     return;
   }
   if (!group?.list) {
@@ -1695,6 +1922,7 @@ function placeTurnContent(turnId, message, { beforeExecution = false } = {}) {
     }
     return;
   }
+  if (message.root.parentNode === group.list) return;
   group.activeCommandBatch = null;
   if (beforeExecution) {
     const entries = [...group.items.values()];
@@ -1707,7 +1935,7 @@ function placeTurnContent(turnId, message, { beforeExecution = false } = {}) {
 }
 
 function userMessageText(item) {
-  return (item.content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
+  return displayUserInputText((item.content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n"));
 }
 
 function turnTimestamp(turn) {
@@ -1868,7 +2096,6 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
     entry.autoOpened = false;
   }
   updateExecutionGroup(group, turnStatus);
-  moveFinalMessagesToEnd(group);
   if (!state.renderingConversation) syncElapsedTimer();
   followNewContent();
 }
@@ -2000,29 +2227,9 @@ function ensureExecutionGroup(turnId, turnStatus, timing) {
   group = { turnId, root, count, status, list, items: new Map(), commandBatches: new Set(), activeCommandBatch: null, plan: null, turnStatus, timingSummary, totalValue, timingFields, copyProcess };
   mergeExecutionTiming(group, timing);
   state.executionGroups.set(turnId, group);
-  moveExistingTurnContentIntoExecutionGroup(group);
-  moveFinalMessagesToEnd(group);
+  moveExistingTurnContentIntoExecutionGroup(group, ui.conversation);
   updateExecutionGroup(group, turnStatus);
   return group;
-}
-
-function moveExistingTurnContentIntoExecutionGroup(group) {
-  if (!group?.turnId || !group.list) return;
-  const roots = [...ui.conversation.children].filter((root) => (
-    root.dataset?.turnId === group.turnId
-      && root.parentNode === ui.conversation
-      && (root.classList.contains("message") || root.classList.contains("progress-message"))
-      && !root.classList.contains("user")
-  ));
-  for (const root of roots) group.list.append(root);
-}
-
-function moveFinalMessagesToEnd(group) {
-  if (!group?.list) return;
-  const messages = [...group.list.children].filter((root) => (
-    root.classList.contains("message") && root.classList.contains("assistant")
-  ));
-  for (const message of messages) group.list.append(message);
 }
 
 function renderTurnPlan(turnId, plan, turnStatus = "inProgress") {
@@ -2035,7 +2242,6 @@ function renderTurnPlan(turnId, plan, turnStatus = "inProgress") {
   } else {
     updateTurnPlanView(group.plan, plan);
   }
-  moveFinalMessagesToEnd(group);
   followNewContent();
 }
 
@@ -2745,9 +2951,9 @@ function imageFileCard(file, url) {
   const download = document.createElement("a");
   download.className = "file-download-direct";
   download.href = url;
-  download.setAttribute("aria-label", `用浏览器打开 ${file.name}`);
-  download.title = "用浏览器打开";
-  download.textContent = "↗";
+  download.setAttribute("aria-label", `下载 ${file.name}`);
+  download.title = "下载原文件";
+  download.textContent = "↓";
   bindDownloadLink(download, file.name);
   card.append(preview, download);
   return card;
@@ -2773,12 +2979,33 @@ function previewFileCard(file, url, previewKind) {
   return card;
 }
 
-function bindDownloadLink(link, fileName) {
-  link.addEventListener("click", (event) => {
+function bindDownloadLink(link, fileName, feedback) {
+  let pending = false;
+  const report = (message, error = false) => {
+    if (feedback) {
+      feedback.textContent = message;
+      feedback.classList.toggle("error", error);
+      feedback.hidden = false;
+    }
+    showActivity(message, error);
+  };
+  link.addEventListener("click", async (event) => {
+    event.preventDefault();
+    if (pending) return;
+    pending = true;
     const url = new URL(link.href, location.href).href;
-    const external = openDownloadExternally(url);
-    if (external) event.preventDefault();
-    showActivity(external ? `请选择 ${fileName} 的下载方式` : `正在下载 ${fileName}`, false);
+    const name = fileName || new URL(url).searchParams.get("name") || "文件";
+    link.setAttribute("aria-busy", "true");
+    report(`正在准备下载 ${name}…`);
+    try {
+      await downloadLocalFile(url);
+      report(`已发起下载 ${name}，请查看系统下载通知。`);
+    } catch (error) {
+      report(error.message, true);
+    } finally {
+      pending = false;
+      link.removeAttribute("aria-busy");
+    }
   });
 }
 
@@ -2786,14 +3013,11 @@ function openImagePreview(path, name = "", url = "") {
   const fileName = name || String(path || "").split(/[\\/]/).filter(Boolean).pop() || "图片";
   const source = url || localFileUrl(path, fileName);
   ui.imagePreviewName.textContent = fileName;
+  $("#image-download-status").hidden = true;
   ui.imagePreviewPath.textContent = path;
   ui.imagePreviewImage.src = source;
   ui.imagePreviewImage.alt = fileName;
   ui.imagePreviewDownload.href = source;
-  ui.imagePreviewDownload.onclick = (event) => {
-    const external = openDownloadExternally(new URL(source, location.href).href);
-    if (external) event.preventDefault();
-  };
   if (!ui.imagePreviewDialog.open) ui.imagePreviewDialog.showModal();
 }
 
@@ -2826,15 +3050,8 @@ function fileCardContent(file, actionLabel) {
   return fragment;
 }
 
-function projectFileUrl(projectId, path, name) {
-  return `/api/projects/${encodeURIComponent(projectId)}/files/download?path=${encodeURIComponent(path)}&name=${encodeURIComponent(name || "download")}`;
-}
-
 function localFileUrl(path, name) {
-  const project = projectForLocalFile(state.projects, path);
-  if (project) return projectFileUrl(project.id, path, name);
-  if (state.user?.role === "admin") return `/api/admin/files/download?path=${encodeURIComponent(path)}&name=${encodeURIComponent(name || "download")}`;
-  return projectFileUrl(currentProject().id, path, name);
+  return localFileDownloadUrl({ projects: state.projects, projectId: currentProject()?.id, role: state.user?.role, path, name });
 }
 
 let markdownPreviewRequest = 0;
@@ -2856,6 +3073,7 @@ async function openTextPreview(file, url, previewKind) {
   setMarkdownPreviewValue("", "");
   ui.filePreviewKicker.textContent = previewKind === "markdown" ? "Markdown 预览" : previewKind === "json" ? "JSON 预览" : previewKind === "code" ? "代码预览" : "文本预览";
   ui.markdownPreviewName.textContent = file.name;
+  $("#markdown-download-status").hidden = true;
   ui.markdownPreviewPath.textContent = file.path;
   ui.markdownPreviewDownload.href = url;
   ui.markdownPreviewDownload.hidden = false;
@@ -2898,6 +3116,7 @@ function openFileChangePreview(item) {
   ui.markdownPreviewName.textContent = title;
   ui.markdownPreviewPath.textContent = changes.map((change) => change.path).filter(Boolean).join(" · ") || "完整 diff";
   ui.markdownPreviewDownload.hidden = true;
+  $("#markdown-download-status").hidden = true;
   ui.markdownPreviewStatus.hidden = true;
   ui.markdownPreviewBody.hidden = false;
   ui.markdownPreviewBody.className = "diff-document";
@@ -2945,7 +3164,7 @@ function renderQueue() {
     const row = ui.queueItemTemplate.content.firstElementChild.cloneNode(true);
     const queueIndex = row.querySelector(".queue-index");
     queueIndex.textContent = String(index + 1);
-    row.querySelector(".queue-text").textContent = item.text;
+    row.querySelector(".queue-text").textContent = displayUserInputText(item.text);
     const guideButton = row.querySelector('[data-action="guide"]');
     const guiding = state.queueGuiding.has(item.id);
     row.classList.toggle("guiding", guiding);
@@ -3967,12 +4186,25 @@ async function reconcileEventStreamInterruption() {
 
 function openEventStream() {
   const existing = state.eventStream;
-  if (existing && existing.readyState !== EventSource.CLOSED) return existing;
+  const scoped = state.workspaceSyncVersion >= 2;
+  const threadId = scoped && state.selectedThreadId && !isLocalThreadId(state.selectedThreadId) ? state.selectedThreadId : null;
+  const thread = threadId ? currentThread() : null;
+  const snapshotId = thread?.historySnapshotId || 0;
+  if (existing && existing.readyState !== EventSource.CLOSED && existing.codexlanThreadId === threadId && existing.codexlanScoped === scoped && existing.codexlanSnapshotId === snapshotId) return existing;
+  existing?.close();
+  clearTimeout(state.eventStreamReconnectTimer);
   state.eventStream = null;
-  const stream = new EventSource("/api/events");
+  const query = new URLSearchParams({ scope: "workspace" });
+  if (threadId) query.set("threadId", threadId);
+  if (threadId) query.set("afterRevision", String(Math.max(thread?.historyRevision || 0, state.eventDetailRevisions.get(threadId) || 0)));
+  const stream = new EventSource(scoped ? `/api/events?${query}` : "/api/events");
+  stream.codexlanThreadId = threadId;
+  stream.codexlanScoped = scoped;
+  stream.codexlanSnapshotId = snapshotId;
   state.eventStream = stream;
   markEventStreamActivity(stream);
   stream.addEventListener("open", () => {
+    if (state.eventStream !== stream) return;
     markEventStreamActivity(stream);
     profileMark("eventStream", { event: "open" });
     reconcileEventStreamInterruption().catch(showError);
@@ -3982,19 +4214,38 @@ function openEventStream() {
     profileMark("eventStream", { event: "error", readyState: stream.readyState });
     if (!state.eventStreamInterrupted) invalidateCachedThreadHistories();
     state.eventStreamInterrupted = true;
+    stream.close();
+    state.eventStream = null;
+    state.eventStreamReconnectTimer = setTimeout(() => {
+      if (state.user && !document.hidden) ensureEventStream();
+    }, 2000);
   });
   stream.addEventListener("heartbeat", () => markEventStreamActivity(stream));
   stream.addEventListener("server", (event) => {
+    if (state.eventStream !== stream) return;
     markEventStreamActivity(stream);
     const data = safeJson(event.data);
+    if (data?.epoch && data.epoch !== state.eventEpoch) {
+      if (state.eventEpoch) invalidateCachedThreadHistories();
+      state.eventEpoch = data.epoch;
+      state.eventRevisions.clear();
+      state.eventDetailRevisions.clear();
+    }
+    if (data?.rateLimitsChanged) {
+      scheduleAccountRateLimitsRefresh();
+      return;
+    }
     profileMark("serverEvent", { status: data?.status });
+    const wasReady = state.codexReady;
     applyCodexStatus(data);
-    if (data?.status === "ready") scheduleResume(0);
+    if (data?.status === "ready" && !wasReady) scheduleResume(0);
   });
   stream.addEventListener("codex", (event) => {
+    if (state.eventStream !== stream) return;
     markEventStreamActivity(stream);
     const data = safeJson(event.data);
     const threadId = data?.params?.threadId;
+    if (threadId && stream.codexlanThreadId === threadId && Number.isInteger(data.revision)) state.eventDetailRevisions.set(threadId, data.revision);
     profileMark("codexEventReceived", { method: data?.method, threadId });
     if (threadId) handleCodexEvent(threadId, data);
   });
@@ -4042,12 +4293,55 @@ function handleCodexEvent(threadId, event) {
 function handleCodexEventImpl(threadId, event) {
   if (!event) return;
   const params = event.params || {};
-  const projectId = findProjectForThread(threadId);
-  if (!projectId) return;
+  const projectId = params.projectId || params.runtime?.projectId || findProjectForThread(threadId);
+  if (!projectId || !state.projects.some((project) => project.id === projectId)) return;
+  const previousRevision = state.eventRevisions.get(threadId) || 0;
+  if (Number.isInteger(event.revision)) {
+    if (event.revision < previousRevision) return;
+    state.eventRevisions.set(threadId, event.revision);
+  }
+  if (event.method === "thread/deleted") {
+    state.threads.set(projectId, (state.threads.get(projectId) || []).filter((thread) => thread.id !== threadId));
+    forgetClientThread(threadId);
+    if (state.selectedThreadId === threadId) clearThread();
+    renderThreads();
+    renderRunStrip();
+    return;
+  }
   let thread = findThread(projectId, threadId);
-  if (!thread) return;
+  if (!thread) {
+    thread = updateThreadInState(projectId, { id: threadId, name: params.name || null });
+    const projectPage = state.threadPages.get(projectId);
+    for (const page of [projectPage, state.globalThreadPage]) {
+      if (!page || page.order !== state.sidebarOrder) continue;
+      Object.assign(page, mergeThreadListPage(page, [threadId, ...page.ids].slice(0, 50), page.nextCursor, { order: page.order }));
+    }
+  }
+  if (event.method === "workspace/thread") {
+    updateThreadInState(projectId, { ...thread, name: params.name || thread.name, runtime: params.runtime });
+    renderThreads();
+    renderRunStrip();
+    return;
+  }
+  const previousRuntime = thread.runtime;
+  if (event.method === "workspace/summary") {
+    thread = updateThreadInState(projectId, {
+      ...thread, ...(params.name ? { name: params.name } : {}), runtime: params.runtime,
+      ...(Object.hasOwn(params, "goal") ? { goal: params.goal && thread.goal ? { ...thread.goal, ...params.goal } : params.goal } : {}),
+      queueCount: params.queueCount, queueRevision: params.queueRevision, historyLive: false, syncedUpdatedAt: null,
+    });
+    syncUserInputRequests(threadId, params.userInputRequests);
+    syncApprovalRequests(threadId, params.approvalRequests);
+    renderThreads();
+    renderRunStrip();
+    return;
+  }
+  if (params.summaryOnly) thread = updateThreadInState(projectId, { ...thread, historyLive: false, syncedUpdatedAt: null });
   if (params.runtime) {
     thread = updateThreadInState(projectId, { ...thread, runtime: params.runtime });
+    for (const view of state.asyncInputCards.values()) {
+      if (view.request.threadId === threadId) updateAsyncQuestionNote(view);
+    }
   }
   if (event.method === "thread/replaced") {
     applyThreadReplacement(projectId, threadId, params);
@@ -4061,18 +4355,22 @@ function handleCodexEventImpl(threadId, event) {
     applyThreadGoal(threadId, null);
     return;
   }
-  if ((event.method === "workspace/state" && (isActiveThreadRuntime(params.runtime) || params.activeItems?.length))
+  if (!params.summaryOnly && ((event.method === "workspace/state" && (isActiveThreadRuntime(params.runtime) || params.activeItems?.length))
     || event.method === "turn/started"
     || event.method === "turn/completed"
     || event.method === "turn/plan/updated"
-    || event.method.startsWith("item/")) {
+    || event.method.startsWith("item/"))) {
     thread = updateThreadInState(projectId, { id: threadId, historyLive: true });
   }
   if (event.method === "item/tool/requestUserInput") {
     const request = { ...params, requestId: String(params.requestId) };
     state.userInputRequests.set(request.requestId, request);
     if (state.selectedThreadId === threadId) renderUserInputRequest(request);
-    clearTurnActivity(params.turnId);
+    if (request.isBlocking !== false) clearTurnActivity(params.turnId);
+    return;
+  }
+  if (event.method === "workspace/asyncUserInput/resolved") {
+    markAsyncQuestionAnswered(threadId, params.itemId);
     return;
   }
   if ([
@@ -4136,13 +4434,14 @@ function handleCodexEventImpl(threadId, event) {
     return;
   }
   if (event.method === "workspace/state") {
-    const runtime = params.runtime || thread.runtime;
+    const runtime = Object.hasOwn(params, "runtime") ? params.runtime : thread.runtime;
     updateThreadInState(projectId, {
       ...thread,
       runtime,
       ...(Object.hasOwn(params, "goal") ? { goal: params.goal || null } : {}),
     });
     const changed = applyQueueSnapshot(threadId, params.queue, params.queueRevision);
+    for (const itemId of params.answeredAsyncUserInputIds || []) markAsyncQuestionAnswered(threadId, itemId);
     syncUserInputRequests(threadId, params.userInputRequests);
     syncApprovalRequests(threadId, params.approvalRequests);
     for (const item of params.activeItems || []) {
@@ -4152,12 +4451,23 @@ function handleCodexEventImpl(threadId, event) {
       const stored = rememberThreadItem(projectId, threadId, turnId, { ...item, status: item.status || "inProgress" });
       if (state.selectedThreadId === threadId) upsertExecutionItem(turnId, stored);
     }
+    for (const item of params.liveItems || []) {
+      const turnId = runtime?.activeTurnId;
+      if (!turnId || !item.id) continue;
+      const previous = rememberedThreadItem(projectId, threadId, turnId, item.id);
+      if (previous?.completedAt && !item.completedAt) continue;
+      rememberThreadItem(projectId, threadId, turnId, item);
+    }
     if (state.selectedThreadId === threadId) {
       if (changed) renderQueue();
       if (runtime?.activeTurnId && params.activePlan) renderTurnPlan(runtime.activeTurnId, params.activePlan);
       renderGoalButton();
       updateComposer();
       renderThreadActions();
+      if (params.liveItems?.length) renderCurrentThread();
+      if (previousRuntime?.activeTurnId && previousRuntime.activeTurnId !== runtime?.activeTurnId) {
+        void selectThread(threadId, { closeNavigation: false, preserveFollowLatest: true, mergeHistory: true }).catch(showError);
+      }
     }
     renderThreads();
     renderRunStrip();
@@ -4304,6 +4614,10 @@ function handleCodexEventImpl(threadId, event) {
     });
   } else if (event.method === "item/completed") {
     const item = params.item || {};
+    if (item.type === "userMessage") {
+      const text = (item.content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
+      markAsyncQuestionAnswered(threadId, asyncAnswerRequestId(text));
+    }
     if (deferQueuedUserMessage(threadId, params.turnId, item)) return;
     if (item.type === "contextCompaction") {
       state.compactingThreads.delete(threadId);
@@ -4388,7 +4702,6 @@ function handleCodexEventImpl(threadId, event) {
       renderLiveUserMessage(item, params.turnId);
     } else if ((item.type === "agentMessage" && item.phase !== "commentary") || item.type === "plan") {
       removeExecutionItem(params.turnId, item.id);
-      removeRenderedMessage(item.id);
       renderHistoryItem(item, { turnId: params.turnId });
     } else if (item.type === "agentMessage") {
       renderHistoryItem(item, { turnId: params.turnId });
@@ -4406,6 +4719,7 @@ function handleCodexEventImpl(threadId, event) {
   if (state.selectedThreadId !== threadId) return;
   const completedFinalMessage = event.method === "item/completed"
     && params.item?.type === "agentMessage"
+    && params.item?.delivery !== "async"
     && params.item?.phase !== "commentary";
   if (event.method === "item/completed" && !completedFinalMessage && currentRuntime().activeTurnId === params.turnId) {
     scheduleTurnActivity(params.turnId);
@@ -4413,17 +4727,19 @@ function handleCodexEventImpl(threadId, event) {
 }
 
 async function reconcileCompletedThread(projectId, threadId) {
-  await refreshProjectThreads(projectId);
+  const thread = findThread(projectId, threadId);
+  if (thread) updateThreadInState(projectId, { ...thread, updatedAt: Date.now(), historyLive: false, syncedUpdatedAt: null });
+  renderThreads();
   ensureEventStream();
 }
 
 async function reconcileInterruptedThread(threadId) {
   const projectId = findProjectForThread(threadId);
   if (!projectId) return;
-  await refreshProjectThreads(projectId);
   if (state.selectedThreadId === threadId) {
     await selectThread(threadId, { closeNavigation: false, preserveFollowLatest: true, mergeHistory: true });
   } else {
+    await refreshProjectThreads(projectId);
     updateThreadInState(projectId, { id: threadId, historyLive: false, syncedUpdatedAt: null });
   }
 }
@@ -4590,6 +4906,7 @@ async function refreshWorkspace({ quiet = false } = {}) {
       const status = await api("/api/status");
       if (!acceptAssetVersion(status)) return;
       state.workspaceRoot = status.workspaceRoot || null;
+      state.workspaceSyncVersion = status.workspaceSyncVersion || 0;
       applyCodexStatus(status);
       await loadProjects();
       if (state.codexReady) {
@@ -4673,6 +4990,7 @@ function scheduleResume(delay = 120) {
 async function resumeWorkspace() {
   const wasReady = state.codexReady;
   const status = await api("/api/status");
+  state.workspaceSyncVersion = status.workspaceSyncVersion || 0;
   if (!acceptAssetVersion(status)) return;
   state.serverReachable = true;
   applyCodexStatus(status);
@@ -4987,6 +5305,7 @@ async function deleteProjectRecord(projectId, closeEditor = false) {
     if (closeEditor) ui.projectDialog.close();
     for (const thread of state.threads.get(project.id) || []) forgetClientThread(thread.id);
     state.threads.delete(project.id);
+    state.threadPages.delete(project.id);
     if (state.selectedProjectId === project.id) state.selectedProjectId = null;
     await loadProjects();
     await refreshAllThreads();
@@ -5309,6 +5628,12 @@ async function setUserActive(user, active) {
 }
 
 function forgetClientThread(threadId) {
+  for (const [key, view] of state.asyncInputCards) {
+    if (view.request.threadId !== threadId) continue;
+    view.root.remove();
+    state.asyncInputCards.delete(key);
+    setAsyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), key, false);
+  }
   for (const [itemId, pending] of state.pendingQueueMessages) {
     if (pending.threadId === threadId) state.pendingQueueMessages.delete(itemId);
   }
@@ -5518,10 +5843,8 @@ ui.markdownPreviewDialog.addEventListener("close", () => {
 ui.markdownPreviewDialog.addEventListener("click", (event) => {
   if (event.target === ui.markdownPreviewDialog) ui.markdownPreviewDialog.close();
 });
-ui.markdownPreviewDownload.addEventListener("click", (event) => {
-  const external = openDownloadExternally(new URL(ui.markdownPreviewDownload.href, location.href).href);
-  if (external) event.preventDefault();
-});
+bindDownloadLink(ui.markdownPreviewDownload, null, $("#markdown-download-status"));
+bindDownloadLink(ui.imagePreviewDownload, null, $("#image-download-status"));
 ui.closeImagePreview.addEventListener("click", () => ui.imagePreviewDialog.close());
 ui.imagePreviewDialog.addEventListener("close", () => {
   ui.imagePreviewImage.removeAttribute("src");

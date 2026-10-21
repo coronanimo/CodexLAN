@@ -147,6 +147,15 @@
 .user-input-text:focus, .user-input-other:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 .user-input-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .user-input-footer .form-error { min-height: 0; margin: 0; }
+.async-question-card .user-input-heading { flex-wrap: wrap; }
+.async-question-card .user-input-heading span { flex: 1; min-width: 130px; }
+.async-question-card .user-input-footer { grid-template-columns: auto minmax(0, 1fr) auto; }
+.async-question-card p { margin: 0; white-space: pre-wrap; line-height: 1.5; overflow-wrap: anywhere; }
+.async-question-card [hidden] { display: none !important; }
+@media (max-width: 760px) {
+  .async-question-card .user-input-footer { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .async-question-card .user-input-footer .form-error { grid-column: 1 / -1; grid-row: 1; }
+}
 .approval-card { border-color: #e1b86f; background: #fffaf0; }
 .approval-card .user-input-heading strong { color: #8a5614; }
 .approval-reason { margin: 0; color: #554635; font-size: 12px; line-height: 1.55; }

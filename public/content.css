@@ -13,6 +13,9 @@
 .file-download-direct { display: grid; place-items: center; border: 1px solid var(--border-card); border-left: 0; border-radius: 0 12px 12px 0; color: var(--accent-strong); background: #f4f8ff; font-size: 17px; font-weight: 760; text-decoration: none; transition: border-color .15s ease, background .15s ease; }
 .file-download-direct:hover { border-color: #94b3ef; background: #eaf2ff; }
 .file-download-direct:focus-visible { z-index: 1; outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+.markdown-preview-header, .image-preview-header { flex-wrap: wrap; }
+.file-download-status { flex: 1 0 100%; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.file-download-status.error { color: var(--danger); }
 .markdown-preview-dialog { width: min(980px, calc(100vw - 28px)); max-width: calc(100vw - 28px); height: min(860px, calc(100dvh - 28px)); max-height: calc(100dvh - 28px); overflow: hidden; border: 0; border-radius: 18px; padding: 0; color: var(--ink); background: var(--surface-raised); box-shadow: 0 24px 80px #10213d45; }
 .markdown-preview-dialog::backdrop { background: #10213d55; backdrop-filter: blur(4px); }
 .markdown-preview-shell { display: grid; height: 100%; grid-template-rows: auto minmax(0, 1fr); }

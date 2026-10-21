@@ -62,6 +62,7 @@ function threadActivityTime(thread) {
 export function mergeListedThread(existing, listed) {
   if (!existing) return listed;
   const { turns: listedTurns, ...summary } = listed;
+  if (listed.goalIsSummary && existing.goal && listed.goal) summary.goal = { ...existing.goal, ...listed.goal };
   if (typeof existing.name === "string" && existing.name.trim()
     && !(typeof summary.name === "string" && summary.name.trim())) {
     delete summary.name;
@@ -73,6 +74,37 @@ export function mergeListedThread(existing, listed) {
     ...summary,
     accessedAt: existingAccess > listedAccess ? existing.accessedAt : listed.accessedAt,
   };
+}
+
+export function mergeThreadListPage(previous, ids, nextCursor, { order, append = false }) {
+  const retained = previous?.order === order ? previous : null;
+  const expanded = append || Boolean(retained?.expanded);
+  return {
+    order,
+    expanded,
+    ids: [...new Set(append ? [...(retained?.ids || []), ...ids]
+      : [...ids, ...(expanded ? retained?.ids || [] : [])])],
+    // Refresh only the head, without discarding already loaded conversations
+    // or fetching those pages again when the window regains focus.
+    nextCursor: !append && retained?.expanded ? retained.nextCursor : nextCursor,
+  };
+}
+
+export function mergeThreadSummaryPage(baselineThreads, currentThreads, listedThreads) {
+  const baseline = new Map((baselineThreads || []).map((thread) => [thread.id, thread]));
+  const current = new Map((currentThreads || []).map((thread) => [thread.id, thread]));
+  for (const listed of listedThreads || []) {
+    const existing = current.get(listed.id);
+    if (existing && baseline.get(listed.id) !== existing) {
+      if (!existing.name && listed.name) current.set(listed.id, { ...existing, name: listed.name });
+      continue;
+    }
+    // A newer queue acknowledgement must survive a late list response.
+    const summary = existing?.queueRevision > listed.queueRevision
+      ? { ...listed, queueCount: existing.queueCount, queueRevision: existing.queueRevision } : listed;
+    current.set(listed.id, mergeListedThread(existing, summary));
+  }
+  return [...current.values()];
 }
 
 export function mergeRefreshedThreads(baselineThreads, currentThreads, listedThreads) {

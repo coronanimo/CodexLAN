@@ -3,7 +3,8 @@ import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { deflateSync, inflateSync } from "node:zlib";
+import { inflateSync } from "node:zlib";
+import { WorkspaceDatabase, WORKSPACE_SCHEMA_VERSION } from "./workspace-database.mjs";
 import { commandExecutionSnapshot } from "../public/execution-events.js";
 import { turnPlanSnapshot } from "../public/plan.js";
 
@@ -36,6 +37,10 @@ async function migrateWorkspaceState(input) {
     throw new Error("workspace-state.json 的内容无效。");
   }
   state.sessions = activeStoredSessions(state.sessions);
+  state.asyncInputAnswers = isRecord(state.asyncInputAnswers) ? Object.fromEntries(
+    Object.entries(state.asyncInputAnswers).filter(([threadId, ids]) => /^[0-9a-f-]+$/i.test(threadId) && Array.isArray(ids))
+      .map(([threadId, ids]) => [threadId, [...new Set(ids.filter((id) => typeof id === "string" && id.length > 0 && id.length <= 200))]]),
+  ) : {};
   return state;
 }
 
@@ -136,6 +141,9 @@ export class WorkspaceStore {
     this.sqliteFile = join(dataRoot, "workspace-state.sqlite");
     this.legacyJsonMirror = legacyJsonMirror;
     this.database = null;
+    this.storage = null;
+    this.pendingChanges = {};
+    this.fullPersistenceRequested = false;
     this.workspace = workspace;
     this.projects = [];
     this.queues = {};
@@ -145,6 +153,7 @@ export class WorkspaceStore {
     this.users = [];
     this.threadProjects = {};
     this.threadAccesses = {};
+    this.asyncInputAnswers = {};
     this.sessions = {};
     this.persistence = null;
     this.persistenceRequestedRevision = 0;
@@ -162,7 +171,10 @@ export class WorkspaceStore {
       try {
         state = await this.loadDatabaseState();
       } catch (error) {
-        process.stderr.write(`[data] SQLite 工作区状态无法读取：${error.message}\n`);
+        // An existing database is authoritative. Never replace it from an old
+        // JSON mirror after a read/migration failure.
+        this.close();
+        throw error;
       }
     }
     if (!state) {
@@ -182,45 +194,62 @@ export class WorkspaceStore {
       this.queues = state.queues;
       this.queueRevisions = state.queueRevisions;
       this.threadSettings = state.threadSettings;
-      this.turnMetrics = pruneStoredTurnMetrics(state.turnMetrics);
+      this.turnMetrics = state.turnMetrics;
       this.users = state.users;
       this.threadProjects = state.threadProjects;
       this.threadAccesses = state.threadAccesses;
+      this.asyncInputAnswers = state.asyncInputAnswers;
       this.sessions = state.sessions;
     }
 
-    await this.persist();
+    if (this.database && this.storage.version !== WORKSPACE_SCHEMA_VERSION) {
+      this.storage.migrate(this.snapshot());
+      if (this.storage.backupFile) process.stderr.write(`[data] SQLite v14 migration backup: ${this.storage.backupFile}\n`);
+      if (this.legacyJsonMirror) await this.persist({});
+    } else {
+      const sessionKeys = this.database ? this.database.prepare("SELECT token_hash FROM auth_sessions").all().map((row) => row.token_hash) : Object.keys(this.sessions);
+      await this.persist({ projects: this.projects.map((project) => project.id), sessions: sessionKeys });
+    }
   }
 
   openDatabase() {
     if (!DatabaseSync || this.database) return;
     try {
       this.database = new DatabaseSync(this.sqliteFile);
-      this.database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS turn_metrics (thread_id TEXT PRIMARY KEY, value BLOB NOT NULL);");
+      this.database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
+      this.storage = new WorkspaceDatabase(this.database, this.sqliteFile);
     } catch (error) {
+      this.database?.close();
       this.database = null;
+      if (existsSync(this.sqliteFile)) throw error;
       process.stderr.write(`[data] SQLite 不可用，将继续使用 JSON：${error.message}\n`);
     }
   }
 
   async loadDatabaseState() {
     if (!this.database) return null;
-    try {
-      const rows = this.database.prepare("SELECT key, value FROM state WHERE key <> 'turnMetrics'").all();
-      if (!rows.length) return null;
-      const input = {};
-      for (const row of rows) input[row.key] = JSON.parse(row.value);
-      const metricRows = this.database.prepare("SELECT thread_id, value FROM turn_metrics").all();
-      input.turnMetrics = Object.fromEntries(metricRows.map((row) => [row.thread_id, JSON.parse(inflateSync(row.value).toString("utf8"))]));
-      if (!metricRows.length) {
-        const legacyMetrics = this.database.prepare("SELECT value FROM state WHERE key = 'turnMetrics'").get();
-        if (legacyMetrics) input.turnMetrics = JSON.parse(legacyMetrics.value);
-      }
-      return migrateWorkspaceState(input);
-    } finally {
-      this.database.close();
-      this.database = null;
+    if (this.storage.version === WORKSPACE_SCHEMA_VERSION) return migrateWorkspaceState(this.storage.read());
+    if (this.storage.version !== 0) throw new Error(`Unsupported SQLite schema version: ${this.storage.version}.`);
+    if (!this.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='state'").get()) return null;
+    const rows = this.database.prepare("SELECT key, value FROM state WHERE key <> 'turnMetrics'").all();
+    if (!rows.length) return null;
+    const input = {};
+    for (const row of rows) input[row.key] = JSON.parse(row.value);
+    const hasMetrics = this.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='turn_metrics'").get();
+    const metricRows = hasMetrics ? this.database.prepare("SELECT thread_id, value FROM turn_metrics").all() : [];
+    input.turnMetrics = Object.fromEntries(metricRows.map((row) => [row.thread_id, JSON.parse(inflateSync(row.value).toString("utf8"))]));
+    if (!metricRows.length) {
+      const legacyMetrics = this.database.prepare("SELECT value FROM state WHERE key = 'turnMetrics'").get();
+      if (legacyMetrics) input.turnMetrics = JSON.parse(legacyMetrics.value);
     }
+    return migrateWorkspaceState(input);
+  }
+
+  close() {
+    if (this.deferredPersistTimer) clearTimeout(this.deferredPersistTimer);
+    this.database?.close();
+    this.database = null;
+    this.storage = null;
   }
 
   async listProjects(ownerId) {
@@ -255,7 +284,7 @@ export class WorkspaceStore {
     this.requireUniqueProjectPath(path);
     const project = { ...makeProject({ ...input, name, path }), ownerId };
     this.projects.push(project);
-    await this.persist();
+    await this.persist({ projects: [project.id] });
     return structuredClone({ ...project, available: true });
   }
 
@@ -272,6 +301,8 @@ export class WorkspaceStore {
       for (const [threadId, projectId] of Object.entries(this.threadProjects)) {
         if (projectId !== project.id) continue;
         delete this.threadProjects[threadId];
+        delete this.asyncInputAnswers[threadId];
+        this.markChanges({ threadProjects: [threadId], asyncInputAnswers: [threadId] });
         this.deleteThreadAccess(threadId);
       }
       project.path = path;
@@ -279,7 +310,7 @@ export class WorkspaceStore {
     if (Object.hasOwn(input, "name")) project.name = validateProjectName(input.name);
     if (Object.hasOwn(input, "settings")) project.settings = cleanSettings(input.settings);
     project.updatedAt = new Date().toISOString();
-    await this.persist();
+    await this.persist({ projects: [id] });
     return structuredClone({ ...project, available: projectDirectoryAvailable(project.path) });
   }
 
@@ -299,9 +330,11 @@ export class WorkspaceStore {
     for (const [threadId, projectId] of Object.entries(this.threadProjects)) {
       if (projectId !== id) continue;
       delete this.threadProjects[threadId];
+      delete this.asyncInputAnswers[threadId];
+      this.markChanges({ threadProjects: [threadId], asyncInputAnswers: [threadId] });
       this.deleteThreadAccess(threadId);
     }
-    await this.persist();
+    await this.persist({ projects: [id, ...this.projects.map((entry) => entry.id)] });
     return structuredClone(project);
   }
 
@@ -321,7 +354,7 @@ export class WorkspaceStore {
     const defaultProject = { ...makeProject({ name: "默认项目", path: defaultProjectPath }), ownerId: user.id };
     this.users.push(user);
     this.projects.push(defaultProject);
-    await this.persist();
+    await this.persist({ users: [user.id], projects: [defaultProject.id] });
     return publicUser(user);
   }
 
@@ -348,7 +381,7 @@ export class WorkspaceStore {
     if (this.users.some((user) => user.username === username)) throw httpError(409, "这个用户名已经被使用。");
     const user = await makeStoredUser({ ...input, username, role: "member", mustChangePassword: true });
     this.users.push(user);
-    await this.persist();
+    await this.persist({ users: [user.id] });
     return publicUser(user);
   }
 
@@ -356,7 +389,7 @@ export class WorkspaceStore {
     const user = await this.getUser(userId);
     const passwordRecord = await hashPassword(validatePassword(password));
     Object.assign(user, passwordRecord, { mustChangePassword, updatedAt: new Date().toISOString() });
-    await this.persist();
+    await this.persist({ users: [userId] });
     return publicUser(user);
   }
 
@@ -365,7 +398,7 @@ export class WorkspaceStore {
     if (Object.hasOwn(input, "displayName")) user.displayName = validateDisplayName(input.displayName);
     if (Object.hasOwn(input, "active")) user.active = Boolean(input.active);
     user.updatedAt = new Date().toISOString();
-    await this.persist();
+    await this.persist({ users: [userId] });
     return publicUser(user);
   }
 
@@ -375,7 +408,7 @@ export class WorkspaceStore {
     if (existingProject && existingProject !== projectId) throw httpError(409, "聊天已经属于另一个项目。");
     if (existingProject === projectId) return false;
     this.threadProjects[threadId] = projectId;
-    await this.persist();
+    await this.persist({ threadProjects: [threadId] });
     return true;
   }
 
@@ -397,13 +430,15 @@ export class WorkspaceStore {
     const project = this.projects.find((entry) => entry.id === projectId);
     if (!project || project.ownerId !== ownerId) throw httpError(404, "项目不存在或已删除。");
     let changed = false;
+    const changedIds = [];
     for (const thread of threads) {
       if (!Object.hasOwn(this.threadProjects, thread.id)) {
         this.threadProjects[thread.id] = projectId;
+        changedIds.push(thread.id);
         changed = true;
       }
     }
-    if (changed) await this.persist();
+    if (changed) await this.persist({ threadProjects: changedIds });
     return threads.filter((thread) => this.threadProjects[thread.id] === projectId);
   }
 
@@ -419,8 +454,9 @@ export class WorkspaceStore {
     this.threadAccesses[ownerId][threadId] = accessedAt;
     const entries = Object.entries(this.threadAccesses[ownerId]);
     this.threadAccesses[ownerId] = Object.fromEntries(entries.slice(-300));
+    this.markChanges({ threadAccesses: [ownerId] });
     if (deferred) this.deferPersist();
-    else await this.persist();
+    else await this.persist({});
     return accessedAt;
   }
 
@@ -428,7 +464,7 @@ export class WorkspaceStore {
     if (this.deferredPersistTimer) return;
     this.deferredPersistTimer = setTimeout(() => {
       this.deferredPersistTimer = null;
-      void this.persist().catch((error) => {
+      void this.persist({}).catch((error) => {
         process.stderr.write(`[data] 无法保存工作区状态：${error.message}\n`);
       });
     }, 200);
@@ -440,6 +476,7 @@ export class WorkspaceStore {
     for (const [ownerId, accesses] of Object.entries(this.threadAccesses)) {
       if (!Object.hasOwn(accesses, threadId)) continue;
       delete accesses[threadId];
+      this.markChanges({ threadAccesses: [ownerId] });
       if (Object.keys(accesses).length === 0) delete this.threadAccesses[ownerId];
       deleted = true;
     }
@@ -475,6 +512,7 @@ export class WorkspaceStore {
 
   bumpQueueRevision(threadId) {
     this.queueRevisions[threadId] = (this.queueRevisions[threadId] || 0) + 1;
+    this.markChanges({ queues: [threadId], queueRevisions: [threadId] });
   }
 
   async getThreadSettings(threadId, defaults = {}) {
@@ -486,7 +524,7 @@ export class WorkspaceStore {
   async setThreadSettings(threadId, settings) {
     await this.ready;
     this.threadSettings[threadId] = cleanSettings(settings);
-    await this.persist();
+    await this.persist({ threadSettings: [threadId] });
     return structuredClone(this.threadSettings[threadId]);
   }
 
@@ -505,10 +543,11 @@ export class WorkspaceStore {
     this.queues[newThreadId] = queue;
     this.queueRevisions[newThreadId] = revision;
     if (settings) this.threadSettings[newThreadId] = settings;
-    for (const accesses of Object.values(this.threadAccesses)) {
+    for (const [ownerId, accesses] of Object.entries(this.threadAccesses)) {
       if (!Object.hasOwn(accesses, oldThreadId)) continue;
       accesses[newThreadId] = accesses[oldThreadId];
       delete accesses[oldThreadId];
+      this.markChanges({ threadAccesses: [ownerId] });
     }
 
     delete this.threadProjects[oldThreadId];
@@ -516,12 +555,26 @@ export class WorkspaceStore {
     delete this.queueRevisions[oldThreadId];
     delete this.threadSettings[oldThreadId];
     delete this.turnMetrics[oldThreadId];
-    await this.persist();
+    delete this.asyncInputAnswers[oldThreadId];
+    await this.persist({ threadProjects: [oldThreadId, newThreadId], queues: [oldThreadId, newThreadId],
+      queueRevisions: [oldThreadId, newThreadId], threadSettings: [oldThreadId, newThreadId],
+      turnMetrics: [oldThreadId], asyncInputAnswers: [oldThreadId] });
     return {
       queue: structuredClone(queue),
       queueRevision: revision,
       settings: structuredClone(settings || {}),
     };
+  }
+
+  async getAsyncInputAnswers(threadId) {
+    await this.ready;
+    return [...(this.asyncInputAnswers[threadId] || [])];
+  }
+
+  async recordAsyncInputAnswer(threadId, itemId) {
+    await this.ready;
+    this.asyncInputAnswers[threadId] = [...new Set([...(this.asyncInputAnswers[threadId] || []), itemId])];
+    await this.persist({ asyncInputAnswers: [threadId] });
   }
 
   async getTurnMetrics(threadId, turnIds = null) {
@@ -533,6 +586,16 @@ export class WorkspaceStore {
     return structuredClone(selected);
   }
 
+  async getTurnMetricTimings(threadId) {
+    await this.ready;
+    return Object.fromEntries(Object.entries(this.turnMetrics[threadId] || {}).map(([id, { startedAt, completedAt }]) => [id, { startedAt, completedAt }]));
+  }
+
+  async getItemMetric(threadId, turnId, itemId) {
+    await this.ready;
+    return structuredClone(this.turnMetrics[threadId]?.[turnId]?.items?.[itemId] || {});
+  }
+
   async recordTurnMetric(threadId, turnId, patch) {
     await this.ready;
     if (!threadId || !turnId) return;
@@ -540,7 +603,7 @@ export class WorkspaceStore {
     const current = this.turnMetrics[threadId][turnId] || { items: {} };
     this.turnMetrics[threadId][turnId] = { ...current, ...cleanTimingPatch(patch), items: current.items || {} };
     this.pruneTurnMetrics(threadId);
-    await this.persist();
+    await this.persist({ supplements: [JSON.stringify([threadId, turnId, ""])] });
   }
 
   async recordTurnPlan(threadId, turnId, plan) {
@@ -550,10 +613,10 @@ export class WorkspaceStore {
     const current = this.turnMetrics[threadId][turnId] || { items: {} };
     this.turnMetrics[threadId][turnId] = { ...current, plan: turnPlanSnapshot(plan), items: current.items || {} };
     this.pruneTurnMetrics(threadId);
-    await this.persist();
+    await this.persist({ supplements: [JSON.stringify([threadId, turnId, ""])] });
   }
 
-  async recordItemMetric(threadId, turnId, itemId, patch) {
+  async recordItemMetric(threadId, turnId, itemId, patch, { deferred = false } = {}) {
     await this.ready;
     if (!threadId || !turnId || !itemId) return;
     this.turnMetrics[threadId] ||= {};
@@ -565,15 +628,46 @@ export class WorkspaceStore {
     turn.items[itemId] = { ...current, ...cleaned };
     this.turnMetrics[threadId][turnId] = turn;
     this.pruneTurnMetrics(threadId);
-    await this.persist();
+    const changes = { supplements: [JSON.stringify([threadId, turnId, ""]), JSON.stringify([threadId, turnId, itemId])] };
+    if (deferred) {
+      this.markChanges(changes);
+      this.deferPersist();
+    } else await this.persist(changes);
+  }
+
+  async reconcileExecutionSupplements(threadId, turns) {
+    await this.ready;
+    const changes = [];
+    for (const turn of turns) {
+      for (const item of turn.items || []) {
+        const metric = this.turnMetrics[threadId]?.[turn.id]?.items?.[item.id];
+        const snapshot = metric?.snapshot;
+        if (!snapshot || !["completed", "failed", "declined", "interrupted"].includes(item.status)) continue;
+        // Only discard a recovery copy after canonical history actually supplies
+        // its fields. A completed notification alone does not prove persistence.
+        const covered = Object.entries(snapshot).every(([key, value]) => {
+          // Canonical completion/duration supersede an earlier live snapshot;
+          // their becoming more accurate must not keep a duplicate output body.
+          if (key === "status") return true;
+          if (key === "durationMs") return Number.isFinite(item.durationMs) && item.durationMs >= 0;
+          if (key === "aggregatedOutput") return typeof item.aggregatedOutput === "string" && item.aggregatedOutput.endsWith(value);
+          if (key === "outputTruncated") return item.outputTruncated === value || typeof item.aggregatedOutput === "string" && item.aggregatedOutput.endsWith(snapshot.aggregatedOutput || "");
+          return item[key] === value;
+        });
+        if (!covered) continue;
+        delete metric.snapshot;
+        changes.push(JSON.stringify([threadId, turn.id, item.id]));
+      }
+    }
+    if (changes.length) await this.persist({ supplements: changes });
   }
 
   pruneTurnMetrics(threadId) {
-    const metrics = this.turnMetrics[threadId];
-    if (!metrics) return;
-    const turnIds = Object.keys(metrics);
-    for (const turnId of turnIds.slice(0, Math.max(0, turnIds.length - MAX_TURN_METRICS_PER_THREAD))) delete metrics[turnId];
+    const previous = Object.entries(this.turnMetrics).flatMap(([id, turns]) => Object.keys(turns).map((turnId) => [id, turnId]));
     pruneStoredTurnMetrics(this.turnMetrics);
+    for (const [id, turnId] of previous) {
+      if (!this.turnMetrics[id]?.[turnId]) this.markChanges({ supplements: [JSON.stringify([id, turnId, ""])] });
+    }
   }
 
   async removeThread(threadId) {
@@ -584,12 +678,17 @@ export class WorkspaceStore {
     const hadMetrics = Object.hasOwn(this.turnMetrics, threadId);
     const hadProject = Object.hasOwn(this.threadProjects, threadId);
     const hadAccess = this.deleteThreadAccess(threadId);
+    const hadAsyncAnswers = Object.hasOwn(this.asyncInputAnswers, threadId);
+    if (hadAsyncAnswers) delete this.asyncInputAnswers[threadId];
     if (hadQueue) delete this.queues[threadId];
     if (hadQueueRevision) delete this.queueRevisions[threadId];
     if (hadSettings) delete this.threadSettings[threadId];
     if (hadMetrics) delete this.turnMetrics[threadId];
     if (hadProject) delete this.threadProjects[threadId];
-    if (hadQueue || hadQueueRevision || hadSettings || hadMetrics || hadProject || hadAccess) await this.persist();
+    if (hadQueue || hadQueueRevision || hadSettings || hadMetrics || hadProject || hadAccess || hadAsyncAnswers) {
+      await this.persist({ queues: [threadId], queueRevisions: [threadId], threadSettings: [threadId],
+        turnMetrics: [threadId], threadProjects: [threadId], asyncInputAnswers: [threadId] });
+    }
   }
 
   async getSession(token) {
@@ -599,7 +698,7 @@ export class WorkspaceStore {
     if (!session) return null;
     if (session.expiresAt <= Date.now()) {
       delete this.sessions[key];
-      await this.persist();
+      await this.persist({ sessions: [key] });
       return null;
     }
     return structuredClone(session);
@@ -608,7 +707,7 @@ export class WorkspaceStore {
   async setSession(token, session) {
     await this.ready;
     this.sessions[sessionKey(token)] = structuredClone(session);
-    await this.persist();
+    await this.persist({ sessions: [sessionKey(token)] });
   }
 
   async removeSession(token) {
@@ -616,7 +715,7 @@ export class WorkspaceStore {
     const key = sessionKey(token);
     if (!Object.hasOwn(this.sessions, key)) return;
     delete this.sessions[key];
-    await this.persist();
+    await this.persist({ sessions: [key] });
   }
 
   async removeUserSessions(userId) {
@@ -625,9 +724,10 @@ export class WorkspaceStore {
     for (const [key, session] of Object.entries(this.sessions)) {
       if (session.userId !== userId) continue;
       delete this.sessions[key];
+      this.markChanges({ sessions: [key] });
       changed = true;
     }
-    if (changed) await this.persist();
+    if (changed) await this.persist({});
   }
 
   async enqueue(threadId, projectId, text) {
@@ -636,7 +736,7 @@ export class WorkspaceStore {
     this.queues[threadId] ||= [];
     this.queues[threadId].push(item);
     this.bumpQueueRevision(threadId);
-    await this.persist();
+    await this.persist({});
     return structuredClone(item);
   }
 
@@ -648,7 +748,7 @@ export class WorkspaceStore {
     const [item] = queue.splice(index, 1);
     if (queue.length === 0) delete this.queues[threadId];
     this.bumpQueueRevision(threadId);
-    await this.persist();
+    await this.persist({});
     return structuredClone(item);
   }
 
@@ -661,7 +761,7 @@ export class WorkspaceStore {
     if (target < 0 || target >= queue.length) return structuredClone(queue);
     [queue[index], queue[target]] = [queue[target], queue[index]];
     this.bumpQueueRevision(threadId);
-    await this.persist();
+    await this.persist({});
     return structuredClone(queue);
   }
 
@@ -673,7 +773,7 @@ export class WorkspaceStore {
     item.text = text;
     item.updatedAt = new Date().toISOString();
     this.bumpQueueRevision(threadId);
-    await this.persist();
+    await this.persist({});
     return structuredClone(item);
   }
 
@@ -685,11 +785,20 @@ export class WorkspaceStore {
     queue.splice(index, 1);
     if (queue.length === 0) delete this.queues[threadId];
     this.bumpQueueRevision(threadId);
-    await this.persist();
+    await this.persist({});
     return true;
   }
 
-  async persist() {
+  markChanges(changes) {
+    for (const [collection, keys] of Object.entries(changes)) {
+      const pending = this.pendingChanges[collection] ||= new Set();
+      for (const key of keys) pending.add(key);
+    }
+  }
+
+  async persist(changes = null) {
+    if (changes) this.markChanges(changes);
+    else this.fullPersistenceRequested = true;
     const revision = ++this.persistenceRequestedRevision;
     const completion = new Promise((resolve, reject) => {
       this.persistenceWaiters.push({ revision, resolve, reject });
@@ -700,7 +809,7 @@ export class WorkspaceStore {
 
   startPersistence() {
     if (this.persistence) return;
-    this.persistence = this.flushPersistence().catch(() => {}).finally(() => {
+    this.persistence = Promise.resolve().then(() => this.flushPersistence()).catch(() => {}).finally(() => {
       this.persistence = null;
       if (this.persistenceCompletedRevision < this.persistenceRequestedRevision) this.startPersistence();
     });
@@ -711,23 +820,16 @@ export class WorkspaceStore {
       const revision = this.persistenceRequestedRevision;
       const temporary = this.legacyJsonMirror ? `${this.stateFile}.${process.pid}.${randomUUID()}.tmp` : null;
       try {
-        const snapshot = {
-          version: STATE_VERSION,
-          projects: this.projects,
-          queues: this.queues,
-          queueRevisions: this.queueRevisions,
-          threadSettings: this.threadSettings,
-          turnMetrics: this.turnMetrics,
-          users: this.users,
-          threadProjects: this.threadProjects,
-          threadAccesses: this.threadAccesses,
-          sessions: this.sessions,
-        };
-        this.persistDatabase(snapshot);
-        if (this.legacyJsonMirror) {
+        const snapshot = this.snapshot();
+        const changes = this.fullPersistenceRequested ? null : this.pendingChanges;
+        this.persistDatabase(snapshot, changes);
+        this.pendingChanges = {};
+        this.fullPersistenceRequested = false;
+        if (this.legacyJsonMirror || !this.database) {
           const contents = `${JSON.stringify(snapshot)}\n`;
-          await writeFile(temporary, contents, "utf8");
-          await rename(temporary, this.stateFile);
+          const target = temporary || `${this.stateFile}.${process.pid}.${randomUUID()}.tmp`;
+          await writeFile(target, contents, "utf8");
+          await rename(target, this.stateFile);
         }
         this.persistenceCompletedRevision = revision;
         this.settlePersistenceWaiters(revision);
@@ -740,35 +842,26 @@ export class WorkspaceStore {
     }
   }
 
-  persistDatabase(snapshot) {
+  snapshot() {
+    return {
+      version: STATE_VERSION,
+      projects: this.projects,
+      queues: this.queues,
+      queueRevisions: this.queueRevisions,
+      threadSettings: this.threadSettings,
+      turnMetrics: this.turnMetrics,
+      users: this.users,
+      threadProjects: this.threadProjects,
+      threadAccesses: this.threadAccesses,
+      asyncInputAnswers: this.asyncInputAnswers,
+      sessions: this.sessions,
+    };
+  }
+
+  persistDatabase(snapshot, changes) {
     this.openDatabase();
     if (!this.database) return;
-    const write = this.database.prepare("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
-    try {
-      this.database.exec("BEGIN IMMEDIATE");
-      for (const [key, value] of Object.entries(snapshot)) {
-        if (key === "turnMetrics") continue;
-        write.run(key, JSON.stringify(value));
-      }
-      const metricRows = this.database.prepare("INSERT INTO turn_metrics (thread_id, value) VALUES (?, ?) ON CONFLICT(thread_id) DO UPDATE SET value=excluded.value");
-      const metricThreadIds = Object.keys(snapshot.turnMetrics || {});
-      for (const [threadId, metrics] of Object.entries(snapshot.turnMetrics || {})) {
-        metricRows.run(threadId, deflateSync(JSON.stringify(metrics)));
-      }
-      if (metricThreadIds.length) {
-        this.database.prepare(`DELETE FROM turn_metrics WHERE thread_id NOT IN (${metricThreadIds.map(() => "?").join(",")})`).run(...metricThreadIds);
-      } else {
-        this.database.exec("DELETE FROM turn_metrics");
-      }
-      this.database.prepare("DELETE FROM state WHERE key = 'turnMetrics'").run();
-      this.database.exec("COMMIT");
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    } finally {
-      this.database.close();
-      this.database = null;
-    }
+    this.storage.write(snapshot, changes);
   }
 
   settlePersistenceWaiters(revision, error = null) {

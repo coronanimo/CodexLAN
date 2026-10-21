@@ -119,6 +119,8 @@ async function shutdown(exitCode) {
   await codex.close();
   conversations.closeEventStreams();
   await Promise.all(httpServers.map((server) => new Promise((resolveClose) => server.close(resolveClose))));
+  await store.persist({});
+  store.close();
   process.exit(exitCode);
 }
 
@@ -172,6 +174,7 @@ function registerHealthRoutes(application) {
 
 function registerRuntimeRoutes(application) {
   application.get("/api/status", (request, response) => json(response, 200, {
+    workspaceSyncVersion: 2,
     status: codex.state,
     appVersion,
     assetVersion,
