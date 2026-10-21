@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import { deflateSync } from "node:zlib";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,11 +6,16 @@ import { join } from "node:path";
 import test from "node:test";
 import { WorkspaceStore } from "../server/workspace-store.mjs";
 
+let DatabaseSync;
+try { ({ DatabaseSync } = await import("node:sqlite")); }
+catch (error) { if (error.code !== "ERR_UNKNOWN_BUILTIN_MODULE") throw error; }
+const sqliteTest = { skip: !DatabaseSync && "This Node version uses JSON storage; node:sqlite is unavailable." };
+
 const threadId = "33333333-3333-4333-8333-333333333333";
 const turnId = "44444444-4444-4444-8444-444444444444";
 const itemId = "call_command";
 
-test("migrates legacy compressed state with a consistent backup and exact business fields", async () => {
+test("migrates legacy compressed state with a consistent backup and exact business fields", sqliteTest, async () => {
   const root = await mkdtemp(join(tmpdir(), "codexlan-storage-migration-"));
   const file = join(root, "workspace-state.sqlite");
   const before = { version: 13, users: [], projects: [], threadProjects: { [threadId]: "project" },
@@ -55,7 +59,7 @@ test("migrates legacy compressed state with a consistent backup and exact busine
   }
 });
 
-test("an output update writes one supplement, not unrelated histories or application records", async () => {
+test("an output update writes one supplement, not unrelated histories or application records", sqliteTest, async () => {
   const root = await mkdtemp(join(tmpdir(), "codexlan-storage-delta-"));
   const store = new WorkspaceStore({ dataRoot: root, stateFile: join(root, "state.json"), workspace: root, legacyJsonMirror: false });
   try {

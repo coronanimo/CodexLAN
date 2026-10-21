@@ -39,14 +39,17 @@ jobs:
       - name: Verify ABI-independent APKs
         shell: pwsh
         run: |
+          $version = (ConvertFrom-Json -InputObject (Get-Content -LiteralPath 'package.json' -Raw)).version
           $apks = @(
-            Resolve-Path 'android/app/build/outputs/apk/debug/app-debug.apk'
-            Resolve-Path 'android/app/build/outputs/apk/release/app-release-unsigned.apk'
+            Get-Item -LiteralPath ('android/app/build/outputs/apk/debug/CodexLAN-{0}-debug.apk' -f $version)
+            Get-Item -LiteralPath ('android/app/build/outputs/apk/release/CodexLAN-{0}-release.apk' -f $version)
           )
           foreach ($apk in $apks) {
-            $nativeLibraries = @(& jar tf $apk | Where-Object { $_ -match '^lib/[^/]+/.+\.so$' })
+            $entries = @(& jar tf $apk.FullName)
+            if ($LASTEXITCODE -ne 0) { throw "Cannot inspect APK: $($apk.FullName)" }
+            $nativeLibraries = @($entries -match '^lib/[^/]+/.+\.so$')
             if ($nativeLibraries.Count -ne 0) {
               throw "Unexpected native libraries in ${apk}: $($nativeLibraries -join ', ')"
             }
-            Get-FileHash -LiteralPath $apk -Algorithm SHA256
+            Write-Output "Verified ABI-independent APK: $($apk.Name)"
           }
