@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -51,10 +51,13 @@ test("repairs a legacy member project path without dropping its thread binding",
     store = new WorkspaceStore({ dataRoot, stateFile, workspace });
     await store.ready;
     const [project] = await store.listProjects("22222222-2222-4222-8222-222222222222");
-    assert.equal(project.path, target);
+    // Windows CI can expose tmpdir through a DOS short-path alias; repaired
+    // project paths intentionally use the canonical directory name.
+    const canonicalTarget = await realpath(target);
+    assert.equal(project.path, canonicalTarget);
     assert.deepEqual(store.threadIdsForProject(project.id), ["33333333-3333-4333-8333-333333333333"]);
     const persisted = JSON.parse(await readFile(stateFile, "utf8"));
-    assert.equal(persisted.projects[0].path, target);
+    assert.equal(persisted.projects[0].path, canonicalTarget);
   } finally {
     store?.close();
     await rm(root, { recursive: true, force: true });
