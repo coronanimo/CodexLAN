@@ -5,6 +5,7 @@ export function planShortcut(value) {
 }
 
 export function turnPlanSnapshot(value = {}) {
+  value = value || {};
   const plan = Array.isArray(value.plan)
     ? value.plan.map(({ step, status }) => ({ step, status }))
     : [];
@@ -27,52 +28,21 @@ export function turnPlanPresentation(value = {}) {
   };
 }
 
-export function createTurnPlanView(value) {
-  const root = document.createElement("details");
-  root.className = "turn-plan";
-  const summary = document.createElement("summary");
-  const kind = document.createElement("strong");
-  kind.className = "turn-plan-kind";
-  kind.textContent = "计划";
-  const title = document.createElement("span");
-  title.className = "turn-plan-title";
-  const count = document.createElement("span");
-  count.className = "turn-plan-count";
-  const caret = document.createElement("span");
-  caret.className = "turn-plan-caret";
-  summary.append(kind, title, count, caret);
-  const body = document.createElement("div");
-  body.className = "turn-plan-body";
-  root.append(summary, body);
-  const view = { root, title, count, body };
-  updateTurnPlanView(view, value);
-  return view;
-}
-
-export function updateTurnPlanView(view, value) {
+export function renderTurnPlanDetails(body, value = {}) {
   const presentation = turnPlanPresentation(value);
-  view.title.textContent = presentation.title;
-  view.count.textContent = presentation.total ? `${presentation.completed}/${presentation.total}` : "";
-  view.root.classList.toggle("complete", presentation.status === "completed");
-  view.root.classList.toggle("running", presentation.status === "inProgress");
-  view.body.replaceChildren();
-  if (presentation.explanation) {
-    const explanation = document.createElement("p");
-    explanation.textContent = presentation.explanation;
-    view.body.append(explanation);
-  }
+  body.replaceChildren();
   const list = document.createElement("ol");
   for (const entry of presentation.plan) {
     const row = document.createElement("li");
     row.className = entry.status;
     const marker = document.createElement("span");
-    marker.textContent = entry.status === "completed" ? "✓" : entry.status === "inProgress" ? "•" : "○";
+    marker.className = "turn-plan-marker";
+    marker.setAttribute("role", "img");
+    marker.setAttribute("aria-label", entry.status === "completed" ? "已完成" : entry.status === "inProgress" ? "进行中" : "待执行");
     const step = document.createElement("span");
     step.textContent = entry.step;
     row.append(marker, step);
     list.append(row);
   }
-  if (list.childElementCount) view.body.append(list);
-  view.root.hidden = !presentation.total && !presentation.explanation;
-  return presentation;
+  if (list.childElementCount) body.append(list);
 }

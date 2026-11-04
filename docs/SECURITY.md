@@ -30,6 +30,8 @@ For any access outside that LAN, terminate TLS with a trusted reverse proxy, res
 
 The child `codex app-server` is spawned over local stdio; the project does not expose app-server's experimental WebSocket listener.
 
+Local browser access uses a process-scoped Windows named pipe and an ephemeral signing key. A response is signed only for the current core's executor and a loaded conversation's active turn, after checking Codex browser policy. By default, the conversation's authenticated owner must approve access; manual grants are not shared across conversations and are cleared when the core disconnects. The file-only `autoApproveBrowser: true` setting instead automatically authorizes browser access for all CodexLAN users' conversations, including after core restarts. It defaults to `false` and is independent of command/file auto-approval. Neither path overrides managed browser prohibitions or isolates the shared Windows browser profile, including its signed-in websites.
+
 ## Sensitive files
 
 Never commit or distribute:

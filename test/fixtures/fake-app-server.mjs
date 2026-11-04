@@ -88,15 +88,20 @@ input.on("line", (line) => {
         const userMessageDelay = Number(process.env.CODEX_TEST_USER_MESSAGE_DELAY_MS || 0);
         if (userMessageDelay > 0) setTimeout(() => emitUserMessage(message.params, result), userMessageDelay);
         else emitUserMessage(message.params, result);
+        emitTimelineOrder(message.params, result);
         if (message.params.outputSchema) emitStructuredTitle(message.params, result);
         else emitTitleTestCompletion(message.params, result, userMessageDelay);
         emitPlanUpdate(message.params, result);
         emitCommandOutputBurst(message.params, result);
         emitLargeMcpToolCall(message.params, result);
         emitUserInputRequest(message.params, result);
+        emitApprovalRequest(message.params, result);
         emitAsyncUserInputRequest(message.params, result);
       }
-      if (message.method === "turn/steer") emitUserMessage(message.params, { turn: { id: result.turnId } });
+      if (message.method === "turn/steer") {
+        emitUserMessage(message.params, { turn: { id: result.turnId } });
+        emitQuotaNotifications(message.params);
+      }
       if (message.method === "thread/compact/start") emitContextCompaction(message.params);
       if (message.method === "thread/goal/set") {
         process.stdout.write(`${JSON.stringify({
@@ -135,6 +140,22 @@ input.on("line", (line) => {
   else respond();
 });
 
+function emitQuotaNotifications(params) {
+  const text = (params.input || []).map((item) => item.text || "").join("\n");
+  if (!/\[(?:quota|token)-notify\]/.test(text)) return;
+  for (let index = 1; index <= 5; index++) process.stdout.write(`${JSON.stringify({
+    method: "thread/tokenUsage/updated", params: { threadId: params.threadId,
+      tokenUsage: { last: { totalTokens: index * 100 }, modelContextWindow: 10000 } },
+  })}\n`);
+  if (!text.includes("[quota-notify]")) return;
+  for (const [limitId, fiveHour, weekly] of [["codex", 37, 68], ["other", 90, 95]]) process.stdout.write(`${JSON.stringify({
+    method: "account/rateLimits/updated", params: { rateLimits: { limitId,
+      primary: { usedPercent: fiveHour, windowDurationMins: 300, resetsAt: 2_000_000_000 },
+      secondary: { usedPercent: weekly, windowDurationMins: 10080, resetsAt: 2_000_100_000 },
+    } },
+  })}\n`);
+}
+
 function emitTurnStarted(params, result) {
   if (!params.threadId || !result?.turn?.id) return;
   process.stdout.write(`${JSON.stringify({
@@ -161,6 +182,26 @@ function emitStructuredTitle(params, result) {
   const turn = thread?.turns.find((entry) => entry.id === result?.turn?.id);
   if (!turn) return;
   setTimeout(() => completeTurn(params.threadId, turn, JSON.stringify({ title: "Quota reset timing" })), 10);
+}
+
+function emitTimelineOrder(params, result) {
+  if (params.outputSchema) return;
+  const text = (params.input || []).map((item) => item.text || "").join("\n");
+  if (!text.includes("[timeline-order]")) return;
+  const turn = threads.get(params.threadId)?.turns.find((entry) => entry.id === result.turn.id);
+  if (!turn) return;
+  const reply = { id: randomUUID(), type: "agentMessage", phase: "commentary", text: "" };
+  const command = { id: randomUUID(), type: "commandExecution", command: "verify-timeline-order", status: "completed", aggregatedOutput: "Timeline check passed", exitCode: 0 };
+  const emit = (method, item) => process.stdout.write(`${JSON.stringify({ method, params: { threadId: params.threadId, turnId: turn.id, item } })}\n`);
+  turn.items.push(reply, command);
+  emit("item/started", copy(reply));
+  emit("item/started", { ...command, status: "inProgress", aggregatedOutput: "" });
+  emit("item/completed", command);
+  setTimeout(() => {
+    reply.text = "先说明，再执行：这段正文故意晚于工具到达。";
+    process.stdout.write(`${JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: params.threadId, turnId: turn.id, itemId: reply.id, delta: reply.text } })}\n`);
+    emit("item/completed", copy(reply));
+  }, 200);
 }
 
 function emitTitleTestCompletion(params, result, userMessageDelay) {
@@ -244,6 +285,19 @@ function emitAsyncUserInputRequest(params, result) {
   if (text.includes("[async-complete]")) completeTurn(params.threadId, turn, "可以稍后回答，当前任务已结束。");
 }
 
+function emitApprovalRequest(params, result) {
+  const text = (params.input || []).map((item) => item.text || "").join("\n");
+  if (!text.includes("[request-approval]")) return;
+  const turnId = result.turn.id;
+  const item = { id: randomUUID(), type: "commandExecution", command: "approval-fixture-only", status: "inProgress" };
+  const turn = threads.get(params.threadId)?.turns.find((entry) => entry.id === turnId);
+  turn?.items.push(copy(item));
+  const requestId = `approval-${turnId}`;
+  pendingUserInputs.set(requestId, { requestId, threadId: params.threadId, turnId, itemId: item.id, kind: "approval" });
+  process.stdout.write(`${JSON.stringify({ method: "item/started", params: { threadId: params.threadId, turnId, item } })}\n`);
+  process.stdout.write(`${JSON.stringify({ id: requestId, method: "item/commandExecution/requestApproval", params: { threadId: params.threadId, turnId, itemId: item.id, command: item.command, availableDecisions: ["accept", "decline"] } })}\n`);
+}
+
 function handleClientResponse(message) {
   const pending = pendingUserInputs.get(String(message.id));
   if (!pending) return;
@@ -255,7 +309,7 @@ function handleClientResponse(message) {
   const agentMessage = {
     id: randomUUID(),
     type: "agentMessage",
-    text: "已收到换仓数量要求，继续执行。",
+    text: pending.kind === "approval" ? "审批已处理。" : process.env.CODEX_TEST_ANSWER_TEXT || "已收到换仓数量要求，继续执行。",
     phase: "final",
   };
   if (turn) {
@@ -282,10 +336,18 @@ function emitPlanUpdate(params, result) {
       explanation: "Integration plan",
       plan: [
         { step: "Inspect", status: "completed" },
-        { step: "Verify", status: "inProgress" },
+        { step: process.env.CODEX_TEST_PLAN_STEP || "Verify", status: "inProgress" },
       ],
     },
   })}\n`);
+  if (process.env.CODEX_TEST_FOOTER_DIFF === "1" && !params.outputSchema) {
+    const diff = "diff --git a/src/example.js b/src/example.js\n--- a/src/example.js\n+++ b/src/example.js\n@@ -1 +1 @@\n-old value\n+new value";
+    const item = { id: randomUUID(), type: "fileChange", status: "completed", changes: [{ path: "src/example.js", kind: "update", diff }] };
+    const turn = threads.get(params.threadId)?.turns.find((entry) => entry.id === result.turn.id);
+    turn?.items.push(copy(item));
+    process.stdout.write(`${JSON.stringify({ method: "item/completed", params: { threadId: params.threadId, turnId: result.turn.id, item } })}\n`);
+    process.stdout.write(`${JSON.stringify({ method: "turn/diff/updated", params: { threadId: params.threadId, turnId: result.turn.id, diff } })}\n`);
+  }
 }
 
 function emitCommandOutputBurst(params, result) {
@@ -367,6 +429,15 @@ function fakeResult(method, params = {}) {
         serviceTiers: [],
       },
       {
+        id: "gpt-6.1-luna",
+        displayName: "GPT-6.1 Luna",
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: "high",
+        supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "medium" }],
+        serviceTiers: [],
+      },
+      {
         id: "gpt-5-mini",
         displayName: "GPT-5 mini",
         hidden: true,
@@ -379,8 +450,8 @@ function fakeResult(method, params = {}) {
   };
   if (method === "collaborationMode/list") return {
     data: [
-      { mode: "plan", model: null, reasoning_effort: "medium" },
-      { mode: "default", model: null, reasoning_effort: null },
+      { mode: "plan", model: "gpt-5.6-sol", reasoning_effort: "low" },
+      { mode: "default", model: "gpt-5.6-sol", reasoning_effort: "low" },
     ],
   };
   if (method === "thread/settings/update") {
@@ -454,7 +525,7 @@ function fakeResult(method, params = {}) {
   }
   if (method === "thread/list") {
     const key = params.sortKey === "updated_at" ? "updatedAt" : "createdAt";
-    const matching = [...threads.values()].filter((thread) => thread.cwd === params.cwd)
+    const matching = [...threads.values()].filter((thread) => !params.cwd || (Array.isArray(params.cwd) ? params.cwd.includes(thread.cwd) : thread.cwd === params.cwd))
       .sort((a, b) => (Number(b[key]) || 0) - (Number(a[key]) || 0));
     const offset = Number(params.cursor || 0);
     const limit = Math.max(1, Number(params.limit || 100));

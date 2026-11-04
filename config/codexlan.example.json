@@ -3,5 +3,6 @@
   "port": 8688,
   "host": "auto",
   "dataRoot": "../data",
-  "autoApprove": false
+  "autoApprove": false,
+  "autoApproveBrowser": false
 }

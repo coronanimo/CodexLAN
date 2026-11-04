@@ -58,7 +58,12 @@ export function terminalExecutionStatus(status) {
 }
 
 export function mergeHistoricalExecutionItem(item, metric, turnStatus) {
-  const merged = { ...item, ...(metric || {}) };
+  const snapshot = metric?.snapshot?.type === item?.type ? metric.snapshot : {};
+  const merged = { ...snapshot, ...(metric || {}), ...item };
+  for (const key of ["command", "cwd", "aggregatedOutput"]) {
+    if (!merged[key] && snapshot[key]) merged[key] = snapshot[key];
+  }
+  if (snapshot.outputTruncated) merged.outputTruncated = true;
   // Timing metrics are supplemental; a canonical history item owns its role.
   // Otherwise a stale metric can turn an assistant message into a user message
   // during a refresh because both are keyed by the same item id in the UI.
@@ -162,47 +167,6 @@ export function activeExecutionSnapshots(turnMetric, turnId) {
     .map((metric) => ({ ...metric.snapshot, ...metric, turnId }));
 }
 
-export function restoreMissingExecutionItems(items, metricItems) {
-  const source = metricItems && typeof metricItems === "object" ? metricItems : {};
-  const restored = (items || []).map((item) => mergeCapturedExecutionItem(item, source[item?.id]));
-  const knownIds = new Set(restored.map((item) => item?.id).filter(Boolean));
-  const missing = Object.entries(source)
-    .filter(([itemId, metric]) => !knownIds.has(itemId) && metric?.snapshot?.type === "commandExecution")
-    .map(([itemId, metric]) => {
-      const { snapshot, ...timing } = metric;
-      return {
-        ...snapshot,
-        id: itemId,
-        ...timing,
-        status: metric.status || (metric.completedAt != null || metric.durationMs != null ? "completed" : "inProgress"),
-      };
-    })
-    .sort((left, right) => (timestampMilliseconds(left.startedAt) || 0) - (timestampMilliseconds(right.startedAt) || 0));
-
-  for (const item of missing) {
-    const startedAt = timestampMilliseconds(item.startedAt);
-    let index = startedAt ? restored.findIndex((existing) => {
-      const existingStartedAt = timestampMilliseconds(existing?.startedAt)
-        || timestampMilliseconds(source[existing?.id]?.startedAt);
-      return existingStartedAt && existingStartedAt > startedAt;
-    }) : -1;
-    if (index < 0) index = restored.findIndex((existing) => existing?.type === "agentMessage" && existing.phase !== "commentary");
-    if (index < 0) restored.push(item);
-    else restored.splice(index, 0, item);
-  }
-  return restored;
-}
-
-function mergeCapturedExecutionItem(item, metric) {
-  const snapshot = metric?.snapshot;
-  if (!snapshot || snapshot.type !== item?.type) return item;
-  const merged = { ...snapshot, ...item };
-  for (const key of ["command", "cwd", "aggregatedOutput"]) {
-    if (!merged[key] && snapshot[key]) merged[key] = snapshot[key];
-  }
-  if (snapshot.outputTruncated) merged.outputTruncated = true;
-  return merged;
-}
 
 export function executionItemText(item = {}) {
   if (typeof item.displayText === "string") return item.displayText;
@@ -240,7 +204,7 @@ export function executionItemText(item = {}) {
   return "";
 }
 
-export function turnProcessMarkdown({ plan, items } = {}) {
+export function turnProcessMarkdown({ plan, items, recovered = [] } = {}) {
   const sections = [];
   const planSection = processPlanMarkdown(plan);
   if (planSection) sections.push(planSection);
@@ -251,10 +215,19 @@ export function turnProcessMarkdown({ plan, items } = {}) {
     const section = processItemMarkdown(item);
     if (section) sections.push(section);
   }
+  const recoverySections = [];
+  for (const item of recovered) {
+    if (!item || (item.id && seen.has(item.id))) continue;
+    if (item.id) seen.add(item.id);
+    const section = processItemMarkdown(item);
+    if (section) recoverySections.push(section);
+  }
+  if (recoverySections.length) sections.push(`## 恢复记录 · 原始位置未知\n\n${recoverySections.join("\n\n")}`);
   return sections.join("\n\n").trim();
 }
 
 function processPlanMarkdown(value = {}) {
+  value = value || {};
   const entries = Array.isArray(value.plan) ? value.plan : [];
   const explanation = String(value.explanation || "").trim();
   if (!entries.length && !explanation) return "";

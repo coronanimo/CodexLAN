@@ -23,6 +23,7 @@ test("loads server settings from config/codexlan.json and resolves relative path
     assert.equal(config.workspaceRoot, join(root, "workspace"));
     assert.equal(config.dataRoot, join(root, "runtime"));
     assert.equal(config.configPath, join(root, "config", "codexlan.json"));
+    assert.equal(config.autoApproveBrowser, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -52,6 +53,30 @@ test("rejects unknown settings instead of silently ignoring them", async () => {
       loadServerConfig({ appRoot: root, env: {} }),
       /Unknown setting.*webPort/,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("browser auto-approval is a strict, file-only boolean independent of command approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codexlan-config-browser-"));
+  try {
+    await mkdir(join(root, "config"));
+    const configPath = join(root, "config", "codexlan.json");
+    await writeFile(configPath, JSON.stringify({ autoApproveBrowser: true }));
+    const enabled = await loadServerConfig({ appRoot: root, env: {} });
+    assert.equal(enabled.autoApproveBrowser, true);
+    assert.equal(enabled.autoApprove, false);
+
+    await writeFile(configPath, JSON.stringify({ autoApprove: true, autoApproveBrowser: false }));
+    assert.equal((await loadServerConfig({ appRoot: root, env: {} })).autoApproveBrowser, false);
+    await writeFile(configPath, JSON.stringify({ autoApprove: true }));
+    assert.equal((await loadServerConfig({ appRoot: root, env: { CODEX_AUTO_APPROVE_BROWSER: "true" } })).autoApproveBrowser, false);
+
+    for (const value of ["true", 1, null]) {
+      await writeFile(configPath, JSON.stringify({ autoApproveBrowser: value }));
+      await assert.rejects(loadServerConfig({ appRoot: root, env: {} }), /autoApproveBrowser must be a boolean/);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

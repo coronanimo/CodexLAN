@@ -22,6 +22,11 @@
       "description": "Automatically approve command execution, file changes, and requested permissions for the Codex session.",
       "type": "boolean",
       "default": false
+    },
+    "autoApproveBrowser": {
+      "description": "Allow local browser control for all CodexLAN conversations without approval cards, including signed-in websites. Codex browser policy still applies. Independent of autoApprove.",
+      "type": "boolean",
+      "default": false
     }
   }
 }

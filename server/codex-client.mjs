@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { resolve } from "node:path";
+import { BrowserAccessHost } from "./browser-access.mjs";
 
 const APP_SERVER_MAX_RESTARTS = 6;
 const MAX_LOADED_THREADS = 300;
@@ -54,6 +55,8 @@ export class AppServerClient {
     this.closed = false;
     this.agent = "";
     this.error = "";
+    this.browserAccessHost = null;
+    this.authorizeBrowserAccess = null;
     this.ready = this.ensureStarted();
     void this.ready.catch(() => {});
   }
@@ -92,10 +95,28 @@ export class AppServerClient {
   async start() {
     const launch = this.appServerLaunch();
     this.agent = "";
+    if (process.platform === "win32" && !process.env.CODEX_TEST_APP_SERVER) {
+      const host = new BrowserAccessHost({
+        authorize: (params) => this.authorizeBrowserAccess?.(params) ?? false,
+      });
+      try {
+        await host.start();
+        this.browserAccessHost = host;
+      } catch (error) {
+        await host.close();
+        process.stderr.write(`[web] 无法启动本机浏览器权限服务：${error.message}\n`);
+      }
+    }
+    const childEnv = { ...process.env };
+    for (const key of ["BROWSER_USE_ACCESS_EXECUTOR_ID", "BROWSER_USE_ACCESS_PIPE_PATH", "BROWSER_USE_ACCESS_VERIFYING_IDENTITY"]) {
+      delete childEnv[key];
+    }
+    Object.assign(childEnv, this.browserAccessHost?.env);
     const child = spawn(launch.executable, launch.args, {
       cwd: this.workspace,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      env: childEnv,
     });
     this.process = child;
     this.buffer = "";
@@ -154,6 +175,9 @@ export class AppServerClient {
           error.codexResponse = true;
           pending.reject(error);
         } else {
+          // Observe acceptance synchronously, before later JSONL notifications
+          // in this same read can overtake the awaiting request caller.
+          this.events.emit("response", { method: pending.method, params: pending.params, result: message.result });
           pending.resolve(message.result);
         }
       } else if (typeof message.method === "string" && message.method) {
@@ -181,7 +205,7 @@ export class AppServerClient {
         this.pending.delete(id);
         rejectRequest(new Error(`Codex 在 ${Math.ceil(requestTimeoutMs / 1000)} 秒内未响应 ${method}。`));
       }, requestTimeoutMs);
-      this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
+      this.pending.set(id, { method, params, resolve: resolveRequest, reject: rejectRequest, timer });
       this.process.stdin.write(`${JSON.stringify({ method, id, params })}\n`);
     });
   }
@@ -201,8 +225,8 @@ export class AppServerClient {
   }
 
   async request(method, params, options) {
+    if (this.state !== "ready" && this.startPromise) await this.startPromise;
     if (this.state !== "ready") {
-      if (this.startPromise) await this.startPromise;
       if (this.state === "login_required") throw new Error(this.error);
       else throw new Error(this.state === "failed" ? "Codex App Server 自动恢复失败，请查看服务日志。" : "Codex App Server 正在恢复，请稍后重试。");
     }
@@ -236,6 +260,7 @@ export class AppServerClient {
   handleFailure(child, error, details = {}) {
     if (!child || this.process !== child) return;
     this.process = null;
+    void this.closeBrowserAccessHost();
     this.buffer = "";
     this.agent = "";
     this.error = this.failureMessage(error);
@@ -292,6 +317,7 @@ export class AppServerClient {
     if (this.stableTimer) clearTimeout(this.stableTimer);
     this.restartTimer = null;
     this.stableTimer = null;
+    await this.closeBrowserAccessHost();
     const child = this.process;
     this.process = null;
     this.agent = "";
@@ -313,6 +339,14 @@ export class AppServerClient {
 
   appServerLaunch() {
     return appServerLaunch({ codexBin: this.codexBin });
+  }
+
+  async closeBrowserAccessHost() {
+    const host = this.browserAccessHost;
+    this.browserAccessHost = null;
+    if (!host) return;
+    try { await host.close(); }
+    catch (error) { process.stderr.write(`[web] 无法关闭浏览器权限服务：${error.message}\n`); }
   }
 
   failureMessage(error) {

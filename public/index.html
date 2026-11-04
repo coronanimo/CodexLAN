@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.16.22">
     <link rel="stylesheet" href="/styles.css">
     <link rel="stylesheet" href="/workspace.css">
+    <link rel="stylesheet" href="/conversation-controls.css">
     <link rel="stylesheet" href="/content.css?v=20260901-2">
     <link rel="stylesheet" href="/execution.css">
     <link rel="stylesheet" href="/composer.css">
@@ -243,6 +244,10 @@
         </section>
         <section class="settings-section preference-settings-section">
           <div class="settings-section-heading"><div><strong>本机偏好</strong><p>只对当前账号和这台浏览器生效。</p></div></div>
+          <label class="settings-control-row settings-select-row">
+            <span><strong>全局默认模型</strong><small>新建聊天优先继承当前聊天；没有可继承模型时使用此默认值。</small></span>
+            <select id="default-model"><option value="">自动</option></select>
+          </label>
           <label class="settings-control-row settings-toggle-row">
             <span><strong>后台完成提醒</strong><small id="completion-notification-description">任务在后台结束时提醒我。</small></span>
             <input id="completion-notifications" type="checkbox" aria-describedby="completion-notification-description">

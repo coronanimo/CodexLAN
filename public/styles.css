@@ -43,6 +43,24 @@
   --dispatch-soft: var(--accent-soft);
   --execute: var(--accent);
   --execute-soft: var(--accent-soft);
+  /* Shared scales; only conversation components consume these initially. */
+  --ui-font-body: 14px;
+  --ui-font-control: 13px;
+  --ui-font-caption: 12px;
+  --ui-font-time: 11px;
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-radius-control: 6px;
+  --ui-radius-panel: 8px;
+  --ui-control-height: 32px;
+  --ui-row-height: 38px;
+  --conversation-content-width: 780px;
+  --execution-kind-width: 48px;
+  --execution-row-height: 32px;
+  --execution-font-caption: 10px;
+  --execution-font-content: 11px;
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
 }
 

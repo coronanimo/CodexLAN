@@ -43,6 +43,12 @@ CodexLAN 不适合作为公开 SaaS，也不适合不互信的租户。网页账
 
 独立守护进程负责启动、停止、重启和查看日志。服务在已就绪后意外退出时会自动拉起；服务进程不会因为自我重启而杀掉守护进程。
 
+### 本机浏览器权限
+
+已安装兼容的 Windows 浏览器插件、运行时和 Chrome 扩展时，默认在会话首次请求浏览器时显示审批卡。由会话所有者选择“本次会话允许”后，再让 Codex 重试浏览器操作。手动授权仅适用于这个会话，核心重启后失效。
+
+不想逐个会话确认，可在 `config/codexlan.json` 中设置 `"autoApproveBrowser": true`，然后从外部终端执行 `npm run service:restart`。这会自动允许所有 CodexLAN 用户的会话使用本机浏览器，包括读取和操作已登录的网站；核心重启后仍按此配置自动允许。此项独立于 `autoApprove`，不改变命令、文件修改等权限，也不覆盖 Codex 的浏览器禁用策略。
+
 ## 运行要求
 
 - 服务端：Windows 10 或 11、Node.js 20+、已安装并登录的 Codex CLI。
@@ -71,7 +77,8 @@ npm run service:start
   "port": 8688,
   "host": "auto",
   "dataRoot": "../data",
-  "autoApprove": false
+  "autoApprove": false,
+  "autoApproveBrowser": false
 }
 ```
 
@@ -85,6 +92,7 @@ npm run service:start
 | `workspaceRoot` | 可选的工作区边界。省略时使用 `<dataRoot>/projects`；已有项目仍可指向自己的绝对路径。 |
 | `codexBin` | 可选的 Codex 可执行文件路径；省略时从 `PATH` 查找 `codex`。 |
 | `autoApprove` | 自动批准当前 Codex 会话的命令执行、文件修改和权限请求。默认 `false`，只应对完全信任的用户启用。 |
+| `autoApproveBrowser` | 自动允许所有会话控制本机浏览器（含已登录网站），不显示浏览器审批卡。默认 `false`；独立于 `autoApprove`，只应对完全信任的用户启用。 |
 
 未知配置项或非法值会阻止启动，而不是静默忽略。
 

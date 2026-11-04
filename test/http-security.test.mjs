@@ -214,6 +214,12 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(suggestedTitle.status, 200, `${JSON.stringify(suggestedTitle.body)}\n${errors}`);
     assert.equal(suggestedTitle.body.name, "Quota reset timing");
     const titleTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    const firstTitleTurn = titleTrace.findIndex((entry) => entry.method === "turn/start" && entry.params.threadId === autoTitleThread.body.thread.id);
+    const autoTitleSet = titleTrace.findIndex((entry) => entry.method === "thread/name/set" && entry.params.threadId === autoTitleThread.body.thread.id);
+    assert.equal(firstTitleTurn >= 0 && autoTitleSet > firstTitleTurn, true);
+    assert.equal(titleTrace.slice(firstTitleTurn, autoTitleSet).some((entry) => (
+      entry.method === "thread/read" && entry.params.threadId === autoTitleThread.body.thread.id
+    )), false, "new-thread title generation must not wait on persisted history");
     const titleThreadStart = titleTrace.find((entry) => entry.method === "thread/start" && entry.params.ephemeral === true);
     assert.equal(titleThreadStart?.params.model, "gpt-5.6-sol");
     const titleTurnStart = titleTrace.find((entry) => entry.method === "turn/start" && entry.params.outputSchema);
@@ -250,14 +256,38 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     const threadsAfterRename = await request(origin, `/api/projects/${createdProject.body.project.id}/threads`, { cookie: adminCookie });
     assert.equal(threadsAfterRename.body.threads.find((thread) => thread.id === threadId)?.name, "Renamed conversation");
 
+    const defaultModeSettings = await request(origin, `/api/threads/${threadId}`, {
+      method: "PATCH",
+      cookie: adminCookie,
+      csrf: adminCsrf,
+      body: {
+        projectId: createdProject.body.project.id,
+        settings: { model: "gpt-6.1-luna", effort: "high", collaborationMode: "default" },
+      },
+    });
+    assert.equal(defaultModeSettings.status, 200);
+    const defaultModeTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse)
+      .findLast((entry) => entry.method === "thread/settings/update" && entry.params.threadId === threadId);
+    assert.equal(defaultModeTrace.params.collaborationMode.settings.model, "gpt-6.1-luna");
+    assert.equal(defaultModeTrace.params.collaborationMode.settings.reasoning_effort, "high");
+
     const planSettings = await request(origin, `/api/threads/${threadId}`, {
       method: "PATCH",
       cookie: adminCookie,
       csrf: adminCsrf,
-      body: { projectId: createdProject.body.project.id, settings: { collaborationMode: "plan" } },
+      body: {
+        projectId: createdProject.body.project.id,
+        settings: { model: "gpt-6.1-luna", effort: "high", collaborationMode: "plan" },
+      },
     });
     assert.equal(planSettings.status, 200);
+    assert.equal(planSettings.body.settings.model, "gpt-6.1-luna");
+    assert.equal(planSettings.body.settings.effort, "high");
     assert.equal(planSettings.body.settings.collaborationMode, "plan");
+    const planSettingsTrace = (await readFile(traceFile, "utf8")).trim().split(/\r?\n/).map(JSON.parse)
+      .findLast((entry) => entry.method === "thread/settings/update" && entry.params.threadId === threadId);
+    assert.equal(planSettingsTrace.params.collaborationMode.settings.model, "gpt-6.1-luna");
+    assert.equal(planSettingsTrace.params.collaborationMode.settings.reasoning_effort, "high");
 
     const forkedThread = await request(origin, `/api/threads/${threadId}/fork`, {
       method: "POST",
@@ -288,7 +318,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(forkTrace.params.threadId, threadId);
     assert.equal(forkTrace.params.cwd, createdProject.body.project.path);
     assert.equal(forkTrace.params.excludeTurns, true);
-    assert.equal(forkTrace.params.model, "gpt-5.6-sol");
+    assert.equal(forkTrace.params.model, "gpt-6.1-luna");
 
     const compactSse = await fetch(`${origin}/api/events`, { headers: { Cookie: adminCookie } });
     assert.equal(compactSse.status, 200);
@@ -544,7 +574,8 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     const startedTurn = trace.find((entry) => entry.method === "turn/start" && entry.params.threadId === threadId);
     assert.equal(startedTurn.params.clientUserMessageId, firstTask.body.item.id);
     assert.equal(startedTurn.params.collaborationMode.mode, "plan");
-    assert.equal(startedTurn.params.collaborationMode.settings.model, "gpt-5.6-sol");
+    assert.equal(startedTurn.params.collaborationMode.settings.model, "gpt-6.1-luna");
+    assert.equal(startedTurn.params.collaborationMode.settings.reasoning_effort, "high");
 
     const failedGuidanceQueue = await request(origin, `/api/threads/${threadId}/queue`, {
       method: "POST",

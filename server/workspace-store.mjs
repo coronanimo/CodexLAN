@@ -1277,6 +1277,7 @@ export function cleanTimingPatch(value = {}, { includeType = false, includeSnaps
     if (Number.isFinite(number) && number >= 0) timing[key] = Math.round(number);
   }
   if (includeType && typeof value?.type === "string" && value.type.length <= 80) timing.type = value.type;
+  if (includeType && value?.inputKind === "guide") timing.inputKind = "guide";
   if (includeSnapshot) {
     const snapshot = commandExecutionSnapshot(value?.snapshot);
     if (snapshot) timing.snapshot = snapshot;

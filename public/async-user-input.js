@@ -48,6 +48,13 @@ export function answeredAsyncRequestIds(turns = [], queue = []) {
   return [...new Set(ids)];
 }
 
+export function asyncAnswerText(requestId, turns = [], queue = []) {
+  const texts = turns.flatMap((turn) => (turn.items || []).filter((item) => item.type === "userMessage")
+    .map((item) => (item.content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n")));
+  const text = [...texts, ...queue.map((item) => item.text)].find((value) => asyncAnswerRequestId(value) === requestId);
+  return text ? displayUserInputText(text).replace(/^回答你的提问：\n/, "") : "";
+}
+
 export function asyncQuestionDeferred(storage, key, requestKey) {
   try {
     const saved = JSON.parse(storage.getItem(key) || "[]");

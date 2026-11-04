@@ -17,7 +17,6 @@ export function registerProjects(application, { store, conversations }) {
 
   application.post("/api/projects", async (request, response) => {
     const project = await store.createProject(await readJson(request), request.identity.user.id);
-    conversations.invalidateWorkspaceCatalog(request.identity.user.id);
     json(response, 201, { project });
   });
 
@@ -57,7 +56,6 @@ export function registerProjects(application, { store, conversations }) {
       ? await conversations.validateSettings(mergeSettings(existing.settings, body.settings))
       : undefined;
     const project = await store.updateProject(request.params.projectId, { ...body, ...(settings ? { settings } : {}) }, user.id);
-    conversations.invalidateWorkspaceCatalog(user.id);
     if (pathChanged) conversations.forgetProject(project.id, previousThreadIds);
     json(response, 200, { project });
   });
@@ -67,7 +65,6 @@ export function registerProjects(application, { store, conversations }) {
     if (conversations.projectHasActiveThread(projectId)) throw httpError(409, "项目仍有任务正在执行，停止后才能删除。");
     const previousThreadIds = store.threadIdsForProject(projectId);
     const project = await store.removeProject(projectId, request.identity.user.id);
-    conversations.invalidateWorkspaceCatalog(request.identity.user.id);
     conversations.forgetProject(project.id, previousThreadIds);
     json(response, 200, { project });
   });

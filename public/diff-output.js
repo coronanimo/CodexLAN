@@ -14,11 +14,12 @@ export function diffLineStats(changes) {
   for (const change of changes || []) {
     const contents = String(change.diff || "");
     const changeType = fileChangeType(change);
-    if (changeType === "add") {
+    const unified = /^@@ /m.test(contents);
+    if (changeType === "add" && !unified) {
       added += textLineCount(contents);
       continue;
     }
-    if (changeType === "delete") {
+    if (changeType === "delete" && !unified) {
       removed += textLineCount(contents);
       continue;
     }

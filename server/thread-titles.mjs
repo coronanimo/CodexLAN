@@ -32,14 +32,20 @@ export function createThreadTitleService({ codex }) {
     return requestTitle({ cwd, transcript, settings });
   }
 
-  function schedule({ threadId, cwd, turns, legacyTurns = turns, settings }) {
-    if (jobs.has(threadId)) return jobs.get(threadId);
+  function schedule({ threadId, cwd, turns, legacyTurns = turns, settings, getCurrentName }) {
+    if (jobs.has(threadId)) return jobs.get(threadId).promise;
     if ((failedUntil.get(threadId) || 0) > Date.now()) return Promise.resolve(null);
     failedUntil.delete(threadId);
     const transcript = titleTranscript(turns);
     if (!transcript) return Promise.resolve(null);
-    const legacyName = legacyFirstMessageName(legacyTurns);
-    const job = generate({ threadId, cwd, transcript, legacyName, fallbackTurns: legacyTurns, settings })
+    const legacyName = getCurrentName ? null : legacyFirstMessageName(legacyTurns);
+    const job = { cancelled: false, promise: null };
+    const onNotification = (message) => {
+      if (message.params?.threadId === threadId
+        && ["thread/name/updated", "thread/deleted"].includes(message.method)) job.cancelled = true;
+    };
+    codex.events.on("notification", onNotification);
+    job.promise = generate({ threadId, cwd, transcript, legacyName, fallbackTurns: legacyTurns, settings, getCurrentName, job })
       .then((title) => {
         failedUntil.delete(threadId);
         return title;
@@ -48,13 +54,22 @@ export function createThreadTitleService({ codex }) {
         failedUntil.set(threadId, Date.now() + TITLE_FAILURE_COOLDOWN_MS);
         throw error;
       })
-      .finally(() => jobs.delete(threadId));
+      .finally(() => {
+        jobs.delete(threadId);
+        codex.events.off("notification", onNotification);
+      });
     jobs.set(threadId, job);
-    return job;
+    return job.promise;
   }
 
-  async function generate({ threadId, cwd, transcript, legacyName, fallbackTurns, settings }) {
-    const current = (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
+  async function generate({ threadId, cwd, transcript, legacyName, fallbackTurns, settings, getCurrentName, job }) {
+    // New threads already have authoritative name state in the host. Only
+    // legacy/history callers need to read persisted metadata.
+    const readName = () => getCurrentName
+      ? { name: getCurrentName() }
+      : codex.request("thread/read", { threadId, includeTurns: false }).then((result) => result.thread);
+    const current = await readName();
+    if (job.cancelled) return null;
     if (!canReplaceThreadName(current, legacyName)) return current.name.trim();
 
     let title;
@@ -64,7 +79,9 @@ export function createThreadTitleService({ codex }) {
       title = fallbackThreadTitle(fallbackTurns);
       if (!title) throw error;
     }
-    const latest = (await codex.request("thread/read", { threadId, includeTurns: false })).thread;
+    if (job.cancelled) return null;
+    const latest = await readName();
+    if (job.cancelled) return null;
     if (!canReplaceThreadName(latest, legacyName)) return latest.name.trim();
     await codex.request("thread/name/set", { threadId, name: title });
     return title;
@@ -137,7 +154,11 @@ export function createThreadTitleService({ codex }) {
     return model;
   }
 
-  return { schedule, suggest };
+  return {
+    schedule, suggest,
+    isPending: (threadId) => jobs.has(threadId),
+    cancel: (threadId) => { if (jobs.has(threadId)) jobs.get(threadId).cancelled = true; },
+  };
 }
 
 export function isMiniModel(modelId) {

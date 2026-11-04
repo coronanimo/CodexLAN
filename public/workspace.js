@@ -76,14 +76,16 @@ export function mergeListedThread(existing, listed) {
   };
 }
 
-export function mergeThreadListPage(previous, ids, nextCursor, { order, append = false }) {
+export function mergeThreadListPage(previous, ids, nextCursor, { order, append = false, baselineIds = null }) {
   const retained = previous?.order === order ? previous : null;
   const expanded = append || Boolean(retained?.expanded);
+  const baseline = baselineIds && new Set(baselineIds);
+  const discovered = baseline ? (retained?.ids || []).filter((id) => !baseline.has(id)) : [];
   return {
     order,
     expanded,
     ids: [...new Set(append ? [...(retained?.ids || []), ...ids]
-      : [...ids, ...(expanded ? retained?.ids || [] : [])])],
+      : [...discovered, ...ids, ...(expanded ? retained?.ids || [] : [])])],
     // Refresh only the head, without discarding already loaded conversations
     // or fetching those pages again when the window regains focus.
     nextCursor: !append && retained?.expanded ? retained.nextCursor : nextCursor,
@@ -124,27 +126,6 @@ export function mergeRefreshedThreads(baselineThreads, currentThreads, listedThr
   return { threads: [...retained, ...refreshed], removedThreadIds };
 }
 
-export function mergeTurnItems(existingItems, incomingItems) {
-  const merged = (existingItems || []).map((item) => ({ ...item }));
-  for (const item of incomingItems || []) {
-    if (!item?.id) {
-      merged.push({ ...item });
-      continue;
-    }
-    const clientId = userMessageClientId(item);
-    const index = merged.findIndex((candidate) => candidate?.id === item.id
-      || (clientId && userMessageClientId(candidate) === clientId));
-    if (index === -1) {
-      merged.push({ ...item });
-      continue;
-    }
-    if (item.clientPending && !merged[index].clientPending) continue;
-    const updated = { ...merged[index], ...item };
-    if (!item.clientPending) delete updated.clientPending;
-    merged[index] = updated;
-  }
-  return merged;
-}
 
 export function userMessageClientId(item) {
   if (item?.type !== "userMessage") return null;
@@ -164,11 +145,11 @@ export function invalidateThreadHistory(thread) {
   return { ...thread, historyLive: false, syncedUpdatedAt: null };
 }
 
-export function newThreadSettings({ projectSettings = {}, currentThread = null, projectId = null, models = [] } = {}) {
+export function newThreadSettings({ projectSettings = {}, currentThread = null, projectId = null, models = [], defaultModel = "" } = {}) {
   const currentBelongsToProject = currentThread?.runtime?.projectId === projectId;
   const inherited = currentBelongsToProject ? currentThread?.settings || {} : {};
   const configured = Object.keys(inherited).length ? inherited : projectSettings || {};
-  const model = availableModelId(configured.model, models) || solModelId(models);
+  const model = inherited.model || defaultModel || configured.model || solModelId(models);
   return {
     model,
     effort: configured.effort || "medium",
@@ -210,6 +191,18 @@ export function contextWindowUsage(tokenUsage) {
   };
 }
 
+// Notifications carry one complete bucket, not the entire multi-bucket read.
+export function mergeAccountRateLimits(previous, snapshot) {
+  const limitId = snapshot.limitId || "codex";
+  const byId = { ...previous?.rateLimitsByLimitId, [limitId]: snapshot };
+  return {
+    ...previous,
+    available: true,
+    rateLimitsByLimitId: byId,
+    rateLimits: byId.codex || previous?.rateLimits || null,
+  };
+}
+
 export function accountLimitWindows(payload) {
   if (!payload || payload.available === false) return { fiveHour: null, weekly: null };
   const snapshot = payload.rateLimitsByLimitId?.codex || payload.rateLimits || payload;
@@ -236,12 +229,6 @@ function boundedPercent(value) {
   const number = finiteNumber(value);
   if (number === null) return null;
   return Math.max(0, Math.min(100, number));
-}
-
-function availableModelId(modelId, models) {
-  if (!modelId) return null;
-  if (!models.length || models.some((model) => model.id === modelId)) return modelId;
-  return null;
 }
 
 function solModelId(models) {

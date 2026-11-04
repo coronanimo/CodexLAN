@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { MAX_SAVED_COMMAND_OUTPUT, activeExecutionSnapshots, commandExecutionSnapshot, commandOutputTail, executionItemText } from "../public/execution-events.js";
 import { timestampMilliseconds } from "../public/elapsed-time.js";
-import { isActiveThreadStatus } from "../public/workspace.js";
+import { isActiveThreadStatus, mergeAccountRateLimits } from "../public/workspace.js";
 import { turnPlanSnapshot } from "../public/plan.js";
 import { isActiveGoal } from "../public/goal.js";
 import { activityFromNotification, mergeRuntimeActivity } from "../public/run-diagnostics.js";
@@ -40,7 +40,7 @@ const FALLBACK_MODEL = {
   serviceTiers: [],
 };
 
-export function createConversations({ store, codex, autoApprove = false }) {
+export function createConversations({ store, codex, autoApprove = false, autoApproveBrowser = false }) {
   const threadTitles = createThreadTitleService({ codex });
   const eventClients = new Set();
   const commandOutputBatches = new Map();
@@ -54,7 +54,6 @@ export function createConversations({ store, codex, autoApprove = false }) {
   const goalReadTimes = new Map();
   const goalVersions = new Map();
   const goalReads = new Map();
-  const workspaceCatalogs = new Map();
   const threadPaths = new Map();
   const liveThreads = new LiveThreadState();
   const summaryTimers = new Map();
@@ -65,6 +64,55 @@ export function createConversations({ store, codex, autoApprove = false }) {
   const userInputRequests = new Map();
   const asyncInputJobs = new Set();
   const approvalRequests = new Map();
+  const browserDecisions = new Map();
+  codex.authorizeBrowserAccess = async ({ sessionId: threadId, turnId }) => {
+    function requireActiveTurn() {
+      if (!store.threadProjects[threadId] || !codex.loadedThreads.has(threadId)
+        || threadState.get(threadId)?.activeTurnId !== turnId) {
+        throw new Error("浏览器权限请求不属于 CodexLAN 当前执行中的会话。");
+      }
+    }
+    requireActiveTurn();
+    const [policy, settings] = await Promise.all([
+      codex.request("configRequirements/read", {}),
+      codex.request("config/read", { includeLayers: false }),
+    ]);
+    if (!policy || !Object.hasOwn(policy, "requirements")
+      || (policy.requirements !== null && (typeof policy.requirements !== "object" || Array.isArray(policy.requirements)))
+      || !settings?.config
+      || typeof settings.config !== "object" || Array.isArray(settings.config)) {
+      throw new Error("无法读取 Codex 浏览器权限策略。");
+    }
+    const requirements = policy?.requirements;
+    const features = settings?.config?.features;
+    if (requirements?.allowBrowserAndComputerUse === false
+      || requirements?.featureRequirements?.browser_use === false
+      || requirements?.featureRequirements?.browser_use_external === false
+      || features?.browser_use === false || features?.browser_use_external === false) {
+      throw new Error("当前 Codex 配置或管理策略禁止使用本机浏览器。");
+    }
+    requireActiveTurn();
+    const decision = browserDecisions.get(threadId);
+    if (decision?.allowed === true) return true;
+    if (decision?.allowed === false && decision.turnId === turnId) throw new Error("用户已拒绝本轮任务使用本机浏览器。");
+    if (autoApproveBrowser) return true;
+    const existing = [...approvalRequests.values()].find((entry) =>
+      entry.threadId === threadId && entry.method === "codexlan/browser/requestApproval");
+    if (!existing) {
+      const requestId = `browser-${randomUUID()}`;
+      const entry = {
+        requestId, threadId, turnId, method: "codexlan/browser/requestApproval",
+        params: {
+          threadId, turnId,
+          reason: "允许后，此会话可读取和操作本机浏览器，包括其中已登录的网站。网站权限和操作确认仍然适用。",
+          availableDecisions: ["decline", "acceptForSession"],
+        },
+      };
+      approvalRequests.set(`${threadId}:${requestId}`, entry);
+      broadcast(threadId, { method: entry.method, params: publicApprovalRequest(entry) });
+    }
+    throw new Error("请在 CodexLAN 会话中的浏览器审批卡选择“本次会话允许”，然后重试浏览器操作。");
+  };
   const MAX_THREAD_TOKEN_USAGE = 300;
   const DEFAULT_REASONING_SUMMARY = "detailed";
   const REASONING_SUMMARIES = new Set(["auto", "concise", "detailed", "none"]);
@@ -72,15 +120,38 @@ export function createConversations({ store, codex, autoApprove = false }) {
   const USER_GOAL_STATUSES = new Set(["active", "paused"]);
   const DEFAULT_HISTORY_PAGE_SIZE = 12;
   const MAX_HISTORY_PAGE_SIZE = 40;
-  let modelCache = { expiresAt: 0, data: [] };
+  let modelCache = { expiresAt: 0, data: [], isFallback: false };
   let modelRefreshPromise = null;
   let collaborationModeCache = { expiresAt: 0, data: [] };
   let accountRateLimitsCache = { expiresAt: 0, data: null };
+  let accountRateLimitsRead = null;
+  let accountRateLimitsVersion = 0;
+  const accountRateLimitsUpdates = new Map();
+  codex.events.on("response", ({ method, params, result }) => {
+    if (!["turn/start", "turn/steer"].includes(method) || !params?.clientUserMessageId || !store.threadProjects[params.threadId]) return;
+    const turnId = result?.turn?.id || result?.turnId || params.expectedTurnId;
+    if (!turnId) return;
+    const item = { id: params.clientUserMessageId, clientId: params.clientUserMessageId,
+      type: "userMessage", content: params.input || [], clientPending: true,
+      ...(method === "turn/steer" ? { inputKind: "guide" } : {}) };
+    const conversation = liveThreads.receive({ method: "item/started", params: { threadId: params.threadId, turnId, item } });
+    broadcast(params.threadId, { method: "conversation/updated", params: { threadId: params.threadId, conversation } });
+  });
   codex.events.on("notification", (message) => {
     if (message.method === "account/rateLimits/updated") {
-      accountRateLimitsCache.expiresAt = 0;
-      // Quotas are account-wide, not attached to a selected thread.
-      broadcastServer({ rateLimitsChanged: true });
+      const snapshot = message.params.rateLimits;
+      accountRateLimitsVersion++;
+      accountRateLimitsUpdates.set(snapshot.limitId || "codex", { version: accountRateLimitsVersion, snapshot });
+      const data = mergeAccountRateLimits(accountRateLimitsCache.data, snapshot);
+      accountRateLimitsCache = {
+        // An unrelated bucket alone cannot satisfy the first Codex read.
+        expiresAt: data.rateLimits ? Date.now() + 15_000 : 0,
+        data,
+      };
+      // Keep the flag for already-open older clients; their read hits this
+      // fresh cache. Current clients consume the account-wide snapshot.
+      broadcastServer({ rateLimitsChanged: true, rateLimits: snapshot });
+      return;
     }
     if (message.method === "serverRequest/resolved") {
       const requestId = String(message.params?.requestId ?? "");
@@ -90,6 +161,19 @@ export function createConversations({ store, codex, autoApprove = false }) {
     }
     const threadId = message.params?.threadId;
     if (!threadId) return;
+    // Observe before batching. Transport timers may delay bytes, never identity
+    // or order. Requests and notifications share the same synchronous ingress.
+    message = compactNotification(timestampCodexNotification(message, Date.now()));
+    const item = message.params.item;
+    if (item?.type === "userMessage") {
+      const turnId = message.params.turnId;
+      const intent = store.turnMetrics?.[threadId]?.[turnId]?.items?.[item.clientId || item.id];
+      if (intent?.inputKind) message = { ...message, params: { ...message.params, item: { ...item, inputKind: intent.inputKind } } };
+    }
+    if (store.threadProjects[threadId]) {
+      const conversation = liveThreads.receive(message);
+      if (conversation) message = { ...message, params: { ...message.params, conversation } };
+    }
     if (["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta"].includes(message.method)) {
       queueTextDelta(message);
       return;
@@ -109,6 +193,11 @@ export function createConversations({ store, codex, autoApprove = false }) {
   });
 
   codex.events.on("serverRequest", (message) => {
+    const threadId = message.params?.threadId;
+    if (threadId) {
+      flushTextDeltas(threadId);
+      flushCommandOutputBatches(threadId);
+    }
     void handleServerRequest(message).catch((error) => {
       try {
         codex.respondError(message.id, -32603, error.message);
@@ -197,7 +286,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
     if (!batch) return;
     clearTimeout(batch.timer);
     textDeltaBatches.delete(key);
-    dispatchCodexNotification({ ...batch.message, params: { ...batch.message.params, delta: batch.delta } }, batch.receivedAt);
+    dispatchCodexNotification({ ...batch.message, params: { ...batch.message.params, delta: batch.delta, conversation: liveThreads.patch(batch.message) } }, batch.receivedAt);
   }
 
   function flushTextDeltas(threadId) {
@@ -234,7 +323,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
     if (!batch.delta) return;
     dispatchCodexNotification({
       ...batch.message,
-      params: { ...batch.message.params, delta: batch.delta, replaceOutput: batch.replaceOutput },
+      params: { ...batch.message.params, delta: batch.delta, replaceOutput: batch.replaceOutput, conversation: liveThreads.patch(batch.message) },
     }, batch.receivedAt);
   }
 
@@ -326,7 +415,6 @@ export function createConversations({ store, codex, autoApprove = false }) {
       message = { ...message, params: { ...message.params, runtime } };
     }
     const compacted = compactNotification(message);
-    liveThreads.receive({ ...compacted, revision: (threadRevisions.get(threadId) || 0) + 1 });
     broadcast(threadId, compacted);
     if (message.method === "thread/goal/cleared"
       || (message.method === "thread/goal/updated" && !isActiveGoal(message.params.goal))) {
@@ -337,13 +425,22 @@ export function createConversations({ store, codex, autoApprove = false }) {
   codex.events.on("offline", (details) => {
     userInputRequests.clear();
     approvalRequests.clear();
+    browserDecisions.clear();
     liveThreads.turns.clear();
-    workspaceCatalogs.clear();
     goalReadTimes.clear();
     broadcastServer({ status: codex.state, ...details });
   });
   
   codex.events.on("online", (details) => {
+    browserDecisions.clear();
+    for (const [key, entry] of approvalRequests) {
+      if (entry.method !== "codexlan/browser/requestApproval") continue;
+      approvalRequests.delete(key);
+      broadcast(entry.threadId, {
+        method: "serverRequest/resolved",
+        params: { threadId: entry.threadId, turnId: entry.turnId, requestId: entry.requestId },
+      });
+    }
     broadcastServer(details);
     if (codex.state === "ready") {
       void recoverPersistedQueues().catch((error) => {
@@ -355,24 +452,19 @@ export function createConversations({ store, codex, autoApprove = false }) {
   function registerRoutes(application) {
     application.get("/api/workspace/threads", async (request, response) => {
       const user = request.identity.user;
-      const summaries = (await workspaceThreadCatalog(user)).map((thread) => ({ ...thread,
-        accessedAt: store.threadAccess(user.id, thread.id),
-        queueCount: store.queues[thread.id]?.length || 0, queueRevision: store.queueRevisions[thread.id] || 0,
-      }));
-      const sorted = summaries.slice().sort((a, b) => {
-        const aa = timestampMilliseconds(a.accessedAt), ba = timestampMilliseconds(b.accessedAt);
-        return Number(Boolean(ba)) - Number(Boolean(aa)) || (ba || timestampMilliseconds(b.updatedAt) || 0) - (aa || timestampMilliseconds(a.updatedAt) || 0);
-      });
-      const limit = Number(request.codexUrl.searchParams.get("limit") || 50);
-      const offset = Number(request.codexUrl.searchParams.get("cursor") || 0);
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0) throw httpError(400, "全局会话列表位置或数量无效。");
-      const ordered = request.codexUrl.searchParams.get("order") === "recent" ? sorted : summaries;
-      const page = ordered.slice(offset, offset + limit);
-      const included = new Set([...sorted.slice(0, 30), ...page].map((thread) => thread.id));
-      const nextCursor = offset + limit < ordered.length ? String(offset + limit) : null;
-      json(response, 200, { threads: summaries.filter((thread) => included.has(thread.id)
-        || isActiveThreadStatus(thread.runtime?.status) || thread.runtime?.activeTurnId || isActiveGoal(thread.goal) || thread.queueCount),
-        pageThreadIds: page.map((thread) => thread.id), nextCursor, hasMore: Boolean(nextCursor) });
+      const query = request.codexUrl.searchParams;
+      const projects = (await store.listProjects(user.id)).filter((project) => project.available);
+      const page = await listWorkspaceThreadPage(user, query, projects);
+      const included = new Map(page.threads.map((thread) => [thread.id, thread]));
+      if (!query.has("cursor") && query.get("order") !== "recent") {
+        const recent = await listWorkspaceThreadPage(user, new URLSearchParams({ order: "recent", limit: "30" }), projects);
+        for (const thread of recent.threads) included.set(thread.id, thread);
+      }
+      const activeIds = new Set([...threadState.keys(), ...Object.keys(store.queues).filter((id) => store.queues[id]?.length),
+        ...[...threadGoals].filter(([, goal]) => isActiveGoal(goal)).map(([id]) => id)]);
+      const extra = await readWorkspaceSummaries([...activeIds].filter((id) => !included.has(id)), projects, user);
+      for (const thread of extra) included.set(thread.id, thread);
+      json(response, 200, { ...page, threads: [...included.values()], pageThreadIds: page.threads.map((thread) => thread.id) });
     });
     application.get("/api/account/rate-limits", async (request, response) => {
       try {
@@ -491,7 +583,12 @@ export function createConversations({ store, codex, autoApprove = false }) {
         return json(response, 200, { accessedAt, metrics, answeredAsyncUserInputIds: await store.getAsyncInputAnswers(threadId) });
       }
       const eventRevision = threadRevisions.get(threadId) || 0;
-      const page = await loadThreadPage(threadId, request.codexUrl.searchParams);
+      const [page, settings, queueSnapshot, goal] = await Promise.all([
+        loadThreadPage(threadId, request.codexUrl.searchParams),
+        store.getThreadSettings(threadId, project.settings),
+        store.getQueueSnapshot(threadId),
+        readThreadGoal(threadId, { cached: true }),
+      ]);
       let thread = page.thread;
       const history = page.history;
       const activeTurn = activeTurnFromThread(thread);
@@ -505,11 +602,6 @@ export function createConversations({ store, codex, autoApprove = false }) {
           startedAt: timestampMilliseconds(recoveredActiveTurn.startedAt) || threadState.get(threadId)?.startedAt || Date.now(),
         } : {}),
       });
-      const [settings, queueSnapshot, goal] = await Promise.all([
-        store.getThreadSettings(threadId, project.settings),
-        store.getQueueSnapshot(threadId),
-        readThreadGoal(threadId),
-      ]);
       const metrics = Object.fromEntries(history.turns.flatMap((turn) => storedMetrics[turn.id] ? [[turn.id, storedMetrics[turn.id]]] : []));
       const accessedAt = await store.recordThreadAccess(user.id, threadId, { deferred: true });
       json(response, 200, {
@@ -589,6 +681,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       if (Object.hasOwn(body, "name")) {
         if (typeof body.name !== "string" || !body.name.trim()) throw httpError(400, "聊天名称不能为空。");
         name = body.name.trim().slice(0, 100);
+        threadTitles.cancel(request.params.threadId);
         await codex.request("thread/name/set", { threadId: request.params.threadId, name });
         changed = true;
       }
@@ -666,6 +759,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       if (queueAdvances.has(threadId) || [...queueSteerJobs.keys()].some((key) => key.startsWith(threadId + ":"))) {
         throw httpError(409, "聊天队列正在处理，请完成后再删除。");
       }
+      threadTitles.cancel(threadId);
       await codex.request("thread/delete", { threadId });
       broadcast(threadId, { method: "thread/deleted", params: { threadId } });
       await store.removeThread(threadId);
@@ -745,10 +839,12 @@ export function createConversations({ store, codex, autoApprove = false }) {
       await ensureThreadLoaded(threadId, project);
       const text = validateText(body.text);
       const messageId = randomUUID();
+      const expectedTurnId = validateId(body.expectedTurnId, "expectedTurnId");
+      await store.recordItemMetric(threadId, expectedTurnId, messageId, { type: "userMessage", inputKind: "guide" });
       const result = await codex.request("turn/steer", {
         threadId,
         clientUserMessageId: messageId,
-        expectedTurnId: validateId(body.expectedTurnId, "expectedTurnId"),
+        expectedTurnId,
         input: [{ type: "text", text }],
       }, { timeoutMs: 10_000 });
       json(response, 202, {
@@ -833,6 +929,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
         if (activeTurn) {
           const messageId = randomUUID();
           try {
+            await store.recordItemMetric(threadId, activeTurn.id, messageId, { type: "userMessage", inputKind: "guide" });
             const steered = await codex.request("turn/steer", {
               threadId, expectedTurnId: activeTurn.id, clientUserMessageId: messageId,
               input: [{ type: "text", text }],
@@ -896,7 +993,16 @@ export function createConversations({ store, codex, autoApprove = false }) {
       const key = threadId + ":" + requestId;
       const pending = approvalRequests.get(key);
       if (!pending) throw httpError(409, "这个审批请求已经结束。");
-      codex.respond(pending.codexRequestId, approvalResponse(pending, body.decision));
+      if (pending.method === "codexlan/browser/requestApproval") {
+        if (!["decline", "acceptForSession"].includes(body.decision)) throw httpError(400, "浏览器审批决定无效。");
+        browserDecisions.set(threadId, { allowed: body.decision === "acceptForSession", turnId: pending.turnId });
+        broadcast(threadId, {
+          method: "serverRequest/resolved",
+          params: { threadId, turnId: pending.turnId, requestId },
+        });
+      } else {
+        codex.respond(pending.codexRequestId, approvalResponse(pending, body.decision));
+      }
       approvalRequests.delete(key);
       json(response, 200, { ok: true });
     });
@@ -914,12 +1020,12 @@ export function createConversations({ store, codex, autoApprove = false }) {
         const result = await codex.request("model/list", { includeHidden: true }, { timeoutMs: 15_000 });
         const data = (result?.data || []).filter((model) => !model.hidden || isMiniModel(model.id));
         if (!data.length) throw new Error("Codex App Server 返回了空模型目录。");
-        modelCache = { expiresAt: Date.now() + MODEL_CACHE_TTL_MS, data };
+        modelCache = { expiresAt: Date.now() + MODEL_CACHE_TTL_MS, data, isFallback: false };
         return data;
       } catch (error) {
-        const usingFallback = !modelCache.data.length;
+        const usingFallback = !modelCache.data.length || modelCache.isFallback;
         const data = usingFallback ? [FALLBACK_MODEL] : modelCache.data;
-        modelCache = { expiresAt: Date.now() + MODEL_FAILURE_RETRY_MS, data };
+        modelCache = { expiresAt: Date.now() + MODEL_FAILURE_RETRY_MS, data, isFallback: usingFallback };
         process.stderr.write(`[web] 模型目录刷新失败，暂时使用${usingFallback ? " Terra Low" : "缓存"}：${error.message}\n`);
         return data;
       } finally {
@@ -931,9 +1037,23 @@ export function createConversations({ store, codex, autoApprove = false }) {
   
   async function readAccountRateLimits() {
     if (accountRateLimitsCache.expiresAt > Date.now() && accountRateLimitsCache.data) return accountRateLimitsCache.data;
-    const data = await codex.request("account/rateLimits/read", undefined);
-    accountRateLimitsCache = { expiresAt: Date.now() + 15_000, data };
-    return data;
+    if (accountRateLimitsRead) return accountRateLimitsRead;
+    const version = accountRateLimitsVersion;
+    const read = codex.request("account/rateLimits/read", undefined).then((data) => {
+      for (const update of accountRateLimitsUpdates.values()) {
+        if (update.version > version) data = mergeAccountRateLimits(data, update.snapshot);
+      }
+      accountRateLimitsCache = { expiresAt: Date.now() + 15_000, data };
+      return data;
+    }).catch((error) => {
+      // A newer notification remains usable even if the older read fails.
+      if (version !== accountRateLimitsVersion && accountRateLimitsCache.data) return accountRateLimitsCache.data;
+      throw error;
+    }).finally(() => {
+      if (accountRateLimitsRead === read) accountRateLimitsRead = null;
+    });
+    accountRateLimitsRead = read;
+    return read;
   }
 
   async function readThreadGoal(threadId, { cached = false } = {}) {
@@ -949,26 +1069,93 @@ export function createConversations({ store, codex, autoApprove = false }) {
     return read;
   }
 
-  async function workspaceThreadCatalog(user) {
-    let catalog = workspaceCatalogs.get(user.id);
-    if (catalog?.expiresAt > Date.now()) return catalog.data;
-    if (catalog?.job) return catalog.job;
-    catalog ||= { data: [], expiresAt: 0, job: null };
-    workspaceCatalogs.set(user.id, catalog);
-    catalog.job = (async () => {
-      const projects = (await store.listProjects(user.id)).filter((project) => project.available);
-      const summaries = [];
-      // A metadata-only discovery pass preserves old Goal and relocated-thread
-      // visibility. Foreground project paging never waits for this scan.
-      for (const project of projects) {
-        const threads = await listProjectThreads(project, user);
-        for (const thread of threads) summaries.push({ projectId: project.id, ...threadSummary(thread) });
+  async function readWorkspaceSummaries(ids, projects, user) {
+    const byId = new Map(projects.map((project) => [project.id, project]));
+    return (await mapThreadMetadata(ids, async (id) => {
+      const project = byId.get(store.threadProjects[id]);
+      if (!project) return null;
+      try {
+        const { thread } = await codex.request("thread/read", { threadId: id, includeTurns: false });
+        threadPaths.set(id, thread.cwd);
+        return workspaceSummary(thread, project, user);
+      } catch (error) {
+        if (/not found|not exist|no rollout/i.test(error.message)) return null;
+        throw error;
       }
-      catalog.data = summaries;
-      catalog.expiresAt = Date.now() + 30_000;
-      return summaries;
-    })().finally(() => { catalog.job = null; });
-    return catalog.job;
+    })).filter(Boolean);
+  }
+
+  async function workspaceSummary(thread, project, user) {
+    const [named, goal] = await Promise.all([resolveListedThreadName(thread), readThreadGoal(thread.id, { cached: true })]);
+    const known = threadState.get(thread.id);
+    const recovered = !known?.activeTurnId && isActiveThreadStatus(thread.status)
+      ? activeTurnFromMetrics(await store.getTurnMetricTimings(thread.id)) : null;
+    const runtime = updateThreadRuntime(thread.id, { projectId: project.id, status: thread.status || "idle",
+      ...(recovered ? { activeTurnId: recovered.id, startedAt: recovered.startedAt }
+        : known ? { activeTurnId: known.activeTurnId, startedAt: known.startedAt } : {}) });
+    return { projectId: project.id, ...threadSummary({ ...named, goal, runtime,
+      accessedAt: store.threadAccess(user.id, thread.id), queueCount: store.queues[thread.id]?.length || 0,
+      queueRevision: store.queueRevisions[thread.id] || 0 }) };
+  }
+
+  async function listWorkspaceThreadPage(user, query, projects) {
+    const order = query.get("order") === "recent" ? "recent" : "original";
+    const limit = Number(query.get("limit") || 50);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw httpError(400, "全局会话列表数量无效。");
+    let position = { order, phase: order === "recent" ? "access" : "project", index: 0, native: null };
+    if (query.has("cursor")) {
+      try {
+        position = JSON.parse(Buffer.from(query.get("cursor"), "base64url").toString());
+        if (position.order !== order || !["access", "native", "project"].includes(position.phase)
+          || !Number.isSafeInteger(position.index) || position.index < 0
+          || !(position.native === null || typeof position.native === "string")
+          || (order === "original") !== (position.phase === "project")) throw new Error();
+      } catch { throw httpError(400, "全局会话列表位置无效。"); }
+    }
+    const byId = new Map(projects.map((project) => [project.id, project]));
+    const accesses = Object.entries(store.threadAccesses[user.id] || {})
+      .filter(([id]) => byId.has(store.threadProjects[id])).sort((a, b) => Date.parse(b[1]) - Date.parse(a[1])).map(([id]) => id);
+    let threads = [], next = null;
+    if (position.phase === "project") {
+      const project = projects[position.index];
+      if (project) {
+        const params = new URLSearchParams({ order: "original", limit: String(limit) });
+        if (position.native) params.set("cursor", position.native);
+        const page = await listProjectThreadPage(project, user, params);
+        threads = page.threads.map((thread) => ({ projectId: project.id, ...thread }));
+        next = page.nextCursor ? { ...position, native: page.nextCursor }
+          : position.index + 1 < projects.length ? { ...position, index: position.index + 1, native: null } : null;
+      }
+    } else if (position.phase === "access" && position.index < accesses.length) {
+      threads = await readWorkspaceSummaries(accesses.slice(position.index, position.index + limit), projects, user);
+      next = position.index + limit < accesses.length ? { ...position, index: position.index + limit }
+        : { ...position, phase: "native", index: 0 };
+    } else if (projects.length) {
+      // A global DB page also includes bound threads whose cwd has moved.
+      // Apply ownership before resolving names or Goals; never expose another user's metadata.
+      const page = await codex.request("thread/list", { limit,
+        sortKey: "updated_at", useStateDbOnly: true, ...(position.native ? { cursor: position.native } : {}) });
+      const accessed = new Set(accesses);
+      const groups = new Map();
+      for (const thread of page.data || []) {
+        threadPaths.set(thread.id, thread.cwd);
+        if (accessed.has(thread.id)) continue;
+        const bound = store.threadProjects[thread.id];
+        const project = bound ? byId.get(bound) : projects.find((entry) => sameThreadPath(entry.path, thread.cwd));
+        if (!project) continue;
+        if (!groups.has(project.id)) groups.set(project.id, { project, threads: [] });
+        groups.get(project.id).threads.push(thread);
+      }
+      const ownedIds = new Set((await Promise.all([...groups.values()].map(({ project, threads }) =>
+        store.bindProjectThreads(threads, user.id, project.id)))).flat().map((thread) => thread.id));
+      const listed = (page.data || []).filter((thread) => ownedIds.has(thread.id))
+        .map((thread) => ({ thread, project: byId.get(store.threadProjects[thread.id]) }));
+      threads = await Promise.all(listed.map(({ thread, project }) => workspaceSummary(thread, project, user)));
+      next = page.nextCursor ? { ...position, phase: "native", native: page.nextCursor, index: 0 }
+        : null;
+    }
+    const nextCursor = next ? Buffer.from(JSON.stringify(next)).toString("base64url") : null;
+    return { threads, nextCursor, hasMore: Boolean(nextCursor) };
   }
 
   function validateGoalPatch(threadId, candidate) {
@@ -1127,7 +1314,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       nextCursor = offset + limit < ids.length ? `${boundPrefix}${offset + limit}` : null;
     } else {
       const nativeCursor = recent && cursor?.startsWith(recentPrefix) ? cursor.slice(recentPrefix.length) : cursor;
-      const result = await codex.request("thread/list", { cwd: project.path, limit, ...(recent ? { sortKey: "updated_at" } : {}), ...(nativeCursor ? { cursor: nativeCursor } : {}) });
+      const result = await codex.request("thread/list", { cwd: project.path, limit, useStateDbOnly: true, ...(recent ? { sortKey: "updated_at" } : {}), ...(nativeCursor ? { cursor: nativeCursor } : {}) });
       for (const thread of result.data || []) threadPaths.set(thread.id, thread.cwd);
       threads = await store.bindProjectThreads(await Promise.all((result.data || []).filter((thread) => !accessedIds.includes(thread.id)).map(resolveListedThreadName)), user.id, project.id);
       const hasRelocated = store.threadIdsForProject(project.id).some((id) => !accessedIds.includes(id) && (!threadPaths.has(id) || threadPaths.get(id) && !sameThreadPath(threadPaths.get(id), project.path)));
@@ -1153,7 +1340,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
         if (preferred) break;
       }
       if (!preferred) {
-        const latest = await codex.request("thread/list", { cwd: project.path, limit: 1, sortKey: "updated_at" });
+        const latest = await codex.request("thread/list", { cwd: project.path, limit: 1, sortKey: "updated_at", useStateDbOnly: true });
         preferred = latest.data?.[0];
         if (preferred) [preferred] = await store.bindProjectThreads([preferred], user.id, project.id);
       }
@@ -1178,7 +1365,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       throw httpError(400, "当前 Codex 不支持所选协作模式。");
     }
     if (!requested.model) return requested;
-    if (!modelCache.data.length) {
+    if (!hasUsableModelCatalog()) {
       // A model selected by the client does not need a catalog round-trip to
       // create a new thread. Validate against the catalog when it is cached,
       // while allowing compatible providers without model/list support to
@@ -1217,25 +1404,34 @@ export function createConversations({ store, codex, autoApprove = false }) {
     const requested = settings.collaborationMode || "default";
     const mode = (await listCollaborationModes()).find((entry) => entry.mode === requested);
     if (!mode) throw httpError(400, "当前 Codex 不支持所选协作模式。");
-    const model = mode.model || settings.model;
+    // A mode may suggest defaults, but an explicit per-thread choice must win.
+    const model = settings.model || mode.model;
     if (!model) throw httpError(400, "当前聊天没有可用模型。");
     return {
       mode: mode.mode,
       settings: {
         model,
-        reasoning_effort: mode.reasoningEffort || settings.effort || null,
+        reasoning_effort: settings.effort || mode.reasoningEffort || null,
         developer_instructions: null,
       },
     };
   }
 
-  async function scheduleThreadTitle(threadId, turns, { fullLegacyCheck = false } = {}) {
+  async function scheduleThreadTitle(threadId, turns, { fullLegacyCheck = false, knownName = false } = {}) {
     const projectId = store.threadProjects[threadId];
     if (!projectId) return null;
+    if (threadTitles.isPending(threadId)) return null;
     let titleTurns = turns;
     let legacyTurns = turns;
     if (fullLegacyCheck) {
-      const canonical = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
+      const reader = liveThreads.beginRead(threadId);
+      let canonical;
+      try {
+        canonical = (await codex.request("thread/read", { threadId, includeTurns: true })).thread;
+        liveThreads.reconcile(threadId, canonical.turns || [], reader.version);
+      } finally {
+        liveThreads.endRead(reader);
+      }
       await store.reconcileExecutionSupplements(threadId, canonical.turns || []);
       legacyTurns = canonical.turns || turns;
       if (!shouldGenerateThreadTitle(canonical, legacyTurns)) return null;
@@ -1249,13 +1445,14 @@ export function createConversations({ store, codex, autoApprove = false }) {
       turns: titleTurns,
       legacyTurns,
       settings,
+      ...(knownName ? { getCurrentName: () => effectiveThreadNames.get(threadId) || "" } : {}),
     });
   }
 
   async function effectiveResumeSettings(threadId, project, requestedSettings = null) {
     const settings = cleanSettings(requestedSettings
       || await store.getThreadSettings(threadId, project.settings));
-    if (settings.model && !modelCache.data.length) {
+    if (settings.model && !hasUsableModelCatalog()) {
       // A configured model can be sent directly. Do not delay turn/start on
       // a catalog refresh that may be unsupported by a compatible provider.
       void listModels();
@@ -1267,7 +1464,11 @@ export function createConversations({ store, codex, autoApprove = false }) {
   }
 
   async function modelsForSettings() {
-    return modelCache.data.length ? modelCache.data : listModels();
+    return hasUsableModelCatalog() ? modelCache.data : listModels();
+  }
+
+  function hasUsableModelCatalog() {
+    return modelCache.data.length > 0 && !modelCache.isFallback;
   }
 
   async function ensureThreadLoaded(threadId, project, requestedSettings = null) {
@@ -1393,11 +1594,12 @@ export function createConversations({ store, codex, autoApprove = false }) {
           },
         });
         if (typeof canonicalThread?.name !== "string" || !canonicalThread.name.trim()) {
+          if (!effectiveThreadNames.has(threadId)) effectiveThreadNames.set(threadId, "");
           const titleTurn = {
             id: result.turn.id,
             items: [{ id: next.id, type: "userMessage", content: [{ type: "text", text: next.text }] }],
           };
-          void scheduleThreadTitle(threadId, [titleTurn]).catch((error) => {
+          void scheduleThreadTitle(threadId, [titleTurn], { knownName: true }).catch((error) => {
             process.stderr.write(`[web] 无法自动生成聊天名称 (${threadId})：${error.message}\n`);
           });
         }
@@ -1437,6 +1639,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
         throw httpError(409, "当前执行任务已经变化，请刷新后重试。");
       }
       await ensureThreadLoaded(threadId, project);
+      await store.recordItemMetric(threadId, expectedTurnId, item.id, { type: "userMessage", inputKind: "guide" });
       await codex.request("turn/steer", {
         threadId,
         clientUserMessageId: item.id,
@@ -1510,6 +1713,10 @@ export function createConversations({ store, codex, autoApprove = false }) {
   }
   
   function forgetThreadRuntime(threadId) {
+    browserDecisions.delete(threadId);
+    for (const [key, entry] of approvalRequests) {
+      if (entry.threadId === threadId && entry.method === "codexlan/browser/requestApproval") approvalRequests.delete(key);
+    }
     liveThreads.forget(threadId);
     clearTimeout(summaryTimers.get(threadId));
     summaryTimers.delete(threadId);
@@ -1599,6 +1806,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
     if (message.method === "item/started") {
       await store.recordItemMetric(threadId, params.turnId, params.item?.id, {
         type: params.item?.type,
+        inputKind: params.item?.inputKind,
         startedAt: timestampMilliseconds(params.startedAtMs),
         snapshot: commandExecutionSnapshot(params.item),
       });
@@ -1616,6 +1824,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
         : params.item;
       await store.recordItemMetric(threadId, params.turnId, params.item?.id, {
         type: item?.type,
+        inputKind: item?.inputKind,
         completedAt: timestampMilliseconds(params.completedAtMs),
         durationMs: item?.durationMs,
         snapshot: commandExecutionSnapshot(item),
@@ -1639,25 +1848,6 @@ export function createConversations({ store, codex, autoApprove = false }) {
     const revision = (threadRevisions.get(threadId) || 0) + 1;
     threadRevisions.set(threadId, revision);
     const event = { ...message, revision, params: { ...message.params, projectId } };
-    const catalog = workspaceCatalogs.get(ownerId);
-    if (catalog?.data) {
-      const index = catalog.data.findIndex((thread) => thread.id === threadId);
-      if (message.method === "thread/deleted") {
-        if (index >= 0) catalog.data.splice(index, 1);
-      } else if (index >= 0 || message.method === "workspace/thread") {
-        const previous = catalog.data[index] || { id: threadId, projectId };
-        const goal = threadGoals.get(threadId);
-        const summary = { ...previous, name: effectiveThreadNames.get(threadId) || previous.name,
-          runtime: threadState.get(threadId) || message.params.runtime || null,
-          ...(threadGoals.has(threadId) ? { goal: goal ? { status: goal.status } : null } : {}),
-          queueCount: store.queues[threadId]?.length || 0, queueRevision: store.queueRevisions[threadId] || 0,
-          accessedAt: store.threadAccess(ownerId, threadId),
-          ...(["turn/started", "turn/completed"].includes(message.method) ? { updatedAt: Date.now() } : {}),
-        };
-        if (index >= 0) catalog.data[index] = summary;
-        else catalog.data.unshift(summary);
-      }
-    }
     let payload;
     const fullPayload = () => payload ||= `event: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of eventClients) {
@@ -1665,7 +1855,8 @@ export function createConversations({ store, codex, autoApprove = false }) {
       if (!client.scoped || client.threadId === threadId) writeEvent(client, fullPayload());
       else if (["turn/started", "turn/completed"].includes(message.method)) {
         const { items, ...turn } = message.params.turn || {};
-        writeEvent(client, `event: ${eventName}\ndata: ${JSON.stringify({ ...event, params: { ...event.params, turn, summaryOnly: true } })}\n\n`);
+        const { conversation, ...params } = event.params;
+        writeEvent(client, `event: ${eventName}\ndata: ${JSON.stringify({ ...event, params: { ...params, turn, summaryOnly: true } })}\n\n`);
       } else if (!isThreadBodyEvent(message) && message.method !== "queue/updated" && !message.method.startsWith("thread/goal/")) {
         // Approval/input controls remain available globally, including async
         // question cards; bulk transcript and command bodies do not.
@@ -1688,6 +1879,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
   }
 
   function isThreadBodyEvent(message) {
+    if (message.method === "conversation/updated") return true;
     if (message.method === "item/completed" && asyncUserInputRequest(message.params?.item)) return false;
     return message.method.startsWith("item/") && !message.method.includes("requestApproval")
       && message.method !== "item/tool/requestUserInput" || message.method === "turn/plan/updated" || message.method === "turn/diff/updated";
@@ -1733,6 +1925,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
 
   function publicUserInputRequest(request) {
     return {
+      detailsAvailable: true,
       requestId: request.requestId,
       threadId: request.threadId,
       turnId: request.turnId,
@@ -1746,6 +1939,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
   function publicApprovalRequest(request) {
     return {
       ...request.params,
+      detailsAvailable: true,
       requestId: request.requestId,
       method: request.method,
     };
@@ -1756,13 +1950,6 @@ export function createConversations({ store, codex, autoApprove = false }) {
     const scoped = searchParams?.get("scope") === "workspace";
     const threadId = scoped && searchParams.get("threadId") ? validateId(searchParams.get("threadId"), "threadId") : null;
     if (threadId) await store.requireThreadOwner(threadId, user.id);
-    if (threadId && codex.state === "ready") {
-      const before = threadRevisions.get(threadId) || 0;
-      const result = await codex.request("thread/read", { threadId, includeTurns: false }, { timeoutMs: 5_000 });
-      if ((threadRevisions.get(threadId) || 0) === before) {
-        updateThreadRuntime(threadId, { projectId: store.threadProjects[threadId], status: result.thread?.status || "idle" });
-      }
-    }
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
@@ -1778,9 +1965,26 @@ export function createConversations({ store, codex, autoApprove = false }) {
       Math.max(1, Math.min(SESSION_TIMER_MAX_MS, identity.session.expiresAt - Date.now())),
     );
     writeEvent(client, `event: server\ndata: ${JSON.stringify({ status: codex.state, epoch: eventEpoch })}\n\n`);
+    if (accountRateLimitsCache.expiresAt > Date.now() && accountRateLimitsCache.data) {
+      const data = accountRateLimitsCache.data;
+      const snapshots = data.rateLimitsByLimitId ? Object.values(data.rateLimitsByLimitId) : data.rateLimits ? [data.rateLimits] : [];
+      for (const snapshot of snapshots) writeEvent(client, `event: server\ndata: ${JSON.stringify({ rateLimitsChanged: true, rateLimits: snapshot })}\n\n`);
+    }
     void sendInitialWorkspaceState(client, user.id).catch((error) => {
       process.stderr.write(`[web] 无法同步实时工作区状态：${error.message}\n`);
     });
+    // Never put rollout I/O before the stream headers: a fresh rollout can
+    // still be empty or slow to read.
+    if (threadId && codex.state === "ready") {
+      const before = threadRevisions.get(threadId) || 0;
+      void codex.request("thread/read", { threadId, includeTurns: false }, { timeoutMs: 5_000 }).then(async (result) => {
+        if (response.writableEnded || response.destroyed || (threadRevisions.get(threadId) || 0) !== before) return;
+        updateThreadRuntime(threadId, { projectId: store.threadProjects[threadId], status: result.thread?.status || "idle" });
+        await sendInitialWorkspaceState(client, user.id);
+      }).catch((error) => {
+        process.stderr.write(`[web] 无法核对实时聊天状态 (${threadId})：${error.message}\n`);
+      });
+    }
     const heartbeat = setInterval(() => {
       if (!response.writableEnded && !response.destroyed) {
         writeEvent(client, `event: heartbeat\ndata: ${Date.now()}\n\n`);
@@ -1834,6 +2038,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
       ...(threadGoals.has(threadId) ? { goal: full || !goal ? goal : { status: goal.status } } : {}),
       queueCount: store.queues[threadId]?.length || 0, queueRevision: store.queueRevisions[threadId] || 0,
       ...(full ? {
+        conversation: liveThreads.snapshot(threadId),
         queue: structuredClone(store.queues[threadId] || []),
         activeItems: activeExecutionSnapshots(activeTurn, runtime?.activeTurnId),
         liveItems: liveThreads.items(threadId, runtime?.activeTurnId, afterRevision).map((item) => {
@@ -1848,9 +2053,9 @@ export function createConversations({ store, codex, autoApprove = false }) {
         answeredAsyncUserInputIds: [...(store.asyncInputAnswers[threadId] || [])],
       } : {}),
       userInputRequests: [...userInputRequests.values()].filter((entry) => entry.threadId === threadId)
-        .map((entry) => full ? publicUserInputRequest(entry) : { requestId: entry.requestId, threadId, isBlocking: entry.isBlocking }),
+        .map((entry) => full ? publicUserInputRequest(entry) : { requestId: entry.requestId, threadId, isBlocking: entry.isBlocking, detailsAvailable: false }),
       approvalRequests: [...approvalRequests.values()].filter((entry) => entry.threadId === threadId)
-        .map((entry) => full ? publicApprovalRequest(entry) : { requestId: entry.requestId, threadId, method: entry.method }),
+        .map((entry) => full ? publicApprovalRequest(entry) : { requestId: entry.requestId, threadId, method: entry.method, detailsAvailable: false }),
     };
   }
   
@@ -1863,6 +2068,8 @@ export function createConversations({ store, codex, autoApprove = false }) {
   async function loadThreadPage(threadId, searchParams) {
     const limit = historyPageLimit(searchParams);
     const cursor = searchParams.get("before");
+    const reader = liveThreads.beginRead(threadId);
+    const readVersion = reader.version;
     try {
       const [metadata, page] = await Promise.all([
         codex.request("thread/read", { threadId, includeTurns: false }),
@@ -1876,9 +2083,9 @@ export function createConversations({ store, codex, autoApprove = false }) {
       ]);
       const canonicalTurns = Array.isArray(page?.data) ? page.data : [];
       await store.reconcileExecutionSupplements(threadId, canonicalTurns);
-      const turns = canonicalTurns
+      const turns = liveThreads.reconcile(threadId, canonicalTurns
         .slice()
-        .reverse()
+        .reverse(), readVersion)
         .map(compactHistoryTurn);
       return {
         thread: { ...metadata.thread, turns },
@@ -1893,7 +2100,7 @@ export function createConversations({ store, codex, autoApprove = false }) {
     } catch (error) {
       if (!isUnsupportedTurnsListError(error)) throw error;
       const result = await codex.request("thread/read", { threadId, includeTurns: true });
-      const allTurns = result.thread.turns || [];
+      const allTurns = liveThreads.reconcile(threadId, result.thread.turns || [], readVersion);
       await store.reconcileExecutionSupplements(threadId, allTurns);
       const history = paginateTurns(allTurns, searchParams);
       return {
@@ -1901,6 +2108,8 @@ export function createConversations({ store, codex, autoApprove = false }) {
         history,
         allTurns,
       };
+    } finally {
+      liveThreads.endRead(reader);
     }
   }
 
@@ -2040,7 +2249,6 @@ export function createConversations({ store, codex, autoApprove = false }) {
     forgetProject: forgetProjectRuntime,
     listProjectThreads,
     listProjectThreadPage,
-    invalidateWorkspaceCatalog: (ownerId) => workspaceCatalogs.delete(ownerId),
     projectHasActiveThread,
     registerRoutes,
     validateSettings,

@@ -62,7 +62,11 @@ const listenerState = {
     error: null,
   },
 };
-const conversations = createConversations({ store, codex, autoApprove: serverConfig.autoApprove });
+const conversations = createConversations({
+  store, codex,
+  autoApprove: serverConfig.autoApprove,
+  autoApproveBrowser: serverConfig.autoApproveBrowser,
+});
 const workspaceApplication = createWorkspaceApplication();
 
 void startHttpServers().catch((error) => {
@@ -174,7 +178,7 @@ function registerHealthRoutes(application) {
 
 function registerRuntimeRoutes(application) {
   application.get("/api/status", (request, response) => json(response, 200, {
-    workspaceSyncVersion: 2,
+    workspaceSyncVersion: 3,
     status: codex.state,
     appVersion,
     assetVersion,

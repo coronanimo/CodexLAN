@@ -47,6 +47,12 @@ Repositories, local data, shells, development tools, credentials, and Codex hist
 
 The supervisor records service state, exposes status and log commands, restarts a server that crashes after reaching readiness, and prevents a managed server from killing its own supervisor through an internal restart.
 
+### Local browser permissions
+
+With compatible Windows browser plugins, their runtime, and the Chrome extension installed, the first browser request displays an approval card by default. The conversation owner selects “Allow for this session,” then asks Codex to retry. This manual grant applies only to that conversation and expires when the core restarts.
+
+To skip per-conversation confirmation, set `"autoApproveBrowser": true` in `config/codexlan.json`, then run `npm run service:restart` from an external terminal. This automatically allows conversations belonging to all CodexLAN users to control the local browser, including signed-in websites, and remains configured across core restarts. It is independent of `autoApprove`: command and file-change permissions remain unchanged, and Codex browser prohibitions still apply.
+
 ## Requirements
 
 - Windows 10 or 11 on the server computer.
@@ -77,7 +83,8 @@ The copied configuration starts with:
   "port": 8688,
   "host": "auto",
   "dataRoot": "../data",
-  "autoApprove": false
+  "autoApprove": false,
+  "autoApproveBrowser": false
 }
 ```
 
@@ -91,6 +98,7 @@ Edit the copied `config/codexlan.json`, not the example file. Supported settings
 | `workspaceRoot` | Optional boundary for automatically managed user projects. When omitted, CodexLAN uses `<dataRoot>/projects`. Existing projects may still point to their own absolute directories. |
 | `codexBin` | Optional path to a specific Codex executable. When omitted, CodexLAN uses `codex` from `PATH`. |
 | `autoApprove` | Automatically grants command, file-change, and permission requests for the current Codex session. Default: `false`. Enable only for trusted users. |
+| `autoApproveBrowser` | Allows all conversations to control the local browser, including signed-in websites, without browser approval cards. Default: `false`. Independent of `autoApprove`; enable only for trusted users. |
 
 Unknown settings and invalid values stop startup with an error instead of being ignored.
 

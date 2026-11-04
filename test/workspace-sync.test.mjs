@@ -145,3 +145,11 @@ test("summary pages retain newer SSE/queue state and full selected Goal fields",
   assert.equal(discovered.name, "Real title");
   assert.equal(discovered.runtime.status, "active");
 });
+
+test("a late head page cannot hide a conversation discovered while its request was in flight", () => {
+  const previous = { ids: ["new", "old"], order: "original", nextCursor: "next" };
+  const result = mergeThreadListPage(previous, ["listed", "old"], "next", { order: "original", baselineIds: ["old"] });
+  assert.deepEqual(result.ids, ["new", "listed", "old"]);
+  assert.equal(result.expanded, false);
+  assert.equal(result.nextCursor, "next");
+});

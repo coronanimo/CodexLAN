@@ -12,6 +12,7 @@ const CONFIG_KEYS = new Set([
   "dataRoot",
   "codexBin",
   "autoApprove",
+  "autoApproveBrowser",
 ]);
 
 export async function loadServerConfig({ appRoot, env = process.env } = {}) {
@@ -35,6 +36,7 @@ export async function loadServerConfig({ appRoot, env = process.env } = {}) {
   const workspaceRootSetting = setting(fileConfig, env, "workspaceRoot", "CODEX_WORKDIR", join(dataRoot, "projects"));
   const codexBin = optionalStringSetting(setting(fileConfig, env, "codexBin", "CODEX_BIN", null), "codexBin");
   const autoApprove = booleanSetting(Object.hasOwn(fileConfig, "autoApprove") ? fileConfig.autoApprove : false, "autoApprove");
+  const autoApproveBrowser = booleanSetting(Object.hasOwn(fileConfig, "autoApproveBrowser") ? fileConfig.autoApproveBrowser : false, "autoApproveBrowser");
 
   return {
     configPath: configLoaded ? configPath : null,
@@ -45,6 +47,7 @@ export async function loadServerConfig({ appRoot, env = process.env } = {}) {
     dataRoot,
     codexBin,
     autoApprove,
+    autoApproveBrowser,
   };
 }
 

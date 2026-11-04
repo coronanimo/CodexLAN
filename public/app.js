@@ -2,12 +2,13 @@ import { downloadableFiles, downloadLocalFile, localFileDownloadUrl, textPreview
 import { renderMarkdownDocument } from "./markdown-preview.js";
 import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
-import { commandDisplayText, commandOutputTail, executionBodyHasContent, executionItemText, fileChangeUpdateItem, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, restoreMissingExecutionItems, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
-import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeThreadListPage, mergeThreadSummaryPage, mergeTurnItems, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName, userMessageClientId, visibleServiceTiers } from "./workspace.js";
-import { appendAnsiOutput, renderAnsiOutput } from "./ansi-output.js";
+import { commandDisplayText, executionItemText, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
+import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeAccountRateLimits, mergeThreadListPage, mergeThreadSummaryPage, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName, userMessageClientId, visibleServiceTiers } from "./workspace.js";
+import { renderAnsiOutput } from "./ansi-output.js";
 import { diffLineStats, renderFileChanges, unifiedDiffChanges } from "./diff-output.js";
 import { clipboardImageFiles, clipboardImageName, isMobileComposer, messageWithAttachments, resizeComposerInput } from "./composer.js";
-import { createTurnPlanView, planShortcut, updateTurnPlanView } from "./plan.js";
+import { planShortcut } from "./plan.js";
+import { createTurnFooter, updateTurnFooter } from "./turn-footer.js";
 import { goalPresentation, goalShortcut, isActiveGoal } from "./goal.js";
 import { createWorkbenchLayout } from "./layout.js";
 import { copyTextToClipboard, fileChangesText, isPreviewableImage, printableMarkdownHtml, shareMarkdown } from "./mobile-actions.js";
@@ -15,8 +16,11 @@ import { copyTextToClipboard, fileChangesText, isPreviewableImage, printableMark
 import { EVENT_STREAM_WATCHDOG_INTERVAL_MS, eventStreamNeedsRestart } from "./event-stream.js";
 import { profileMark, profileSpan } from "./profiling.js";
 import { deriveRunDiagnostic } from "./run-diagnostics.js";
-import { renderInTimelinePosition, moveExistingTurnContentIntoExecutionGroup } from "./conversation-order.js";
-import { asyncUserInputRequest, asyncAnswerRequestId, answeredAsyncRequestIds, displayUserInputText, asyncQuestionDeferred, setAsyncQuestionDeferred, deliverAsyncUserInput } from "./async-user-input.js";
+import { conversationNeedsSnapshot, mergeConversationTurns, reduceConversationEvent, recoveryItems, resetConversationVersions } from "./conversation-state.js";
+import { reconcileTimelineChildren } from "./conversation-view.js";
+import { reconcileSidebarChildren } from "./sidebar-list.js";
+import { createAsyncQuestionView, setAsyncQuestionCollapsed, showAnsweredAsyncQuestion } from "./conversation-controls.js";
+import { asyncUserInputRequest, asyncAnswerMessage, asyncAnswerText, asyncAnswerRequestId, answeredAsyncRequestIds, displayUserInputText, asyncQuestionDeferred, setAsyncQuestionDeferred, deliverAsyncUserInput } from "./async-user-input.js";
 
 const $ = (selector) => document.querySelector(selector);
 const MAX_RENDERED_COMMAND_OUTPUT = 16_000;
@@ -159,6 +163,7 @@ const ui = {
   completionNotifications: $("#completion-notifications"),
   completionNotificationDescription: $("#completion-notification-description"),
   sendShortcut: $("#send-shortcut"),
+  defaultModel: $("#default-model"),
   projectDialog: $("#project-dialog"),
   projectForm: $("#project-form"),
   projectKicker: $("#project-dialog-kicker"),
@@ -235,6 +240,9 @@ const state = {
   models: [],
   collaborationModes: [],
   accountRateLimits: null,
+  accountLimitsRevision: 0,
+  accountLimitsRequest: null,
+  accountLimitsUpdates: new Map(),
   threadTokenUsage: new Map(),
   threads: new Map(),
   threadPages: new Map(),
@@ -277,10 +285,13 @@ const state = {
   eventStreamLastActivityAt: 0,
   eventStreamInterrupted: false,
   eventStreamWatchdogTimer: null,
+  eventStreamRecoveryTimer: null,
+  eventStreamRecoveryRunning: false,
   messageElements: new Map(),
   executionGroups: new Map(),
+  renderedThreadId: null,
+  pendingCards: new Map(),
   executionIdleTimers: new Map(),
-  pendingQueueMessages: new Map(),
   runtimeProbes: new Map(),
   turnMetrics: new Map(),
   activityTimer: null,
@@ -416,13 +427,34 @@ async function loadCollaborationModes() {
   }
 }
 
-async function loadAccountRateLimits() {
-  try {
-    const result = await api("/api/account/rate-limits");
-    state.accountRateLimits = result.available === false ? null : result;
-  } catch {
-    state.accountRateLimits = null;
-  }
+function loadAccountRateLimits() {
+  if (state.accountLimitsRequest) return state.accountLimitsRequest;
+  const revision = state.accountLimitsRevision;
+  const request = (async () => {
+    try {
+      const result = await api("/api/account/rate-limits");
+      let data = result.available === false ? null : result;
+      for (const update of state.accountLimitsUpdates.values()) {
+        if (update.revision > revision) data = mergeAccountRateLimits(data, update.snapshot);
+      }
+      state.accountRateLimits = data;
+    } catch {
+      if (revision === state.accountLimitsRevision) state.accountRateLimits = null;
+    }
+    renderAccountLimits();
+  })().finally(() => {
+    if (state.accountLimitsRequest === request) state.accountLimitsRequest = null;
+  });
+  state.accountLimitsRequest = request;
+  return request;
+}
+
+function applyAccountRateLimitsSnapshot(snapshot) {
+  clearTimeout(state.accountLimitsTimer);
+  state.accountLimitsTimer = null;
+  state.accountLimitsRevision++;
+  state.accountLimitsUpdates.set(snapshot.limitId || "codex", { revision: state.accountLimitsRevision, snapshot });
+  state.accountRateLimits = mergeAccountRateLimits(state.accountRateLimits, snapshot);
   renderAccountLimits();
 }
 
@@ -485,8 +517,9 @@ function renderContextUsage() {
 
 async function refreshAllThreads({ foregroundProjectId = null } = {}) {
   const foreground = foregroundProjectId || state.selectedProjectId || state.projects[0]?.id;
-  if (foreground) await refreshProjectThreads(foreground);
+  const foregroundRefresh = foreground ? refreshProjectThreads(foreground) : Promise.resolve();
   void refreshGlobalThreads().catch((error) => showActivity(`跨项目摘要刷新失败：${error.message}`, true));
+  await foregroundRefresh;
   ensureEventStream();
   renderRunStrip();
 }
@@ -495,6 +528,7 @@ async function refreshGlobalThreads({ cursor = null, append = false } = {}) {
   if (state.globalThreadRefresh) return state.globalThreadRefresh;
   const order = state.sidebarOrder;
   const baseline = new Map([...state.threads].map(([id, threads]) => [id, [...threads]]));
+  const baselineIds = [...(state.globalThreadPage?.ids || [])];
   const refresh = (async () => {
     // Static assets can update before the running service is restarted. Keep
     // that existing server usable until it advertises the new sync contract.
@@ -507,13 +541,17 @@ async function refreshGlobalThreads({ cursor = null, append = false } = {}) {
     }
     const query = new URLSearchParams({ limit: "50", order });
     if (cursor) query.set("cursor", cursor);
-    const result = await api(`/api/workspace/threads?${query}`);
+    let result;
+    do {
+      result = await api(`/api/workspace/threads?${query}`);
+      if (!result.pageThreadIds?.length && result.nextCursor) query.set("cursor", result.nextCursor);
+    } while (!result.pageThreadIds?.length && result.nextCursor);
     if (state.sidebarOrder !== order) return;
     for (const project of state.projects) {
       const listed = (result.threads || []).filter((thread) => thread.projectId === project.id);
       state.threads.set(project.id, mergeThreadSummaryPage(baseline.get(project.id), state.threads.get(project.id), listed));
     }
-    state.globalThreadPage = mergeThreadListPage(state.globalThreadPage, result.pageThreadIds || [], result.nextCursor, { order, append });
+    state.globalThreadPage = mergeThreadListPage(state.globalThreadPage, result.pageThreadIds || [], result.nextCursor, { order, append, baselineIds });
     renderProjects();
     renderThreads();
     renderRunStrip();
@@ -542,6 +580,7 @@ async function refreshProjectThreads(projectId, { cursor = null, append = false 
   const page = { ...(existing?.order === order ? existing : {}), ids: existing?.order === order ? existing.ids : [], order, loading: null };
   state.threadPages.set(projectId, page);
   const baselineThreads = [...(state.threads.get(projectId) || [])];
+  const baselineIds = [...page.ids];
   const load = (async () => {
     const query = new URLSearchParams({ limit: "50", order });
     if (cursor) query.set("cursor", cursor);
@@ -559,7 +598,7 @@ async function refreshProjectThreads(projectId, { cursor = null, append = false 
       if (thread.queueRevision >= snapshot.revision) return thread;
       return { ...thread, queueCount: snapshot.queue.length, queueRevision: snapshot.revision };
     });
-    Object.assign(page, mergeThreadListPage(existing, (result.threads || []).map((thread) => thread.id), result.nextCursor, { order, append }));
+    Object.assign(page, mergeThreadListPage(page, (result.threads || []).map((thread) => thread.id), result.nextCursor, { order, append, baselineIds }));
     state.threads.set(projectId, threads);
     if (projectId === state.selectedProjectId || state.sidebarView === "recent") renderThreads();
     else if (state.sidebarOrder === "recent") renderProjects();
@@ -596,9 +635,14 @@ async function selectProject(projectId, { keepSidebarOpen = false, preserveFollo
     showActivity("项目目录当前不可用；恢复目录后刷新工作台。", true);
     return;
   }
+  if (threadId && findThread(project.id, threadId)) {
+    await selectThread(threadId, { closeNavigation: !keepSidebarOpen, preserveFollowLatest });
+    return;
+  }
   if (state.threadPages.get(project.id)?.order !== state.sidebarOrder) {
+    const selectionId = state.threadSelectionId;
     await refreshProjectThreads(project.id);
-    if (state.selectedProjectId !== project.id) return;
+    if (state.selectedProjectId !== project.id || state.threadSelectionId !== selectionId) return;
   }
   const threads = state.threads.get(project.id) || [];
   const requestedThreadId = threadId || (!changedProject ? currentThreadId : null);
@@ -642,7 +686,13 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
     return;
   }
   const hasCachedHistory = hasCurrentThreadHistory(listedThread);
+  const canShowHistory = Boolean(listedThread?.history && Array.isArray(listedThread.turns));
   if (threadId === state.selectedThreadId && hasCachedHistory && !mergeHistory) {
+    if (state.threadSelectionController || state.threadSelectionTargetId) {
+      cancelThreadSelection();
+      renderThreads();
+      updateComposer();
+    }
     ui.prompt.focus();
     return;
   }
@@ -652,7 +702,9 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
   state.threadSelectionController = controller;
   if (listedThread) {
     updateThreadInState(project.id, { ...listedThread, accessedAt: new Date().toISOString() });
-    if (hasCachedHistory && !mergeHistory) {
+    // Show the last snapshot immediately, even when it needs reconciliation.
+    // Only a current snapshot may skip the full history request below.
+    if (canShowHistory && !mergeHistory) {
       state.selectedThreadId = threadId;
       ensureEventStream();
       renderThreads();
@@ -707,7 +759,7 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
   const previous = selected?.id === threadId ? selected : null;
   const turns = mergeHistory && previous
     ? mergeTurnPages(previous.turns || [], result.thread.turns || [])
-    : result.thread.turns || [];
+    : mergeConversationTurns(previous?.turns || [], result.thread.turns || [], { canonical: true });
   const history = mergeHistory && previous?.history
     ? { ...result.history, hasMore: previous.history.hasMore, before: previous.history.before }
     : result.history;
@@ -767,30 +819,6 @@ function currentQueue() {
 
 function queuedItem(threadId, itemId) {
   return state.queueSnapshots.get(threadId)?.queue?.find((item) => item.id === itemId || item.clientId === itemId) || null;
-}
-
-function deferQueuedUserMessage(threadId, turnId, item) {
-  const clientId = userMessageClientId(item);
-  const queueItemId = clientId || item?.id;
-  if (!item?.id || item.type !== "userMessage" || !queuedItem(threadId, queueItemId)) return false;
-  const pending = state.pendingQueueMessages.get(queueItemId);
-  state.pendingQueueMessages.set(queueItemId, {
-    threadId,
-    turnId,
-    item: { ...(pending?.item || {}), ...item },
-  });
-  return true;
-}
-
-function flushPendingQueueMessages(threadId) {
-  const projectId = findProjectForThread(threadId);
-  if (!projectId) return;
-  for (const [itemId, pending] of state.pendingQueueMessages) {
-    if (pending.threadId !== threadId || queuedItem(threadId, itemId)) continue;
-    state.pendingQueueMessages.delete(itemId);
-    const stored = rememberThreadItem(projectId, threadId, pending.turnId, pending.item);
-    if (stored && state.selectedThreadId === threadId) renderLiveUserMessage(stored, pending.turnId);
-  }
 }
 
 function currentRuntime() {
@@ -891,11 +919,11 @@ function turnWithMetrics(turn) {
   if (!metric) return turn;
   const timed = { ...turn };
   for (const key of ["startedAt", "completedAt", "durationMs"]) {
-    if (metric[key] !== null && metric[key] !== undefined) timed[key] = metric[key];
+    if (timed[key] == null && metric[key] != null) timed[key] = metric[key];
   }
-  const items = restoreMissingExecutionItems(turn.items || [], metric.items);
+  const items = turn.items || [];
   timed.items = items.map((item) => {
-    const itemMetric = metric.items?.[item.id];
+    const itemMetric = metric.items?.[item.id] || metric.items?.[item.clientId];
     return itemMetric ? mergeHistoricalExecutionItem(item, itemMetric, turn.status) : item;
   });
   return timed;
@@ -926,11 +954,12 @@ function renderProjects() {
 }
 
 function renderThreads() {
-  ui.threadList.replaceChildren();
+  const previous = new Map([...ui.threadList.querySelectorAll(".thread-item")].map((button) => [button.dataset.threadId, button]));
+  const nodes = [];
   renderSidebarControls();
   if (state.sidebarOrder === "recent") renderProjects();
   const project = currentProject();
-  if (!project) return;
+  if (!project) { ui.threadList.replaceChildren(); return; }
   const crossProject = state.sidebarView === "recent";
   ui.projectsSection.hidden = crossProject;
   ui.sidebarThreadHeading.textContent = crossProject ? "最近对话" : "聊天";
@@ -938,7 +967,7 @@ function renderThreads() {
     const unavailable = document.createElement("p");
     unavailable.className = "sidebar-empty error";
     unavailable.textContent = "项目目录当前不可用";
-    ui.threadList.append(unavailable);
+    ui.threadList.replaceChildren(unavailable);
     return;
   }
   const page = crossProject ? state.globalThreadPage : state.threadPages.get(project.id);
@@ -959,13 +988,13 @@ function renderThreads() {
     const empty = document.createElement("p");
     empty.className = "sidebar-empty";
     empty.textContent = page?.loading || crossProject && state.globalThreadRefresh ? "正在加载对话…" : crossProject ? "还没有可显示的对话" : "这个项目还没有聊天";
-    ui.threadList.append(empty);
+    ui.threadList.replaceChildren(empty);
     appendThreadLoadMore(page, crossProject, project.id);
     renderRecentThreads();
     return;
   }
   for (const { project: threadProject, thread } of entries) {
-    const button = document.createElement("button");
+    const button = previous.get(thread.id) || document.createElement("button");
     button.type = "button";
     button.className = "thread-item";
     button.dataset.threadId = thread.id;
@@ -974,27 +1003,29 @@ function renderThreads() {
     if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
     if (isActiveThreadRuntime(thread.runtime)) button.classList.add("running");
     else if (isActiveGoal(thread.goal)) button.classList.add("goal-active");
-    const title = document.createElement("strong");
-    title.textContent = threadDisplayName(thread);
-    const details = document.createElement("small");
+    const title = button.querySelector("strong") || document.createElement("strong");
+    if (title.textContent !== threadDisplayName(thread)) title.textContent = threadDisplayName(thread);
+    const details = button.querySelector("small") || document.createElement("small");
+    for (const key of ["elapsedPrefix", "elapsedStartedAt", "elapsedCompletedAt", "elapsedDurationMs", "elapsedFinal"]) delete details.dataset[key];
     const queueCount = thread.queueCount || 0;
     if (crossProject) details.textContent = thread.id === state.threadSelectionTargetId ? `${threadProject.name} · 打开中…` : threadProject.name;
     else if (thread.id === state.threadSelectionTargetId) details.textContent = "打开中…";
     else if (isActiveThreadRuntime(thread.runtime)) setElapsedDisplay(details, "执行中", thread.runtime);
     else if (isActiveGoal(thread.goal)) details.textContent = "目标续跑中";
     else details.textContent = queueCount ? `队列 ${queueCount}` : "空闲";
-    button.append(title, details);
-    button.addEventListener("click", () => {
+    if (!title.parentNode) button.append(title, details);
+    button.onclick = () => {
       if (threadProject.id === state.selectedProjectId) return selectThread(thread.id).catch(showError);
       return selectProject(threadProject.id, { threadId: thread.id }).catch(showError);
-    });
-    ui.threadList.append(button);
+    };
+    nodes.push(button);
   }
-  appendThreadLoadMore(page, crossProject, project.id);
+  appendThreadLoadMore(page, crossProject, project.id, nodes);
+  reconcileSidebarChildren(ui.threadList, nodes);
   renderRecentThreads();
 }
 
-function appendThreadLoadMore(page, crossProject, projectId) {
+function appendThreadLoadMore(page, crossProject, projectId, nodes = null) {
   if (!page?.nextCursor || page.order !== state.sidebarOrder) return;
   const loading = Boolean(page.loading) || crossProject && Boolean(state.globalThreadRefresh);
   const more = document.createElement("button");
@@ -1020,7 +1051,8 @@ function appendThreadLoadMore(page, crossProject, projectId) {
       }
     } catch (error) { showError(error); }
   });
-  ui.threadList.append(more);
+  if (nodes) nodes.push(more);
+  else ui.threadList.append(more);
 }
 
 function renderSidebarControls() {
@@ -1072,27 +1104,29 @@ function renderRecentThreads() {
   if (ui.recentThreadMenu.dataset.signature === signature) return;
   const scrollTop = ui.recentThreadMenu.scrollTop;
   ui.recentThreadMenu.dataset.signature = signature;
-  ui.recentThreadMenu.replaceChildren();
+  const previous = new Map([...ui.recentThreadMenu.children].map((button) => [button.dataset.threadId, button]));
+  const nodes = [];
   for (const { project, thread } of entries) {
-    const button = document.createElement("button");
+    const button = previous.get(thread.id) || document.createElement("button");
     button.type = "button";
+    button.dataset.threadId = thread.id;
     button.className = "recent-thread-item";
     if (thread.id === state.selectedThreadId) button.classList.add("active");
     if (thread.id === state.threadSelectionTargetId) button.classList.add("loading");
     if (isActiveThreadRuntime(thread.runtime)) button.classList.add("running");
     else if (isActiveGoal(thread.goal)) button.classList.add("goal-active");
-    const title = document.createElement("strong");
-    title.textContent = threadDisplayName(thread);
-    const projectName = document.createElement("small");
+    const title = button.querySelector("strong") || document.createElement("strong");
+    if (title.textContent !== threadDisplayName(thread)) title.textContent = threadDisplayName(thread);
+    const projectName = button.querySelector("small") || document.createElement("small");
     projectName.textContent = thread.id === state.threadSelectionTargetId ? `${project.name} · 打开中…` : project.name;
-    button.append(title, projectName);
-    button.addEventListener("click", async () => {
+    if (!title.parentNode) button.append(title, projectName);
+    button.onclick = async () => {
       closeRecentThreads();
-      if (project.id === state.selectedProjectId && thread.id === state.selectedThreadId) return;
       await selectProject(project.id, { threadId: thread.id });
-    });
-    ui.recentThreadMenu.append(button);
+    };
+    nodes.push(button);
   }
+  reconcileSidebarChildren(ui.recentThreadMenu, nodes);
   ui.recentThreadMenu.scrollTop = scrollTop;
 }
 
@@ -1158,7 +1192,9 @@ function renderSettings() {
   const thread = currentThread();
   const settings = thread?.settings || {};
   const selectedModel = selectedModelForThread(thread);
-  fillOptions(ui.composerModel, state.models, compactModelLabel, selectedModel?.id, "没有可用模型");
+  const models = selectedModel && !state.models.some((model) => model.id === selectedModel.id)
+    ? [selectedModel, ...state.models] : state.models;
+  fillOptions(ui.composerModel, models, compactModelLabel, selectedModel?.id, "没有可用模型");
   const efforts = selectedModel?.supportedReasoningEfforts || [];
   const selectedEffort = settings.effort || selectedModel?.defaultReasoningEffort || efforts[0]?.reasoningEffort;
   fillCompactEffortOptions(ui.composerEffort, efforts, selectedEffort);
@@ -1186,6 +1222,7 @@ function renderSettings() {
 function selectedModelForThread(thread) {
   const modelId = thread?.settings?.model;
   return state.models.find((model) => model.id === modelId)
+    || (modelId ? { id: modelId, displayName: `${modelId}（当前不可用）` } : null)
     || state.models.find((model) => model.isDefault)
     || state.models[0];
 }
@@ -1338,86 +1375,203 @@ function renderGoalButton() {
     : "创建或管理目标；也可输入 /goal";
 }
 
+function scheduleConversationRender(threadId) {
+  if (state.conversationFrame) return;
+  state.conversationFrame = requestAnimationFrame(() => {
+    state.conversationFrame = null;
+    // Render the currently selected model, not a closure over a previous tab.
+    renderConversation(currentThread()?.turns || []);
+  });
+}
+
 function renderConversation(turns) {
   return renderConversationProfiled(turns);
 }
 
 function renderConversationProfiled(turns) {
-  const finishProfile = profileSpan("renderConversation", {
-    turns: Array.isArray(turns) ? turns.length : 0,
-    threadId: state.selectedThreadId,
-  });
-  try {
+  const finishProfile = profileSpan("renderConversation", { threadId: state.selectedThreadId });
   const shouldFollow = state.followLatest;
-  const previousScrollTop = ui.conversation.scrollTop;
-  const liveMetricsByTurn = captureRenderedExecutionItems();
   state.renderingConversation = true;
-  const thread = currentThread();
-  if (thread) thread.answeredAsyncUserInputIds = [...new Set([
-    ...(thread.answeredAsyncUserInputIds || []), ...answeredAsyncRequestIds(turns || [], currentQueue()),
-  ])];
-  ui.conversation.replaceChildren();
-  state.messageElements.clear();
-  state.executionGroups.clear();
-  if (currentThread()?.history?.hasMore) {
-    const loadOlder = document.createElement("button");
-    loadOlder.className = "history-loader";
-    loadOlder.type = "button";
-    loadOlder.disabled = state.loadingHistory;
-    loadOlder.textContent = state.loadingHistory ? "正在加载…" : "加载更早记录";
-    loadOlder.addEventListener("click", () => loadOlderTurns().catch(showError));
-    ui.conversation.append(loadOlder);
-  }
-  for (const rawTurn of Array.isArray(turns) ? turns : []) {
-    let turn = reconcileStaleExecutionTurn(turnWithMetrics(rawTurn), currentRuntime());
-    const liveMetrics = liveMetricsByTurn.get(turn.id);
-    if (liveMetrics) turn = { ...turn, items: restoreMissingExecutionItems(turn.items || [], liveMetrics) };
-    appendConversationDate(turn.id, turnTimestamp(turn));
-    const items = Array.isArray(turn.items) ? turn.items : [];
-    let userMessageSeen = false;
-    if (items.some(isExecutionItem)) ensureExecutionGroup(turn.id, turn.status, turn);
-    for (const item of items) {
-      if (isExecutionItem(item)) {
-        upsertExecutionItem(turn.id, item, { turnStatus: turn.status, timing: turn });
-      } else {
-        const guide = item.type === "userMessage" && userMessageSeen;
-        renderHistoryItem(item, { turnId: turn.id, guide });
-        if (item.type === "userMessage") userMessageSeen = true;
-      }
+  try {
+    if (state.renderedThreadId !== state.selectedThreadId) {
+      state.messageElements.clear();
+      state.executionGroups.clear();
+      ui.conversation.replaceChildren();
+      pendingArea().replaceChildren();
+      state.renderedThreadId = state.selectedThreadId;
     }
-    renderTurnPlan(turn.id, state.turnMetrics.get(turn.id)?.plan, turn.status);
-  }
-  for (const request of state.userInputRequests.values()) {
-    if (request.threadId === state.selectedThreadId) renderUserInputRequest(request);
-  }
-  for (const request of state.approvalRequests.values()) {
-    if (request.threadId === state.selectedThreadId) renderApprovalRequest(request);
-  }
-  if (!ui.conversation.childElementCount) renderEmptyConversation();
-  const activeTurnId = currentRuntime().activeTurnId;
-  if (activeTurnId) scheduleTurnActivity(activeTurnId, 300);
-  state.renderingConversation = false;
-  if (shouldFollow) scrollToLatest(false);
-  else requestAnimationFrame(() => {
-    ui.conversation.scrollTop = Math.min(previousScrollTop, Math.max(0, ui.conversation.scrollHeight - ui.conversation.clientHeight));
-    updateJumpLatest();
-  });
+    const thread = currentThread();
+    if (thread) thread.answeredAsyncUserInputIds = [...new Set([
+      ...(thread.answeredAsyncUserInputIds || []), ...answeredAsyncRequestIds(turns || [], currentQueue()),
+    ])];
+    const roots = [];
+    if (thread?.history?.hasMore) {
+      const loader = ui.conversation.querySelector(".history-loader") || document.createElement("button");
+      loader.className = "history-loader";
+      loader.type = "button";
+      loader.disabled = state.loadingHistory;
+      loader.textContent = state.loadingHistory ? "正在加载…" : "加载更早记录";
+      loader.onclick = () => void loadOlderTurns().catch(showError);
+      roots.push(loader);
+    }
+    const visibleTurns = new Set();
+    let dateKey = null;
+    for (const rawTurn of turns || []) {
+      const turn = reconcileStaleExecutionTurn(turnWithMetrics(rawTurn), currentRuntime());
+      visibleTurns.add(turn.id);
+      const group = ensureExecutionGroup(turn.id, turn.status, turn);
+      const time = turnTimestamp(turn);
+      const key = conversationDateKey(time);
+      if (key && key !== dateKey) {
+        if (!group.date) {
+          group.date = document.createElement("div");
+          group.date.className = "conversation-date";
+        }
+        group.date.textContent = formatConversationDate(time);
+        roots.push(group.date);
+        dateKey = key;
+      }
+      const nodes = [];
+      const itemIds = new Set();
+      for (const item of turn.items || []) {
+        if (queuedItem(state.selectedThreadId, userMessageClientId(item) || item.id)) continue;
+        itemIds.add(item.id);
+        let message;
+        if (isExecutionItem(item)) {
+          const metric = state.turnMetrics.get(turn.id)?.items?.[item.id];
+          const raw = rawTurn.items?.find((entry) => entry.id === item.id);
+          const rendered = group.rendered.get(item.id);
+          if (!rendered || rendered.raw !== raw || rendered.metric !== metric || rendered.status !== item.status) {
+            upsertExecutionItem(turn.id, item, { turnStatus: turn.status, timing: turn });
+            group.rendered.set(item.id, { raw, metric, status: item.status });
+          }
+          message = group.items.get(item.id);
+        } else message = renderHistoryItem(item, { turnId: turn.id, guide: item.inputKind === "guide" });
+        if (message?.root) {
+          message.root.dataset.itemId = item.id;
+          message.root.dataset.turnId = turn.id;
+          nodes.push(message.root);
+        }
+      }
+      for (const [id, entry] of group.items) if (!itemIds.has(id)) {
+        entry.root.remove();
+        group.items.delete(id);
+        group.rendered.delete(id);
+      }
+      reconcileTimelineChildren(group.list, nodes);
+      group.planValue = turn.task?.plan || state.turnMetrics.get(turn.id)?.plan;
+      group.changes = turn.task?.diff ? unifiedDiffChanges(turn.task.diff) : (turn.items || []).filter((item) => item.type === "fileChange").flatMap((item) => item.changes || []);
+      group.recovered = recoveryItems(turn.items, state.turnMetrics.get(turn.id)?.items);
+      updateExecutionGroup(group, turn.status);
+      roots.push(group.root);
+    }
+    for (const [id, group] of state.executionGroups) if (!visibleTurns.has(id)) {
+      group.root.remove();
+      state.executionGroups.delete(id);
+    }
+    reconcileTimelineChildren(ui.conversation, roots);
+    if (!roots.length) renderEmptyConversation();
+    renderPendingRequests();
+    const activeTurnId = currentRuntime().activeTurnId;
+    if (activeTurnId) scheduleTurnActivity(activeTurnId, 300);
   } finally {
-    finishProfile({ children: ui.conversation.childElementCount });
+    state.renderingConversation = false;
+    syncElapsedTimer();
+    finishProfile();
+  }
+  if (shouldFollow) scrollToLatest(false);
+  else updateJumpLatest();
+}
+
+// Controls are current obligations, not chronological transcript entries.
+function pendingArea() {
+  if (!ui.pendingRequests) {
+    const dock = document.createElement("details");
+    dock.className = "conversation-pending";
+    dock.hidden = true;
+    const heading = document.createElement("summary");
+    heading.textContent = "待处理";
+    const list = document.createElement("div");
+    list.className = "pending-request-list";
+    dock.append(heading, list);
+    ui.conversationStage.prepend(dock);
+    ui.pendingRequests = dock;
+    ui.pendingRequestList = list;
+  }
+  return ui.pendingRequestList;
+}
+
+function renderPendingRequests() {
+  const parent = pendingArea();
+  const roots = [];
+  const requests = [
+    ...[...state.userInputRequests.values()].map((request) => ({ request, kind: "input" })),
+    ...[...state.approvalRequests.values()].map((request) => ({ request, kind: "approval" })),
+  ].filter(({ request }) => request.threadId === state.selectedThreadId);
+  for (const { request, kind } of requests) {
+    const key = kind + ":" + request.requestId;
+    let entry = state.pendingCards.get(key);
+    const ready = kind === "input" ? Array.isArray(request.questions) : request.detailsAvailable !== false;
+    if (!entry || (!entry.ready && ready)) {
+      if (!ready) {
+        const root = document.createElement("p");
+        root.setAttribute("role", "status");
+        root.textContent = "正在获取待处理请求详情…";
+        entry = { root, ready: false };
+        state.pendingCards.set(key, entry);
+        roots.push(root);
+        continue;
+      }
+      const root = kind === "input" ? renderUserInputRequest(request) : renderApprovalRequest(request);
+      if (!root) continue;
+      entry = { root, ready: true };
+      state.pendingCards.set(key, entry);
+    }
+    roots.push(entry.root);
+  }
+  const alive = new Set([
+    ...[...state.userInputRequests.values()].map((request) => "input:" + request.requestId),
+    ...[...state.approvalRequests.values()].map((request) => "approval:" + request.requestId),
+  ]);
+  for (const key of state.pendingCards.keys()) if (!alive.has(key)) state.pendingCards.delete(key);
+  reconcileTimelineChildren(parent, roots);
+  const wasHidden = ui.pendingRequests.hidden;
+  ui.pendingRequests.hidden = !roots.length;
+  ui.pendingRequests.firstElementChild.textContent = `待处理 · ${roots.length}`;
+  if (roots.length && wasHidden) ui.pendingRequests.open = true;
+  for (const group of state.executionGroups.values()) {
+    for (const entry of group.items.values()) {
+      const linked = requests.find(({ request }) => request.itemId === entry.item.id);
+      let link = entry.root.querySelector(".pending-request-link");
+      if (!linked) { link?.remove(); continue; }
+      if (!link) {
+        link = document.createElement("button");
+        link.className = "quiet-button pending-request-link";
+        link.type = "button";
+        link.textContent = "处理请求";
+        entry.root.querySelector("summary").append(link);
+      }
+      link.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        ui.pendingRequests.open = true;
+        state.pendingCards.get(linked.kind + ":" + linked.request.requestId)?.root.querySelector("input,button")?.focus();
+      };
+    }
   }
 }
 
 function renderUserInputRequest(request, { inlineAsync = false } = {}) {
   if (!request?.requestId || request.threadId !== state.selectedThreadId) return;
-  if (!inlineAsync) removeUserInputCard(request.requestId);
+
   ui.conversation.querySelector(".empty-state")?.remove();
   const form = document.createElement("form");
-  form.className = inlineAsync ? "user-input-card async-question-card" : "user-input-card";
+  form.className = inlineAsync ? "user-input-card async-question-form" : "user-input-card";
   form.dataset.requestId = request.requestId;
   const heading = document.createElement("div");
   heading.className = "user-input-heading";
   const title = document.createElement("strong");
-  title.textContent = inlineAsync ? "异步提问 · 待回答" : "需要你的回答";
+  title.textContent = inlineAsync ? "待回答" : "需要你确认";
   const note = document.createElement("span");
   note.textContent = request.isBlocking === false ? "你可以稍后回答，Codex 会继续执行" : "回答后 Codex 会继续当前任务";
   heading.append(title, note);
@@ -1429,6 +1583,7 @@ function renderUserInputRequest(request, { inlineAsync = false } = {}) {
     const legend = document.createElement("legend");
     const header = document.createElement("span");
     header.textContent = question.header;
+    header.hidden = inlineAsync || !question.header;
     const prompt = document.createElement("strong");
     prompt.textContent = question.question;
     legend.append(header, prompt);
@@ -1447,6 +1602,7 @@ function renderUserInputRequest(request, { inlineAsync = false } = {}) {
         otherText.autocomplete = "off";
         otherText.setAttribute("aria-label", `${question.header}：其他回答`);
         otherText.disabled = true;
+        otherText.hidden = true;
         other.append(otherText);
         field.append(other);
       }
@@ -1458,12 +1614,14 @@ function renderUserInputRequest(request, { inlineAsync = false } = {}) {
           if (!otherText) return;
           const selectedOther = radio.checked && radio.dataset.other === "true";
           if (selectedOther) {
+            otherText.hidden = false;
             otherText.disabled = false;
             otherText.required = true;
             otherText.focus();
           } else if (radio.checked) {
             otherText.required = false;
             otherText.disabled = true;
+            otherText.hidden = true;
           }
         });
       }
@@ -1502,10 +1660,7 @@ function renderUserInputRequest(request, { inlineAsync = false } = {}) {
     event.preventDefault();
     void submitUserInputRequest(request, form, controls, error, submit);
   });
-  if (inlineAsync) return form;
-  ui.conversation.append(form);
-  placeTurnContent(request.turnId, { root: form });
-  followNewContent();
+  return form;
 }
 
 function renderAsyncUserInput(item, turnId) {
@@ -1514,84 +1669,52 @@ function renderAsyncUserInput(item, turnId) {
   const key = `${request.threadId}:${request.requestId}`;
   const answered = currentThread()?.answeredAsyncUserInputIds?.includes(request.requestId);
   let view = state.asyncInputCards.get(key);
-  if (!answered && !view) {
-    const root = renderUserInputRequest(request, { inlineAsync: true });
-    root.dataset.asyncRequestId = request.requestId;
-    root.setAttribute("aria-label", "Codex 异步提问");
-    const resume = document.createElement("button");
-    resume.type = "button";
-    resume.className = "quiet-button";
-    resume.textContent = "继续回答";
-    root.querySelector(".user-input-heading").append(resume);
-    const summary = document.createElement("p");
-    summary.textContent = request.questions.map((question) => question.question).join("\n\n");
-    root.querySelector(".user-input-heading").after(summary);
-    view = { request, root, resume, summary, collapsed: false };
+  if (!view) {
+    view = createAsyncQuestionView(request, renderUserInputRequest(request, { inlineAsync: true }));
     state.asyncInputCards.set(key, view);
-    root.querySelector('[data-action="defer"]').addEventListener("click", () => {
+    view.form.querySelector('[data-action="defer"]').addEventListener("click", () => {
       collapseAsyncQuestion(view, true);
-      resume.focus();
+      view.resume.focus({ preventScroll: true });
     });
-    resume.addEventListener("click", () => collapseAsyncQuestion(view, false));
+    view.resume.addEventListener("click", () => {
+      collapseAsyncQuestion(view, false);
+      view.form.querySelector("input")?.focus({ preventScroll: true });
+    });
     collapseAsyncQuestion(view, asyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), key), { persist: false });
   }
-  const root = view?.root || document.createElement("section");
   if (answered) {
-    renderAnsweredAsyncQuestion(root, request);
-    state.asyncInputCards.delete(key);
+    const text = asyncAnswerText(request.requestId, currentThread()?.turns || [], currentQueue()) || view.answerText || "";
+    if (!view.answered || view.answerText !== text) showAnsweredAsyncQuestion(view, request, text);
   } else updateAsyncQuestionNote(view);
-  if (!root.parentNode?.isConnected) ui.conversation.append(root);
-  return { root };
+  return view;
 }
 
 function collapseAsyncQuestion(view, collapsed, { persist = true } = {}) {
-  view.collapsed = collapsed;
-  for (const field of view.root.querySelectorAll(".user-input-question, .user-input-footer")) field.hidden = collapsed;
-  view.resume.hidden = !collapsed;
-  view.summary.hidden = !collapsed;
-  view.resume.setAttribute("aria-expanded", String(!collapsed));
+  setAsyncQuestionCollapsed(view, collapsed);
   if (persist) setAsyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), `${view.request.threadId}:${view.request.requestId}`, collapsed);
   updateAsyncQuestionNote(view);
 }
 
 function updateAsyncQuestionNote(view) {
+  if (view.answered) return;
   const thread = findThread(findProjectForThread(view.request.threadId), view.request.threadId);
-  view.root.querySelector(".user-input-heading span").textContent = view.collapsed ? "已选择稍后回答；展开卡片即可继续"
-    : isActiveThreadRuntime(thread?.runtime)
-    ? "你可以稍后回答，Codex 会继续执行"
-    : "当前任务已结束；提交回答后会开始下一轮";
+  view.form.querySelector(".user-input-heading span").textContent = isActiveThreadRuntime(thread?.runtime)
+    ? "可稍后回答，不影响当前任务"
+    : "任务已结束，回答后开始下一轮";
 }
 
-function renderAnsweredAsyncQuestion(root, request) {
-  root.className = "user-input-card async-question-card";
-  root.dataset.asyncRequestId = request.requestId;
-  const title = document.createElement("strong");
-  title.textContent = "异步提问 · 已回答";
-  const prompt = document.createElement("p");
-  prompt.textContent = request.questions.map((question) => question.question).join("\n\n");
-  root.replaceChildren(title, prompt);
-}
-
-function markAsyncQuestionAnswered(threadId, requestId) {
+function markAsyncQuestionAnswered(threadId, requestId, answerText = "") {
   if (!requestId) return;
   const projectId = findProjectForThread(threadId);
   const thread = findThread(projectId, threadId);
   if (thread) updateThreadInState(projectId, { id: threadId,
     answeredAsyncUserInputIds: [...new Set([...(thread.answeredAsyncUserInputIds || []), requestId])] });
-  const key = `${threadId}:${requestId}`;
-  const view = state.asyncInputCards.get(key);
+  const view = state.asyncInputCards.get(`${threadId}:${requestId}`);
   if (view) {
-    renderAnsweredAsyncQuestion(view.root, view.request);
-    state.asyncInputCards.delete(key);
+    const text = answerText || asyncAnswerText(requestId, thread?.turns || [], state.queueSnapshots.get(threadId)?.queue || []) || view.answerText || "";
+    if (!view.answered || view.answerText !== text) showAnsweredAsyncQuestion(view, view.request, text);
   }
-  setAsyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), key, false);
-  if (state.selectedThreadId === threadId) {
-    for (const card of ui.conversation.querySelectorAll(".async-question-card")) {
-      if (card.dataset.asyncRequestId !== requestId) continue;
-      card.querySelector("strong").textContent = "异步提问 · 已回答";
-      for (const button of card.querySelectorAll("button")) button.disabled = true;
-    }
-  }
+  setAsyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), `${threadId}:${requestId}`, false);
 }
 
 function userInputOption(name, label, description, other = false) {
@@ -1607,6 +1730,7 @@ function userInputOption(name, label, description, other = false) {
   title.textContent = label;
   const detail = document.createElement("small");
   detail.textContent = description;
+  detail.hidden = !description;
   copy.append(title, detail);
   option.append(input, copy);
   return option;
@@ -1630,13 +1754,19 @@ async function submitUserInputRequest(request, form, controls, error, submit) {
     }
     answers[control.question.id] = { answers: [answer] };
   }
+  const hadFocus = form.contains(document.activeElement);
   error.textContent = "";
   submit.textContent = "正在提交…";
   for (const element of form.elements) element.disabled = true;
   try {
     if (request.delivery === "async") {
       const result = await deliverAsyncUserInput({ request, answers, projectId: project.id, api });
-      markAsyncQuestionAnswered(request.threadId, request.requestId);
+      markAsyncQuestionAnswered(request.threadId, request.requestId, displayUserInputText(asyncAnswerMessage(request, answers)).replace(/^回答你的提问：\n/, ""));
+      // Disabling the submitted control releases focus to body. Keep keyboard
+      // users at this question, unless they moved elsewhere while awaiting it.
+      if (hadFocus && document.activeElement === document.body) {
+        state.asyncInputCards.get(`${request.threadId}:${request.requestId}`)?.root.querySelector("summary")?.focus({ preventScroll: true });
+      }
       if (result.delivery === "guide") acceptGuideMessage(request.threadId, result.turnId, result.item);
       else {
         applyQueueSnapshot(request.threadId, result.queue, result.queueRevision);
@@ -1650,7 +1780,8 @@ async function submitUserInputRequest(request, form, controls, error, submit) {
       body: { projectId: project.id, answers },
     });
     state.userInputRequests.delete(request.requestId);
-    form.remove();
+    removeUserInputCard(request.requestId);
+    renderPendingRequests();
     scheduleTurnActivity(request.turnId, 0);
   } catch (submitError) {
     for (const element of form.elements) element.disabled = false;
@@ -1663,31 +1794,26 @@ async function submitUserInputRequest(request, form, controls, error, submit) {
 }
 
 function removeUserInputCard(requestId) {
-  for (const card of ui.conversation.querySelectorAll(".user-input-card")) {
-    if (card.dataset.requestId === requestId) card.remove();
-  }
+  state.pendingCards.get("input:" + requestId)?.root.remove();
+  state.pendingCards.delete("input:" + requestId);
 }
 
 function removeUserInputRequest(requestId) {
   state.userInputRequests.delete(String(requestId));
   removeUserInputCard(String(requestId));
+  renderPendingRequests();
 }
 
 function syncUserInputRequests(threadId, requests) {
-  for (const [requestId, request] of state.userInputRequests) {
-    if (request.threadId === threadId) state.userInputRequests.delete(requestId);
-  }
-  for (const request of requests || []) state.userInputRequests.set(String(request.requestId), request);
-  if (state.selectedThreadId !== threadId) return;
-  for (const card of ui.conversation.querySelectorAll(".user-input-card:not(.approval-card):not(.async-question-card)")) card.remove();
-  for (const request of state.userInputRequests.values()) {
-    if (request.threadId === threadId) renderUserInputRequest(request);
-  }
+  const previous = new Map(state.userInputRequests);
+  for (const [id, request] of state.userInputRequests) if (request.threadId === threadId) state.userInputRequests.delete(id);
+  for (const request of requests || []) state.userInputRequests.set(String(request.requestId), { ...previous.get(String(request.requestId)), ...request });
+  if (state.selectedThreadId === threadId) renderPendingRequests();
 }
 
 function renderApprovalRequest(request) {
   if (!request?.requestId || request.threadId !== state.selectedThreadId) return;
-  removeApprovalCard(request.requestId);
+
   ui.conversation.querySelector(".empty-state")?.remove();
   const card = document.createElement("section");
   card.className = "user-input-card approval-card";
@@ -1697,7 +1823,9 @@ function renderApprovalRequest(request) {
   const title = document.createElement("strong");
   title.textContent = approvalRequestTitle(request.method);
   const note = document.createElement("span");
-  note.textContent = "确认后 Codex 会继续当前任务";
+  note.textContent = request.method === "codexlan/browser/requestApproval"
+    ? "允许后可重试浏览器操作；重启服务后需要重新确认"
+    : "确认后 Codex 会继续当前任务";
   heading.append(title, note);
   card.append(heading);
   if (request.reason) {
@@ -1728,9 +1856,7 @@ function renderApprovalRequest(request) {
   for (const button of footer.querySelectorAll("button")) {
     button.addEventListener("click", () => void submitApprovalRequest(request, button.dataset.decision, card, error));
   }
-  ui.conversation.append(card);
-  placeTurnContent(request.turnId, { root: card });
-  followNewContent();
+  return card;
 }
 
 function approvalButton(label, decision, className) {
@@ -1743,6 +1869,7 @@ function approvalButton(label, decision, className) {
 }
 
 function approvalRequestTitle(method) {
+  if (method === "codexlan/browser/requestApproval") return "允许此会话使用本机浏览器？";
   if (method === "item/fileChange/requestApproval") return "需要批准文件修改";
   if (method === "item/permissions/requestApproval") return "需要授予额外权限";
   return "需要批准命令执行";
@@ -1784,57 +1911,28 @@ async function submitApprovalRequest(request, decision, card, error) {
 }
 
 function removeApprovalCard(requestId) {
-  for (const card of ui.conversation.querySelectorAll(".approval-card")) {
-    if (card.dataset.requestId === String(requestId)) card.remove();
-  }
+  state.pendingCards.get("approval:" + requestId)?.root.remove();
+  state.pendingCards.delete("approval:" + requestId);
 }
 
 function removeApprovalRequest(requestId) {
   state.approvalRequests.delete(String(requestId));
-  removeApprovalCard(requestId);
+  removeApprovalCard(String(requestId));
+  renderPendingRequests();
 }
 
 function syncApprovalRequests(threadId, requests) {
-  for (const [requestId, request] of state.approvalRequests) {
-    if (request.threadId === threadId) state.approvalRequests.delete(requestId);
+  const previous = new Map(state.approvalRequests);
+  for (const [id, request] of state.approvalRequests) if (request.threadId === threadId) state.approvalRequests.delete(id);
+  for (const request of requests || []) {
+    const old = previous.get(String(request.requestId));
+    state.approvalRequests.set(String(request.requestId), old?.detailsAvailable !== false && request.detailsAvailable === false ? { ...request, ...old } : request);
   }
-  for (const request of requests || []) state.approvalRequests.set(String(request.requestId), request);
-  if (state.selectedThreadId !== threadId) return;
-  for (const card of ui.conversation.querySelectorAll(".approval-card")) card.remove();
-  for (const request of state.approvalRequests.values()) {
-    if (request.threadId === threadId) renderApprovalRequest(request);
-  }
-}
-
-function captureRenderedExecutionItems() {
-  const captured = new Map();
-  for (const [turnId, group] of state.executionGroups) {
-    const items = {};
-    for (const entry of group.items.values()) {
-      const item = entry.item;
-      if (!item?.id) continue;
-      items[item.id] = {
-        type: item.type,
-        status: item.status,
-        startedAt: item.startedAt,
-        completedAt: item.completedAt,
-        durationMs: item.durationMs,
-        snapshot: { ...item },
-      };
-    }
-    if (Object.keys(items).length) captured.set(turnId, items);
-  }
-  return captured;
+  if (state.selectedThreadId === threadId) renderPendingRequests();
 }
 
 function mergeTurnPages(existing, incoming) {
-  const replacements = new Map(incoming.map((turn) => [turn.id, turn]));
-  const merged = existing.map((turn) => replacements.get(turn.id) || turn);
-  const known = new Set(merged.map((turn) => turn.id));
-  for (const turn of incoming) {
-    if (!known.has(turn.id)) merged.push(turn);
-  }
-  return merged;
+  return mergeConversationTurns(existing, incoming, { canonical: true });
 }
 
 async function loadOlderTurns() {
@@ -1851,7 +1949,7 @@ async function loadOlderTurns() {
     if (state.selectedThreadId !== thread.id) return;
     ingestTurnMetrics(result.metrics);
     const selected = currentThread();
-    const turns = mergeTurnPages(result.thread.turns || [], selected.turns || []);
+    const turns = mergeConversationTurns(selected.turns || [], result.thread.turns || [], { canonical: true });
     updateThreadInState(project.id, {
       ...selected,
       turns,
@@ -1876,62 +1974,32 @@ async function loadOlderTurns() {
 function renderHistoryItem(item, { turnId = null, guide = false } = {}) {
   if (item.type === "userMessage") {
     const message = addMessage(item.id, guide ? "引导" : "你", userMessageText(item), guide ? "guide" : "user", messageTimestamp(item, turnId));
-    if (turnId) message.root.dataset.turnId = turnId;
     const clientId = userMessageClientId(item);
     if (clientId) message.root.dataset.clientId = clientId;
-    else message.root.removeAttribute("data-client-id");
     if (item.clientPending) message.root.dataset.clientPending = "true";
     else message.root.removeAttribute("data-client-pending");
-    placeTurnContent(turnId, message, { beforeExecution: !guide });
     return message;
-  } else if (item.type === "agentMessage" || item.type === "plan") {
-    const previousRoot = state.messageElements.get(item.id)?.root
-      || state.asyncInputCards.get(`${state.selectedThreadId}:${item.id}`)?.root;
-    const message = renderInTimelinePosition(previousRoot, () => {
-      if (item.delivery === "async") {
-        removeRenderedMessage(item.id);
-        return renderAsyncUserInput(item, turnId);
-      }
-      return item.type === "agentMessage" && item.phase === "commentary"
-        ? addProgressMessage(item.id, item.text || "")
-        : addMessage(item.id, "Codex", item.text || "", "assistant", messageTimestamp(item, turnId));
-    });
-    placeTurnContent(turnId, message);
-    return message;
+  }
+  if (item.type === "agentMessage" || item.type === "plan") {
+    if (item.delivery === "async") {
+      removeRenderedMessage(item.id);
+      return renderAsyncUserInput(item, turnId);
+    }
+    return item.type === "agentMessage" && item.phase === "commentary"
+      ? addProgressMessage(item.id, item.text || "")
+      : addMessage(item.id, "Codex", item.text || "", "assistant", messageTimestamp(item, turnId));
   }
   return null;
 }
 
-function placeTurnContent(turnId, message, { beforeExecution = false } = {}) {
-  const group = turnId ? state.executionGroups.get(turnId) : null;
-  if (!message?.root) return;
-  if (turnId) message.root.dataset.turnId = turnId;
-  if (message.root.classList.contains("user")) {
-    if (group?.root?.parentNode === ui.conversation) group.root.before(message.root);
-    else {
-      const question = [...ui.conversation.querySelectorAll(".async-question-card")].find((root) => root.dataset.turnId === turnId);
-      if (question) question.before(message.root);
-      else if (message.root.parentNode !== ui.conversation) ui.conversation.append(message.root);
-    }
-    return;
+// Only ephemeral diagnostics use this slot. Transcript order belongs to the model.
+function placeTurnContent(turnId, message) {
+  const group = state.executionGroups.get(turnId);
+  if (message?.root && group) {
+    group.footer.diagnostics.append(message.root);
+    group.footer.toggle.disabled = false;
+    group.footer.toggle.hidden = false;
   }
-  if (!group?.list) {
-    const activity = turnId ? state.messageElements.get(turnActivityId(turnId)) : null;
-    if (beforeExecution && activity?.root !== message.root && activity?.root?.parentNode === ui.conversation) {
-      activity.root.before(message.root);
-    }
-    return;
-  }
-  if (message.root.parentNode === group.list) return;
-  group.activeCommandBatch = null;
-  if (beforeExecution) {
-    const entries = [...group.items.values()];
-    const firstExecution = entries.map((entry) => entry.root).find((root) => root.parentNode === group.list);
-    if (firstExecution) firstExecution.before(message.root);
-    else group.list.append(message.root);
-    return;
-  }
-  group.list.append(message.root);
 }
 
 function userMessageText(item) {
@@ -1964,28 +2032,10 @@ function messageTimestamp(item, turnId) {
     || timestampMilliseconds(turn.startedAt);
 }
 
-function appendConversationDate(turnId, timestamp) {
-  const key = conversationDateKey(timestamp);
-  if (!key || ui.conversation.querySelector(`.conversation-date[data-date-key="${key}"]`)) return;
-  const separator = document.createElement("div");
-  separator.className = "conversation-date";
-  separator.dataset.dateKey = key;
-  if (turnId) separator.dataset.turnId = turnId;
-  separator.setAttribute("role", "separator");
-  const time = document.createElement("time");
-  time.dateTime = key;
-  time.textContent = formatConversationDate(timestamp);
-  time.title = formatMessageDateTime(timestamp);
-  separator.setAttribute("aria-label", time.title);
-  separator.append(time);
-  ui.conversation.append(separator);
-}
-
-function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, outputDelta = null } = {}) {
+function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing } = {}) {
   if (!turnId || !item?.id) return;
   const group = ensureExecutionGroup(turnId, turnStatus, timing);
   let entry = group.items.get(item.id);
-  const existingEntry = Boolean(entry);
   if (!entry) {
     const root = document.createElement("details");
     root.className = "execution-entry";
@@ -1998,16 +2048,8 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
     summary.append(kind, title, status);
     const body = document.createElement("pre");
     root.append(summary, body);
-    let commandBatch = null;
-    if (item.type === "commandExecution") {
-      commandBatch = ensureCommandBatch(group);
-      commandBatch.list.append(root);
-    } else {
-      group.activeCommandBatch = null;
-      group.list.append(root);
-    }
-    entry = { root, kind, title, status, body, item: {}, autoOpened: false, commandBatch, pendingBody: null };
-    if (commandBatch) commandBatch.items.add(entry);
+    entry = { root, kind, title, status, body, item: {}, autoOpened: false, pendingBody: null };
+
     summary.addEventListener("click", (event) => {
       if (entry.item.type === "fileChange") {
         event.preventDefault();
@@ -2030,8 +2072,7 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
       entry.item[key] = previousItem[key];
     }
   }
-  const incrementalOutput = existingEntry && entry.item.type === "commandExecution" && typeof outputDelta === "string";
-  let presentation = executionPresentation(entry.item, { includeBody: !incrementalOutput });
+  const presentation = executionPresentation(entry.item);
   if (entry.item.startedAt != null || entry.item.completedAt != null || entry.item.durationMs != null) {
     mergeItemMetric(turnId, item.id, {
       type: entry.item.type,
@@ -2048,32 +2089,16 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
   entry.status.setAttribute("aria-label", `${presentation.status}用时`);
   const renderBodyNow = entry.root.open || (entry.item.type === "reasoning" && presentation.tone === "running");
   if (!renderBodyNow) {
-    entry.pendingBody = incrementalOutput
-      ? limitExecutionDetail(executionItemText(entry.item), MAX_RENDERED_COMMAND_OUTPUT, true)
-      : presentation.body || "";
+    entry.pendingBody = presentation.body || "";
     entry.body.replaceChildren();
     entry.ansiStream = null;
-  } else if (incrementalOutput) {
-    if (!entry.ansiStream) {
-      entry.ansiStream = renderAnsiOutput(entry.body, limitExecutionDetail(executionItemText(entry.item), MAX_RENDERED_COMMAND_OUTPUT, true));
-      entry.pendingBody = null;
-    } else {
-      const separator = previousItem.aggregatedOutput ? "" : "\n\n";
-      entry.ansiStream = appendAnsiOutput(entry.body, `${separator}${outputDelta}`, entry.ansiStream, MAX_RENDERED_COMMAND_OUTPUT);
-    }
-    entry.body.classList.toggle("live-output-truncated", entry.ansiStream.truncated);
   } else {
     entry.ansiStream = renderAnsiOutput(entry.body, presentation.body || "");
     entry.pendingBody = null;
-    entry.body.classList.remove("live-output-truncated");
+    entry.body.classList.toggle("live-output-truncated", Boolean(entry.item.outputTruncated));
   }
   const isFileChange = entry.item.type === "fileChange";
-  const hasBody = executionBodyHasContent({
-    incrementalOutput,
-    ansiStream: entry.ansiStream,
-    pendingBody: entry.pendingBody,
-    body: presentation.body,
-  });
+  const hasBody = Boolean(presentation.body);
   entry.body.hidden = isFileChange || !hasBody;
   entry.root.classList.toggle("empty", !isFileChange && !hasBody);
   entry.root.classList.toggle("diff-preview-entry", isFileChange);
@@ -2081,7 +2106,7 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
   entry.root.classList.toggle("running", presentation.tone === "running");
   entry.root.classList.toggle("stopped", presentation.tone === "stopped");
   entry.root.classList.toggle("complete", presentation.tone === "complete");
-  if (entry.commandBatch) updateCommandBatch(entry.commandBatch);
+
   if (entry.item.type === "reasoning" && presentation.body && presentation.tone === "running") {
     for (const other of group.items.values()) {
       if (other !== entry && other.autoOpened) {
@@ -2097,7 +2122,7 @@ function upsertExecutionItem(turnId, item, { turnStatus = "inProgress", timing, 
   }
   updateExecutionGroup(group, turnStatus);
   if (!state.renderingConversation) syncElapsedTimer();
-  followNewContent();
+  if (!state.renderingConversation) followNewContent();
 }
 
 function renderDeferredExecutionBody(entry) {
@@ -2105,61 +2130,6 @@ function renderDeferredExecutionBody(entry) {
   entry.ansiStream = renderAnsiOutput(entry.body, entry.pendingBody);
   entry.pendingBody = null;
   entry.body.classList.remove("live-output-truncated");
-}
-
-function ensureCommandBatch(group) {
-  if (group.activeCommandBatch) return group.activeCommandBatch;
-  const root = document.createElement("details");
-  root.className = "command-batch";
-  const summary = document.createElement("summary");
-  const kind = document.createElement("strong");
-  kind.className = "command-batch-kind";
-  kind.textContent = "命令";
-  const title = document.createElement("span");
-  title.className = "command-batch-title";
-  const status = document.createElement("span");
-  status.className = "command-batch-status";
-  const caret = document.createElement("span");
-  caret.className = "command-batch-caret";
-  summary.append(kind, title, caret, status);
-  const list = document.createElement("div");
-  list.className = "command-batch-list";
-  root.append(summary, list);
-  group.list.append(root);
-  const batch = { root, title, status, list, items: new Set() };
-  group.commandBatches.add(batch);
-  group.activeCommandBatch = batch;
-  return batch;
-}
-
-function updateCommandBatch(batch) {
-  const entries = [...batch.items];
-  if (!entries.length) return;
-  const presentations = entries.map((entry) => executionPresentation(entry.item, { includeBody: false }));
-  const runningIndex = presentations.findLastIndex((presentation) => presentation.tone === "running");
-  const currentIndex = runningIndex >= 0 ? runningIndex : entries.length - 1;
-  const running = runningIndex >= 0;
-  batch.title.textContent = entries.length === 1
-    ? presentations[0].title
-    : running
-      ? `连续命令（${entries.length} 个） · ${presentations[currentIndex].title}`
-      : `连续命令（${entries.length} 个）`;
-  const batchStartedAt = entries.map((entry) => timestampMilliseconds(entry.item.startedAt)).filter(Boolean).sort((a, b) => a - b)[0] || null;
-  const startedAt = running ? timestampMilliseconds(entries[currentIndex].item.startedAt) || batchStartedAt : batchStartedAt;
-  const completedAt = running ? null : entries
-    .map((entry) => timestampMilliseconds(entry.item.completedAt)
-      || (timestampMilliseconds(entry.item.startedAt) && Number.isFinite(Number(entry.item.durationMs))
-        ? timestampMilliseconds(entry.item.startedAt) + Math.max(0, Number(entry.item.durationMs))
-        : null))
-    .filter(Boolean)
-    .sort((a, b) => b - a)[0] || null;
-  setElapsedDisplay(batch.status, running ? "执行中" : "", {
-    startedAt,
-    completedAt,
-    status: running ? "running" : "completed",
-  });
-  batch.root.classList.toggle("running", running);
-  batch.root.classList.toggle("complete", !running);
 }
 
 function ensureExecutionGroup(turnId, turnStatus, timing) {
@@ -2171,78 +2141,23 @@ function ensureExecutionGroup(turnId, turnStatus, timing) {
     return group;
   }
   ui.conversation.querySelector(".empty-state")?.remove();
-  const root = document.createElement("details");
+  const root = document.createElement("section");
   root.className = "execution-group";
-  root.open = true;
-  const summary = document.createElement("summary");
-  const marker = document.createElement("span");
-  marker.className = "execution-marker";
-  const label = document.createElement("strong");
-  label.textContent = "执行记录";
-  const count = document.createElement("span");
-  count.className = "execution-count";
-  const status = document.createElement("span");
-  status.className = "execution-group-status";
-  const caret = document.createElement("span");
-  caret.className = "execution-caret";
-  summary.append(marker, label, count, status, caret);
+  root.dataset.turnId = turnId;
   const list = document.createElement("div");
   list.className = "execution-list";
-  const timingSummary = document.createElement("section");
-  timingSummary.className = "execution-timing-summary";
-  timingSummary.hidden = true;
-  const total = document.createElement("span");
-  total.className = "execution-timing-total";
-  const totalLabel = document.createElement("span");
-  totalLabel.textContent = "总耗时";
-  const totalValue = document.createElement("strong");
-  total.append(totalLabel, totalValue);
-  const timingFields = {};
-  for (const [key, label, title] of [
-    ["command", "命令", "已记录的终端命令耗时"],
-    ["codex", "Codex ≈", "总耗时扣除已记录命令耗时后的估算值"],
-  ]) {
-    const field = document.createElement("span");
-    field.className = `execution-timing-field ${key}`;
-    field.title = title;
-    const name = document.createElement("span");
-    name.textContent = label;
-    const value = document.createElement("strong");
-    const detail = document.createElement("small");
-    field.append(name, value, detail);
-    timingSummary.append(field);
-    timingFields[key] = { root: field, name, value, detail };
-  }
-  const copyProcess = document.createElement("button");
-  copyProcess.className = "copy-text-button icon-copy-button execution-copy-button";
-  copyProcess.type = "button";
-  copyProcess.textContent = "复制过程";
-  copyProcess.title = "复制过程";
-  copyProcess.setAttribute("aria-label", "复制执行过程的 Markdown 原文");
-  copyProcess.addEventListener("click", () => copyWithFeedback(copyProcess, processMarkdownForGroup(group)));
-  timingSummary.append(copyProcess);
-  timingSummary.prepend(total);
-  root.append(summary, list, timingSummary);
+  group = { turnId, root, list, rendered: new Map(), items: new Map(), turnStatus, planValue: null, changes: [], recovered: [] };
+  group.footer = createTurnFooter({
+    id: turnId,
+    onDiff: () => openFileChangePreview({ type: "fileChange", changes: group.changes }),
+    onCopy: (button) => copyWithFeedback(button, processMarkdownForGroup(group)),
+  });
+  root.append(list, group.footer.root);
   ui.conversation.append(root);
-  group = { turnId, root, count, status, list, items: new Map(), commandBatches: new Set(), activeCommandBatch: null, plan: null, turnStatus, timingSummary, totalValue, timingFields, copyProcess };
-  mergeExecutionTiming(group, timing);
   state.executionGroups.set(turnId, group);
-  moveExistingTurnContentIntoExecutionGroup(group, ui.conversation);
+  mergeExecutionTiming(group, timing);
   updateExecutionGroup(group, turnStatus);
   return group;
-}
-
-function renderTurnPlan(turnId, plan, turnStatus = "inProgress") {
-  if (!turnId || !plan) return;
-  const group = ensureExecutionGroup(turnId, turnStatus);
-  group.activeCommandBatch = null;
-  if (!group.plan) {
-    group.plan = createTurnPlanView(plan);
-    group.list.append(group.plan.root);
-  } else {
-    updateTurnPlanView(group.plan, plan);
-  }
-  followNewContent();
 }
 
 function mergeExecutionTiming(group, timing) {
@@ -2265,122 +2180,40 @@ function mergeExecutionTiming(group, timing) {
 
 function updateExecutionGroup(group, turnStatus) {
   group.turnStatus = turnStatus || group.turnStatus;
-  const count = group.items.size;
-  group.count.textContent = `· ${count} 项`;
   const runtime = currentRuntime();
-  const runtimeMatchesTurn = isActiveThreadRuntime(runtime) && runtime.activeTurnId === group.turnId;
-  const running = runtimeMatchesTurn || isActiveThreadStatus(group.turnStatus);
+  const running = (isActiveThreadRuntime(runtime) && runtime.activeTurnId === group.turnId) || isActiveThreadStatus(group.turnStatus);
   const failed = ["failed", "error"].includes(group.turnStatus);
   const stopped = ["interrupted", "cancelled"].includes(group.turnStatus);
-  const label = running ? "进行中" : failed ? "失败" : stopped ? "已停止" : "结束";
-  setElapsedDisplay(group.status, "", group);
-  group.status.title = label;
-  group.status.setAttribute("aria-label", `${label}用时`);
-  group.root.classList.toggle("running", running);
-  group.root.classList.toggle("failed", failed);
-  group.root.classList.toggle("stopped", stopped);
-  group.root.classList.toggle("complete", !running && !failed && !stopped);
-  updateExecutionTimingSummary(group, running);
-}
-
-function updateExecutionTimingSummary(group, running) {
-  if (running) {
-    group.timingSummary.hidden = true;
-    return;
-  }
-  const summary = summarizeExecutionTiming(group, [...group.items.values()].map((entry) => entry.item));
-  if (!summary) {
-    group.totalValue.parentElement.hidden = true;
-    group.timingFields.command.root.hidden = true;
-    group.timingFields.codex.root.hidden = true;
-    group.timingSummary.hidden = false;
-    return;
-  }
-  group.totalValue.parentElement.hidden = false;
-  group.timingFields.command.root.hidden = false;
-  group.timingFields.codex.root.hidden = false;
-  group.totalValue.textContent = formatDuration(summary.totalMs);
-  group.timingFields.command.value.textContent = summary.commandUnknownCount
-    ? summary.commandMs > 0 ? `≥ ${formatDuration(summary.commandMs)}` : "未记录"
-    : formatDuration(summary.commandMs);
-  group.timingFields.command.detail.textContent = `${summary.commandCount} 项`;
-  group.timingFields.codex.value.textContent = summary.codexMs === null ? "未记录" : formatDuration(summary.codexMs);
-  group.timingFields.codex.detail.textContent = summary.codexMs === null ? "命令数据不全" : "推算";
-  group.timingFields.codex.name.textContent = summary.codexMs === null ? "Codex" : "Codex ≈";
-  group.timingSummary.hidden = false;
+  const diagnostic = running ? deriveRunDiagnostic({
+    runtime, turnMetric: state.turnMetrics.get(group.turnId),
+    activeItems: [...group.items.values()].map((entry) => entry.item),
+    approvalRequests: [...state.approvalRequests.values()].filter((request) => request.threadId === state.selectedThreadId && request.turnId === group.turnId),
+    userInputRequests: [...state.userInputRequests.values()].filter((request) => request.threadId === state.selectedThreadId && request.turnId === group.turnId),
+  }) : null;
+  const label = running ? diagnostic.label : failed ? "失败" : stopped ? "已停止" : "已完成";
+  const tone = running ? "running" : failed ? "failed" : stopped ? "stopped" : "complete";
+  for (const name of ["running", "failed", "stopped", "complete"]) group.root.classList.toggle(name, tone === name);
+  const turn = currentThread()?.turns?.find((entry) => entry.id === group.turnId);
+  const executionItems = [...group.items.values()].map((entry) => entry.item);
+  // Decide action visibility from metadata, without serializing tool output
+  // into Markdown on every streamed update. Copy still uses the full source.
+  const copyable = Boolean(group.items.size || group.recovered.length || group.planValue?.plan?.length || group.planValue?.explanation?.trim()
+    || turn?.items?.some((item) => item.type === "agentMessage" && item.phase === "commentary" && item.text?.trim()));
+  updateTurnFooter(group.footer, {
+    label, tone, running, plan: group.planValue, copyable,
+    timing: running ? null : summarizeExecutionTiming(group, [...executionItems, ...group.recovered]),
+    changes: group.changes, recovered: group.recovered,
+  });
+  setElapsedDisplay(group.footer.elapsed, "", group);
+  group.footer.elapsed.title = "本轮总耗时";
 }
 
 function completeExecutionGroup(turnId, turnStatus, timing) {
   const group = state.executionGroups.get(turnId);
   if (!group) return;
   mergeExecutionTiming(group, timing);
-  mergeTurnMetric(turnId, {
-    startedAt: group.startedAt,
-    completedAt: group.completedAt,
-    durationMs: group.durationMs,
-  });
-  const itemStatus = turnStatus === "failed" ? "failed" : ["interrupted", "cancelled"].includes(turnStatus) ? "interrupted" : "completed";
-  for (const entry of group.items.values()) {
-    const completedAt = timestampMilliseconds(entry.item.completedAt)
-      || (entry.item.durationMs === null || entry.item.durationMs === undefined ? group.completedAt : null);
-    entry.item = {
-      ...entry.item,
-      status: itemStatus,
-      ...(completedAt ? { completedAt } : {}),
-    };
-    mergeItemMetric(turnId, entry.item.id, {
-      type: entry.item.type,
-      status: entry.item.status,
-      startedAt: entry.item.startedAt,
-      completedAt: entry.item.completedAt,
-      durationMs: entry.item.durationMs,
-    });
-    const presentation = executionPresentation(entry.item);
-    setElapsedDisplay(entry.status, "", entry.item);
-    entry.status.title = presentation.status;
-    entry.status.setAttribute("aria-label", `${presentation.status}用时`);
-    entry.root.classList.remove("running");
-    entry.root.classList.toggle("failed", presentation.tone === "failed");
-    entry.root.classList.toggle("stopped", presentation.tone === "stopped");
-    entry.root.classList.toggle("complete", presentation.tone === "complete");
-    if (entry.autoOpened) {
-      entry.root.open = false;
-      entry.autoOpened = false;
-    }
-    if (entry.commandBatch) updateCommandBatch(entry.commandBatch);
-  }
   updateExecutionGroup(group, turnStatus || "completed");
-  syncElapsedTimer();
-  followNewContent();
-}
-
-function removeExecutionItem(turnId, itemId) {
-  const group = state.executionGroups.get(turnId);
-  const entry = group?.items.get(itemId);
-  if (!group || !entry) return;
-  entry.root.remove();
-  group.items.delete(itemId);
-  if (entry.commandBatch) {
-    entry.commandBatch.items.delete(entry);
-    if (!entry.commandBatch.items.size) {
-      entry.commandBatch.root.remove();
-      group.commandBatches.delete(entry.commandBatch);
-      if (group.activeCommandBatch === entry.commandBatch) group.activeCommandBatch = null;
-    } else {
-      updateCommandBatch(entry.commandBatch);
-    }
-  }
-  if (group.items.size || group.list.childElementCount) {
-    updateExecutionGroup(group, "inProgress");
-  } else {
-    group.root.remove();
-    state.executionGroups.delete(turnId);
-  }
-  followNewContent();
-}
-
-function currentExecutionItem(turnId, itemId) {
-  return state.executionGroups.get(turnId)?.items.get(itemId)?.item || null;
+  scheduleConversationRender(state.selectedThreadId);
 }
 
 function turnActivityId(turnId) {
@@ -2439,6 +2272,11 @@ function renderTurnActivityMessage(turnId, message) {
     message.action.title = silence ? "读取一次 App Server 线程状态" : "当前无需核验";
   }
   message.root.classList.toggle("stale", silence);
+  const group = state.executionGroups.get(turnId);
+  if (group) {
+    group.footer.headline.textContent = prefix;
+    group.footer.headline.title = prefix;
+  }
 }
 
 async function probeCurrentRuntime(turnId, button) {
@@ -2582,8 +2420,9 @@ function processMarkdownForGroup(group) {
   }
   items.push(...liveItems.values());
   return turnProcessMarkdown({
-    plan: state.turnMetrics.get(group.turnId)?.plan,
+    plan: storedTurn?.task?.plan || state.turnMetrics.get(group.turnId)?.plan,
     items,
+    recovered: group.recovered,
   });
 }
 
@@ -2656,12 +2495,12 @@ function addMessage(id, label, text, kind, timestamp = null) {
   const meta = root.querySelector(".message-meta");
   const body = root.querySelector(".message-body");
   const name = document.createElement("span");
+  name.className = "message-role";
   name.textContent = label;
   const time = document.createElement("time");
   time.className = "message-time";
   time.hidden = true;
   meta.replaceChildren(name, time);
-  ui.conversation.append(root);
   const entry = { root, body, kind, time, files: null, rawText: "", actions: null, copyButton: null };
   if (kind === "assistant") {
     const actions = document.createElement("div");
@@ -2686,7 +2525,7 @@ function addMessage(id, label, text, kind, timestamp = null) {
     copyButton.setAttribute("aria-label", "复制最终回答的 Markdown 原文");
     copyButton.addEventListener("click", () => copyWithFeedback(copyButton, entry.rawText));
     actions.append(pdfButton, shareButton, copyButton);
-    root.append(actions);
+    meta.append(actions);
     entry.actions = actions;
     entry.copyButton = copyButton;
   }
@@ -2772,7 +2611,6 @@ function addProgressMessage(id, text) {
   const entry = { root, body, kind: "progress", text: String(text || "") };
   body.textContent = entry.text;
   root.append(marker, body);
-  ui.conversation.append(root);
   state.messageElements.set(id, entry);
   followNewContent();
   return entry;
@@ -2784,37 +2622,8 @@ function removeRenderedMessage(id) {
   state.messageElements.delete(id);
 }
 
-function renderLiveUserMessage(item, turnId = null, guide = null) {
-  const text = userMessageText(item);
-  const clientId = userMessageClientId(item);
-  const turn = turnId ? currentThread()?.turns?.find((candidate) => candidate.id === turnId) : null;
-  const itemIndex = turn?.items?.findIndex((candidate) => candidate.id === item.id) ?? -1;
-  const isGuide = guide ?? (itemIndex > 0 && turn.items.slice(0, itemIndex).some((candidate) => candidate.type === "userMessage"));
-  const matching = [...state.messageElements].find(([, entry]) => (
-    entry.root.matches?.(".message.user, .message.guide")
-      && entry.root.dataset.turnId === turnId
-      && (entry.root.dataset.clientId === clientId || state.messageElements.get(item.id) === entry)
-  ));
-  if (matching) {
-    const [matchingId, entry] = matching;
-    if (entry.kind !== (isGuide ? "guide" : "user")) {
-      removeRenderedMessage(matchingId);
-    } else {
-      setMessageTimestamp(entry, messageTimestamp(item, turnId));
-      if (matchingId === item.id) {
-        const stored = turn?.items?.find((candidate) => candidate.id === item.id);
-        if (stored) delete stored.clientPending;
-        entry.root.removeAttribute("data-client-pending");
-        if (clientId) entry.root.dataset.clientId = clientId;
-        renderMessageContent(entry, text);
-        return entry;
-      }
-      if (item.clientPending) return entry;
-      if (turn) turn.items = turn.items.filter((candidate) => candidate.id !== matchingId);
-      removeRenderedMessage(matchingId);
-    }
-  }
-  return renderHistoryItem(item, { turnId, guide: isGuide });
+function renderLiveUserMessage() {
+  renderConversation(currentThread()?.turns || []);
 }
 
 function acceptGuideMessage(threadId, turnId, item) {
@@ -2822,6 +2631,7 @@ function acceptGuideMessage(threadId, turnId, item) {
   if (!projectId || !turnId || !item?.id) return;
   const stored = rememberThreadItem(projectId, threadId, turnId, {
     ...item,
+    inputKind: "guide",
     createdAt: timestampMilliseconds(item.createdAt) || Date.now(),
   });
   if (stored && state.selectedThreadId === threadId) renderLiveUserMessage(stored, turnId, true);
@@ -2829,6 +2639,8 @@ function acceptGuideMessage(threadId, turnId, item) {
 
 function renderMessageContent(entry, value) {
   const text = String(value || "");
+  if (entry.contentRendered && entry.rawText === text) return;
+  entry.contentRendered = true;
   entry.rawText = text;
   if (entry.actions) entry.actions.hidden = !text;
   if (entry.kind !== "assistant") {
@@ -2859,7 +2671,6 @@ function renderMessageContent(entry, value) {
     entry.visualizations = list;
   }
   if (!presentation.files.length || !currentProject()) {
-    if (entry.actions) entry.root.append(entry.actions);
     followNewContent();
     return;
   }
@@ -2869,7 +2680,6 @@ function renderMessageContent(entry, value) {
   for (const file of presentation.files) list.append(downloadCard(file));
   entry.root.append(list);
   entry.files = list;
-  if (entry.actions) entry.root.append(entry.actions);
   followNewContent();
 }
 
@@ -3407,25 +3217,39 @@ async function deleteUploadedAttachment(attachment) {
 async function createThread({ focusPrompt = true } = {}) {
   const project = currentProject();
   if (!project || project.available === false) return null;
+  const selected = findThread(project.id, state.threadSelectionTargetId) || currentThread();
   cancelThreadSelection();
-  const selected = currentThread();
   if (isLocalThreadId(selected?.id) && selected.runtime?.projectId === project.id && currentThreadIsEmpty()) {
     closeSidebar();
     if (focusPrompt) ui.prompt.focus();
     return selected;
   }
   const existingDraft = (state.threads.get(project.id) || []).find((thread) => isLocalThreadId(thread.id));
-  const thread = existingDraft || {
+  const effectiveModel = selected && selectedModelForThread(selected);
+  const inheritedThread = selected && {
+    ...selected,
+    // selected was looked up in this project's thread list; runtime updates
+    // must not decide whether its saved settings belong to the project.
+    runtime: { ...selected.runtime, projectId: project.id },
+    settings: {
+      ...selected.settings,
+      model: selected.settings?.model || effectiveModel?.id,
+      effort: selected.settings?.effort || effectiveModel?.defaultReasoningEffort || effectiveModel?.supportedReasoningEfforts?.[0]?.reasoningEffort,
+    },
+  };
+  const settings = newThreadSettings({
+    projectSettings: project.settings,
+    currentThread: inheritedThread,
+    projectId: project.id,
+    models: state.models,
+    defaultModel: localStorage.getItem(userStorageKey("default-model")) || "",
+  });
+  const thread = existingDraft ? { ...existingDraft, settings } : {
     id: nextLocalThreadId(),
     name: null,
     preview: "",
     turns: [],
-    settings: newThreadSettings({
-      projectSettings: project.settings,
-      currentThread: selected,
-      projectId: project.id,
-      models: state.models,
-    }),
+    settings,
     runtime: { projectId: project.id, activeTurnId: null, status: "idle" },
     history: { hasMore: false, before: null, totalTurns: 0 },
     queueCount: 0,
@@ -3481,17 +3305,22 @@ async function materializeThread(project, draft) {
         ...(draft.name ? { name: draft.name } : {}),
       },
     });
-    const thread = {
+    const created = {
       ...result.thread,
       turns: result.thread.turns || [],
       history: result.history || { hasMore: false, before: null, totalTurns: 0 },
       runtime: result.runtime || result.thread.runtime || { projectId: project.id, activeTurnId: null, status: "idle" },
     };
-    const threads = state.threads.get(project.id) || [];
-    const index = threads.findIndex((entry) => entry.id === draft.id);
-    if (index === -1) threads.unshift(thread);
-    else threads[index] = thread;
-    state.threads.set(project.id, threads);
+    // SSE can discover and update this identity before the HTTP response.
+    // Retire the local alias, then upsert into that same entity; never leave
+    // a second copy for list renderers to read instead of the live one.
+    const observed = findThread(project.id, created.id);
+    const thread = updateThreadInState(project.id, {
+      ...created, ...observed,
+      turns: mergeConversationTurns(created.turns, observed?.turns || []),
+    });
+    state.threads.set(project.id, state.threads.get(project.id).filter((entry) => entry.id !== draft.id));
+    includeThreadInPages(project.id, thread.id);
     state.queueSnapshots.delete(draft.id);
     const stillSelected = state.selectedProjectId === project.id && state.selectedThreadId === draft.id;
     if (stillSelected) state.selectedThreadId = thread.id;
@@ -3518,6 +3347,7 @@ async function submitPrompt(event) {
   updateComposer();
   scrollToLatest(false);
   let submittedThreadId = null;
+  let submissionAccepted = false;
   try {
     let project = currentProject();
     let thread = currentThread() || await createThread();
@@ -3551,23 +3381,30 @@ async function submitPrompt(event) {
     submittedThreadId = thread.id;
     state.submittingThreadIds.add(thread.id);
     ensureEventStream();
-    await waitForEventStream();
     await uploadComposerAttachments(project, thread, attachments);
     const text = messageWithAttachments(prompt, attachments.map((attachment) => attachment.uploaded).filter(Boolean));
     const latestRuntime = currentThread()?.runtime || {};
     const latestTurnId = isActiveThreadStatus(latestRuntime.status) ? latestRuntime.activeTurnId || null : null;
     if (mode === "guide" && latestTurnId === activeTurnId && latestTurnId) {
       const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/steer`, { method: "POST", body: { projectId: project.id, expectedTurnId: activeTurnId, text } });
+      submissionAccepted = true;
       acceptGuideMessage(thread.id, result.turnId, result.item);
       showActivity("引导已送达；正在运行的命令结束后会处理。", false);
     } else {
       const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/queue`, { method: "POST", body: { projectId: project.id, text } });
+      submissionAccepted = true;
       state.turnDiagnostics.set(thread.id, { submittedAt: Date.now(), textLength: text.length });
       applyQueueSnapshot(thread.id, result.queue, result.queueRevision);
       renderQueue();
       renderThreads();
       renderRunStrip();
-      showActivity("已发送 · 等待 Codex 开始执行…", false);
+      showActivity(state.eventStream?.readyState === EventSource.OPEN ? "已发送 · 等待 Codex 开始执行…" : "已发送 · 实时更新正在重连…", false);
+    }
+    if (state.eventStream?.readyState !== EventSource.OPEN) {
+      scheduleDisconnectedRefresh();
+      // HTTP acknowledgement is authoritative. Recover anything produced
+      // before the stream reconnects without submitting the prompt again.
+      void reconcileInterruptedThread(thread.id).catch((error) => showActivity(`任务已发送，读取执行状态失败：${error.message}`, true));
     }
     const sentAttachments = new Set(attachments);
     state.composerAttachments = state.composerAttachments.filter((attachment) => !sentAttachments.has(attachment));
@@ -3575,7 +3412,12 @@ async function submitPrompt(event) {
     renderComposerAttachments();
     resizePrompt();
   } catch (error) {
-    showError(error);
+    // Preserve the unsent prompt without overwriting text typed meanwhile.
+    if (!submissionAccepted) {
+      ui.prompt.value = ui.prompt.value ? `${sourcePrompt}\n${ui.prompt.value}` : sourcePrompt;
+      resizePrompt();
+      showError(error);
+    } else showActivity(`任务已发送，更新界面失败：${error.message}`, true);
   } finally {
     if (submittedThreadId) state.submittingThreadIds.delete(submittedThreadId);
     state.submittingMessage = false;
@@ -3689,7 +3531,6 @@ function applyThreadGoal(threadId, goal) {
 
 async function patchThreadGoal(project, thread, patch) {
   ensureEventStream();
-  await waitForEventStream();
   const result = await api(`/api/threads/${encodeURIComponent(thread.id)}/goal`, {
     method: "PATCH",
     body: { projectId: project.id, ...patch },
@@ -4136,6 +3977,26 @@ function markEventStreamActivity(stream) {
   if (state.eventStream === stream) state.eventStreamLastActivityAt = Date.now();
 }
 
+function scheduleDisconnectedRefresh() {
+  if (state.eventStreamRecoveryTimer || state.eventStreamRecoveryRunning || !state.user || document.hidden) return;
+  state.eventStreamRecoveryTimer = setTimeout(async () => {
+    state.eventStreamRecoveryTimer = null;
+    if (!state.user || document.hidden || state.eventStream?.readyState === EventSource.OPEN) return;
+    state.eventStreamRecoveryRunning = true;
+    try {
+      const threadId = state.selectedThreadId;
+      if (threadId && !isLocalThreadId(threadId) && !state.threadSelectionController && !state.threadSelectionTargetId) {
+        await reconcileInterruptedThread(threadId);
+      }
+    } catch {
+      // Keep retrying reads while disconnected; never replay a submitted task.
+    } finally {
+      state.eventStreamRecoveryRunning = false;
+      if (state.eventStream?.readyState !== EventSource.OPEN) scheduleDisconnectedRefresh();
+    }
+  }, 2000);
+}
+
 function stopEventStream({ interrupted = false } = {}) {
   const stream = state.eventStream;
   if (interrupted) {
@@ -4206,7 +4067,10 @@ function openEventStream() {
   stream.addEventListener("open", () => {
     if (state.eventStream !== stream) return;
     markEventStreamActivity(stream);
+    clearTimeout(state.eventStreamRecoveryTimer);
+    state.eventStreamRecoveryTimer = null;
     profileMark("eventStream", { event: "open" });
+    if (state.eventStreamInterrupted) void loadAccountRateLimits();
     reconcileEventStreamInterruption().catch(showError);
   });
   stream.addEventListener("error", () => {
@@ -4216,6 +4080,7 @@ function openEventStream() {
     state.eventStreamInterrupted = true;
     stream.close();
     state.eventStream = null;
+    scheduleDisconnectedRefresh();
     state.eventStreamReconnectTimer = setTimeout(() => {
       if (state.user && !document.hidden) ensureEventStream();
     }, 2000);
@@ -4226,10 +4091,14 @@ function openEventStream() {
     markEventStreamActivity(stream);
     const data = safeJson(event.data);
     if (data?.epoch && data.epoch !== state.eventEpoch) {
-      if (state.eventEpoch) invalidateCachedThreadHistories();
+      if (state.eventEpoch) invalidateCachedThreadHistories({ resetVersions: true });
       state.eventEpoch = data.epoch;
       state.eventRevisions.clear();
       state.eventDetailRevisions.clear();
+    }
+    if (data?.rateLimits) {
+      applyAccountRateLimitsSnapshot(data.rateLimits);
+      return;
     }
     if (data?.rateLimitsChanged) {
       scheduleAccountRateLimitsRefresh();
@@ -4253,28 +4122,12 @@ function openEventStream() {
   return stream;
 }
 
-function invalidateCachedThreadHistories() {
+function invalidateCachedThreadHistories({ resetVersions = false } = {}) {
   for (const [projectId, threads] of state.threads) {
     state.threads.set(projectId, threads.map((thread) => (
-      isLocalThreadId(thread.id) ? thread : invalidateThreadHistory(thread)
+      isLocalThreadId(thread.id) ? thread : invalidateThreadHistory(resetVersions ? { ...thread, turns: resetConversationVersions(thread.turns) } : thread)
     )));
   }
-}
-
-function waitForEventStream() {
-  const stream = openEventStream();
-  if (stream.readyState === EventSource.OPEN) return Promise.resolve();
-  return new Promise((resolveReady, rejectReady) => {
-    const finish = (callback, value) => {
-      stream.removeEventListener("open", handleOpen);
-      stream.removeEventListener("error", handleError);
-      callback(value);
-    };
-    const handleOpen = () => finish(resolveReady);
-    const handleError = () => finish(rejectReady, new Error("实时连接未建立，任务没有发送。"));
-    stream.addEventListener("open", handleOpen);
-    stream.addEventListener("error", handleError);
-  });
 }
 
 function ensureEventStream() {
@@ -4297,7 +4150,8 @@ function handleCodexEventImpl(threadId, event) {
   if (!projectId || !state.projects.some((project) => project.id === projectId)) return;
   const previousRevision = state.eventRevisions.get(threadId) || 0;
   if (Number.isInteger(event.revision)) {
-    if (event.revision < previousRevision) return;
+    if (event.revision < previousRevision || (event.revision === previousRevision && state.eventRevisions.has(threadId)
+      && !["workspace/state", "workspace/summary"].includes(event.method))) return;
     state.eventRevisions.set(threadId, event.revision);
   }
   if (event.method === "thread/deleted") {
@@ -4311,11 +4165,7 @@ function handleCodexEventImpl(threadId, event) {
   let thread = findThread(projectId, threadId);
   if (!thread) {
     thread = updateThreadInState(projectId, { id: threadId, name: params.name || null });
-    const projectPage = state.threadPages.get(projectId);
-    for (const page of [projectPage, state.globalThreadPage]) {
-      if (!page || page.order !== state.sidebarOrder) continue;
-      Object.assign(page, mergeThreadListPage(page, [threadId, ...page.ids].slice(0, 50), page.nextCursor, { order: page.order }));
-    }
+    includeThreadInPages(projectId, threadId);
   }
   if (event.method === "workspace/thread") {
     updateThreadInState(projectId, { ...thread, name: params.name || thread.name, runtime: params.runtime });
@@ -4324,6 +4174,21 @@ function handleCodexEventImpl(threadId, event) {
     return;
   }
   const previousRuntime = thread.runtime;
+  // All transcript changes pass through the same model, whether delivered as
+  // a versioned server projection or adapted from an older service event.
+  const beforeTurns = thread.turns || [];
+  if (params.conversation && conversationNeedsSnapshot(beforeTurns, params.conversation)
+    && state.selectedThreadId === threadId && !state.recoveringConversation) {
+    state.recoveringConversation = true;
+    void reconcileInterruptedThread(threadId).catch(showError).finally(() => { state.recoveringConversation = false; });
+  }
+  const turns = params.conversation
+    ? mergeConversationTurns(beforeTurns, params.conversation.turns || [])
+    : reduceConversationEvent(beforeTurns, event, event.revision || 0);
+  if (turns !== beforeTurns) {
+    thread = updateThreadInState(projectId, { ...thread, turns, historyLive: true });
+    if (state.selectedThreadId === threadId) scheduleConversationRender(threadId);
+  }
   if (event.method === "workspace/summary") {
     thread = updateThreadInState(projectId, {
       ...thread, ...(params.name ? { name: params.name } : {}), runtime: params.runtime,
@@ -4365,7 +4230,7 @@ function handleCodexEventImpl(threadId, event) {
   if (event.method === "item/tool/requestUserInput") {
     const request = { ...params, requestId: String(params.requestId) };
     state.userInputRequests.set(request.requestId, request);
-    if (state.selectedThreadId === threadId) renderUserInputRequest(request);
+    if (state.selectedThreadId === threadId) renderPendingRequests();
     if (request.isBlocking !== false) clearTurnActivity(params.turnId);
     return;
   }
@@ -4377,10 +4242,11 @@ function handleCodexEventImpl(threadId, event) {
     "item/commandExecution/requestApproval",
     "item/fileChange/requestApproval",
     "item/permissions/requestApproval",
+    "codexlan/browser/requestApproval",
   ].includes(event.method)) {
     const request = { ...params, method: event.method, requestId: String(params.requestId) };
     state.approvalRequests.set(request.requestId, request);
-    if (state.selectedThreadId === threadId) renderApprovalRequest(request);
+    if (state.selectedThreadId === threadId) renderPendingRequests();
     clearTurnActivity(params.turnId);
     return;
   }
@@ -4398,39 +4264,8 @@ function handleCodexEventImpl(threadId, event) {
     }
     return;
   }
-  if (event.method === "item/commandExecution/outputDelta") {
-    if (params.turnId) clearTurnActivity(params.turnId);
-    const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[params.itemId] || {};
-    mergeItemMetric(params.turnId, params.itemId, {
-      type: "commandExecution",
-      status: "inProgress",
-      startedAt: timestampMilliseconds(previousMetric.startedAt) || timestampMilliseconds(params.startedAtMs),
-    });
-    if (params.turnId && params.itemId) {
-      const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
-        || currentExecutionItem(params.turnId, params.itemId) || {
-        id: params.itemId,
-        type: "commandExecution",
-        aggregatedOutput: "",
-        status: "inProgress",
-      };
-      const delta = typeof params.delta === "string" ? params.delta : String(params.delta || "");
-      const output = commandOutputTail(params.replaceOutput ? "" : current.aggregatedOutput, delta);
-      const item = rememberThreadItem(projectId, threadId, params.turnId, {
-        ...current,
-        aggregatedOutput: output.text,
-        outputTruncated: current.outputTruncated || output.truncated || params.replaceOutput,
-        status: "inProgress",
-      });
-      if (state.selectedThreadId === threadId) {
-        upsertExecutionItem(params.turnId, item, { outputDelta: params.replaceOutput ? null : delta });
-      }
-    }
-    return;
-  }
   if (event.method === "thread/tokenUsage/updated") {
     rememberThreadTokenUsage(threadId, params.tokenUsage);
-    scheduleAccountRateLimitsRefresh();
     return;
   }
   if (event.method === "workspace/state") {
@@ -4444,27 +4279,13 @@ function handleCodexEventImpl(threadId, event) {
     for (const itemId of params.answeredAsyncUserInputIds || []) markAsyncQuestionAnswered(threadId, itemId);
     syncUserInputRequests(threadId, params.userInputRequests);
     syncApprovalRequests(threadId, params.approvalRequests);
-    for (const item of params.activeItems || []) {
-      const turnId = item.turnId || runtime.activeTurnId;
-      if (!turnId || !item.id) continue;
-      mergeItemMetric(turnId, item.id, item);
-      const stored = rememberThreadItem(projectId, threadId, turnId, { ...item, status: item.status || "inProgress" });
-      if (state.selectedThreadId === threadId) upsertExecutionItem(turnId, stored);
-    }
-    for (const item of params.liveItems || []) {
-      const turnId = runtime?.activeTurnId;
-      if (!turnId || !item.id) continue;
-      const previous = rememberedThreadItem(projectId, threadId, turnId, item.id);
-      if (previous?.completedAt && !item.completedAt) continue;
-      rememberThreadItem(projectId, threadId, turnId, item);
-    }
     if (state.selectedThreadId === threadId) {
       if (changed) renderQueue();
-      if (runtime?.activeTurnId && params.activePlan) renderTurnPlan(runtime.activeTurnId, params.activePlan);
+
       renderGoalButton();
       updateComposer();
       renderThreadActions();
-      if (params.liveItems?.length) renderCurrentThread();
+      renderConversation(currentThread()?.turns || []);
       if (previousRuntime?.activeTurnId && previousRuntime.activeTurnId !== runtime?.activeTurnId) {
         void selectThread(threadId, { closeNavigation: false, preserveFollowLatest: true, mergeHistory: true }).catch(showError);
       }
@@ -4484,10 +4305,10 @@ function handleCodexEventImpl(threadId, event) {
       diagnostic.turnStartedAt = Date.now();
       showActivity(`已开始执行 · 等待首字（排队 ${Math.max(0, diagnostic.turnStartedAt - diagnostic.submittedAt)} ms）`, false);
     }
-    rememberThreadTurn(projectId, threadId, params.turn?.id, { ...params.turn, status: params.turn?.status || "inProgress" });
+
     updateThreadInState(projectId, { ...thread, runtime });
     if (state.selectedThreadId === threadId) {
-      appendConversationDate(params.turn?.id, startedAt);
+
       updateComposer();
       renderQueue();
     }
@@ -4534,10 +4355,7 @@ function handleCodexEventImpl(threadId, event) {
       completedAt,
       durationMs: params.turn?.durationMs,
     });
-    rememberThreadTurn(projectId, threadId, params.turn?.id, {
-      ...params.turn,
-      status: params.turn?.status || "completed",
-    });
+
     updateThreadInState(projectId, { ...thread, runtime: params.runtime });
     if (state.selectedThreadId === threadId) {
       state.compactingThreads.delete(threadId);
@@ -4563,167 +4381,28 @@ function handleCodexEventImpl(threadId, event) {
     if (state.selectedThreadId === threadId) showActivity(params.message || "队列任务启动失败。", true);
     return;
   }
-  if (event.method === "turn/plan/updated") {
-    clearTurnActivity(params.turnId);
-    mergeTurnMetric(params.turnId, { plan: { plan: params.plan, explanation: params.explanation } });
-    if (state.selectedThreadId === threadId) renderTurnPlan(params.turnId, { plan: params.plan, explanation: params.explanation });
-    return;
-  }
-  if (event.method === "turn/diff/updated") {
-    const changes = unifiedDiffChanges(params.diff);
-    if (!changes.length || !params.turnId) return;
-    // A turn diff is a turn-level snapshot, not an item/fileChange lifecycle event.
-    // Keep it separate from real fileChange items so its snapshot cannot own their timer.
-    const itemId = `${params.turnId}:diff`;
-    const current = rememberedThreadItem(projectId, threadId, params.turnId, itemId)
-      || currentExecutionItem(params.turnId, itemId);
-    const snapshotAt = timestampMilliseconds(params.updatedAtMs)
-      || timestampMilliseconds(params.serverReceivedAt)
-      || Date.now();
-    const item = {
-      ...(current || {}),
-      id: itemId,
-      type: "fileChange",
-      changes,
-      status: "completed",
-      completedAt: snapshotAt,
-    };
-    mergeItemMetric(params.turnId, itemId, item);
-    rememberThreadItem(projectId, threadId, params.turnId, item);
-    if (state.selectedThreadId === threadId) upsertExecutionItem(params.turnId, item);
-    return;
-  }
-  if (event.method.startsWith("item/") && params.turnId) clearTurnActivity(params.turnId);
-  if (event.method === "item/started") {
-    const item = params.item || {};
-    if (deferQueuedUserMessage(threadId, params.turnId, item)) return;
-    if (item.type === "contextCompaction") {
-      state.compactingThreads.add(threadId);
+  if (event.method.startsWith("item/") || event.method.startsWith("turn/")) {
+    const turnId = params.turnId || params.turn?.id;
+    if (turnId) clearTurnActivity(turnId);
+    if (event.method === "item/agentMessage/delta") {
+      const diagnostic = state.turnDiagnostics.get(turnId);
+      if (diagnostic && !diagnostic.firstDeltaAt) {
+        diagnostic.firstDeltaAt = Date.now();
+        const transportMs = Number.isFinite(Number(params.serverReceivedAt)) ? Math.max(0, diagnostic.firstDeltaAt - Number(params.serverReceivedAt)) : null;
+        showActivity(`已收到首字 · 发送到首字 ${Math.max(0, diagnostic.firstDeltaAt - diagnostic.submittedAt)} ms${transportMs === null ? "" : `，服务端到界面 ${transportMs} ms`}`, false);
+      }
+    }
+    if (event.method === "item/completed" && params.item?.type === "userMessage") {
+      markAsyncQuestionAnswered(threadId, asyncAnswerRequestId(userMessageText(params.item)));
+    }
+    if (params.item?.type === "contextCompaction") {
+      if (event.method === "item/started") state.compactingThreads.add(threadId);
+      else state.compactingThreads.delete(threadId);
       if (state.selectedThreadId === threadId) renderThreadActions();
     }
-    const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[item.id] || {};
-    mergeItemMetric(params.turnId, item.id, {
-      type: item.type,
-      status: item.status || "inProgress",
-      startedAt: timestampMilliseconds(params.startedAtMs) || timestampMilliseconds(item.startedAt) || timestampMilliseconds(previousMetric.startedAt),
-    });
-    rememberThreadItem(projectId, threadId, params.turnId, {
-      ...item,
-      status: item.status || "inProgress",
-      startedAt: timestampMilliseconds(params.startedAtMs) || timestampMilliseconds(item.startedAt),
-    });
-  } else if (event.method === "item/completed") {
-    const item = params.item || {};
-    if (item.type === "userMessage") {
-      const text = (item.content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
-      markAsyncQuestionAnswered(threadId, asyncAnswerRequestId(text));
-    }
-    if (deferQueuedUserMessage(threadId, params.turnId, item)) return;
-    if (item.type === "contextCompaction") {
-      state.compactingThreads.delete(threadId);
-      renderThreadActions();
-    }
-    const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[item.id] || {};
-    mergeItemMetric(params.turnId, item.id, {
-      type: item.type,
-      status: terminalExecutionStatus(item.status),
-      startedAt: timestampMilliseconds(item.startedAt) || timestampMilliseconds(previousMetric.startedAt),
-      completedAt: timestampMilliseconds(params.completedAtMs) || timestampMilliseconds(item.completedAt),
-      durationMs: item.durationMs,
-    });
-    rememberThreadItem(projectId, threadId, params.turnId, {
-      ...item,
-      status: terminalExecutionStatus(item.status),
-      completedAt: timestampMilliseconds(params.completedAtMs) || timestampMilliseconds(item.completedAt),
-    });
-  } else if (event.method === "item/fileChange/patchUpdated") {
-    const previousMetric = state.turnMetrics.get(params.turnId)?.items?.[params.itemId] || {};
-    mergeItemMetric(params.turnId, params.itemId, {
-      type: "fileChange",
-      status: "inProgress",
-      startedAt: timestampMilliseconds(previousMetric.startedAt) || timestampMilliseconds(params.startedAtMs),
-    });
+    return;
   }
-  if (event.method === "item/agentMessage/delta") {
-    const diagnostic = state.turnDiagnostics.get(params.turnId);
-    if (diagnostic && !diagnostic.firstDeltaAt) {
-      diagnostic.firstDeltaAt = Date.now();
-      const transportMs = Number.isFinite(Number(params.serverReceivedAt))
-        ? Math.max(0, diagnostic.firstDeltaAt - Number(params.serverReceivedAt)) : null;
-      const transportText = transportMs === null ? "" : `，服务端到界面 ${transportMs} ms`;
-      showActivity(`已收到首字 · 发送到首字 ${Math.max(0, diagnostic.firstDeltaAt - diagnostic.submittedAt)} ms${transportText}`, false);
-    }
-    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
-      || { id: params.itemId, type: "agentMessage", phase: "commentary", text: "", status: "inProgress" };
-    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, text: `${current.text || ""}${params.delta || ""}` });
-    if (state.selectedThreadId !== threadId) return;
-    const message = addProgressMessage(params.itemId, item.text);
-    placeTurnContent(params.turnId, message);
-  } else if (event.method === "item/reasoning/summaryTextDelta") {
-    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
-      || currentExecutionItem(params.turnId, params.itemId)
-      || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
-    const summary = [...(current.summary || [])];
-    summary[params.summaryIndex || 0] = `${summary[params.summaryIndex || 0] || ""}${params.delta || ""}`;
-    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, summary, status: "inProgress" });
-    if (state.selectedThreadId !== threadId) return;
-    upsertExecutionItem(params.turnId, item);
-  } else if (event.method === "item/reasoning/summaryPartAdded") {
-    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
-      || currentExecutionItem(params.turnId, params.itemId)
-      || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
-    const summary = [...(current.summary || [])];
-    if (summary[params.summaryIndex] === undefined) summary[params.summaryIndex] = "";
-    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, summary, status: "inProgress" });
-    if (state.selectedThreadId !== threadId) return;
-    upsertExecutionItem(params.turnId, item);
-  } else if (event.method === "item/reasoning/textDelta") {
-    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
-      || currentExecutionItem(params.turnId, params.itemId)
-      || { id: params.itemId, type: "reasoning", summary: [], content: [], status: "inProgress" };
-    const content = [...(current.content || [])];
-    content[params.contentIndex || 0] = `${content[params.contentIndex || 0] || ""}${params.delta || ""}`;
-    const item = rememberThreadItem(projectId, threadId, params.turnId, { ...current, content, status: "inProgress" });
-    if (state.selectedThreadId !== threadId) return;
-    upsertExecutionItem(params.turnId, item);
-  } else if (event.method === "item/fileChange/patchUpdated") {
-    const current = rememberedThreadItem(projectId, threadId, params.turnId, params.itemId)
-      || currentExecutionItem(params.turnId, params.itemId);
-    const item = fileChangeUpdateItem(current, params);
-    mergeItemMetric(params.turnId, params.itemId, item);
-    rememberThreadItem(projectId, threadId, params.turnId, item);
-    if (state.selectedThreadId !== threadId) return;
-    upsertExecutionItem(params.turnId, item);
-  } else if (event.method === "item/completed") {
-    const item = params.item || {};
-    const timing = state.turnMetrics.get(params.turnId)?.items?.[item.id] || {};
-    if (state.selectedThreadId !== threadId) return;
-    if (item.type === "userMessage") {
-      renderLiveUserMessage(item, params.turnId);
-    } else if ((item.type === "agentMessage" && item.phase !== "commentary") || item.type === "plan") {
-      removeExecutionItem(params.turnId, item.id);
-      renderHistoryItem(item, { turnId: params.turnId });
-    } else if (item.type === "agentMessage") {
-      renderHistoryItem(item, { turnId: params.turnId });
-    } else if (isExecutionItem(item)) {
-      upsertExecutionItem(params.turnId, { ...item, ...timing, status: terminalExecutionStatus(item.status) });
-    }
-  } else if (event.method === "item/started") {
-    const timing = state.turnMetrics.get(params.turnId)?.items?.[params.item?.id] || {};
-    if (state.selectedThreadId !== threadId) return;
-    if (params.item?.type === "userMessage") renderLiveUserMessage(params.item, params.turnId);
-    else if (isExecutionItem(params.item)) upsertExecutionItem(params.turnId, { ...params.item, ...timing, status: params.item?.status || "inProgress" });
-  } else if (event.method === "error") {
-    if (state.selectedThreadId === threadId) showActivity(params.error?.message || params.message || "Codex 返回错误。", true);
-  }
-  if (state.selectedThreadId !== threadId) return;
-  const completedFinalMessage = event.method === "item/completed"
-    && params.item?.type === "agentMessage"
-    && params.item?.delivery !== "async"
-    && params.item?.phase !== "commentary";
-  if (event.method === "item/completed" && !completedFinalMessage && currentRuntime().activeTurnId === params.turnId) {
-    scheduleTurnActivity(params.turnId);
-  }
+  if (event.method === "error" && state.selectedThreadId === threadId) showActivity(params.error?.message || params.message || "Codex 返回错误。", true);
 }
 
 async function reconcileCompletedThread(projectId, threadId) {
@@ -4765,6 +4444,13 @@ function updateThreadInState(projectId, updated) {
   return stored;
 }
 
+function includeThreadInPages(projectId, threadId) {
+  for (const page of [state.threadPages.get(projectId), state.globalThreadPage]) {
+    if (!page || page.order !== state.sidebarOrder) continue;
+    page.ids = [threadId, ...page.ids.filter((id) => id !== threadId)];
+  }
+}
+
 function applyThreadReplacement(projectId, oldThreadId, params) {
   const replacement = params.replacementThread;
   if (!replacement?.id) return;
@@ -4787,49 +4473,12 @@ function applyThreadReplacement(projectId, oldThreadId, params) {
   }
 }
 
-function rememberThreadTurn(projectId, threadId, turnId, patch = {}) {
-  if (!turnId) return null;
+function rememberThreadItem(projectId, threadId, turnId, item) {
+  if (!item?.id || !turnId) return null;
   const thread = findThread(projectId, threadId);
   if (!thread) return null;
-  if (!Array.isArray(thread.turns)) thread.turns = [];
-  let turn = thread.turns.find((entry) => entry.id === turnId);
-  if (!turn) {
-    turn = { id: turnId, status: "inProgress", items: [] };
-    thread.turns.push(turn);
-  }
-  const existingItems = Array.isArray(turn.items) ? turn.items : [];
-  const { items: incomingItems, ...fields } = patch;
-  Object.assign(turn, fields);
-  turn.items = Array.isArray(incomingItems)
-    ? mergeTurnItems(existingItems, incomingItems)
-    : existingItems;
-  return turn;
-}
-
-function rememberThreadItem(projectId, threadId, turnId, item) {
-  if (!item?.id) return null;
-  const turn = rememberThreadTurn(projectId, threadId, turnId);
-  if (!turn) return null;
-  if (item.type === "userMessage") {
-    turn.items = mergeTurnItems(turn.items, [item]);
-    const clientId = userMessageClientId(item);
-    return turn.items.find((entry) => entry.id === item.id
-      || (clientId && userMessageClientId(entry) === clientId)) || null;
-  }
-  let stored = turn.items.find((entry) => entry.id === item.id);
-  if (!stored) {
-    stored = { ...item };
-    turn.items.push(stored);
-  } else {
-    Object.assign(stored, item);
-  }
-  return stored;
-}
-
-function rememberedThreadItem(projectId, threadId, turnId, itemId) {
-  return findThread(projectId, threadId)?.turns
-    ?.find((turn) => turn.id === turnId)?.items
-    ?.find((item) => item.id === itemId) || null;
+  thread.turns = mergeConversationTurns(thread.turns || [], [{ id: turnId, items: [item] }]);
+  return thread.turns.find((turn) => turn.id === turnId)?.items.find((entry) => entry.id === item.id) || null;
 }
 
 function applyQueueSnapshot(threadId, queue, queueRevision) {
@@ -4840,7 +4489,7 @@ function applyQueueSnapshot(threadId, queue, queueRevision) {
   }
   const next = Array.isArray(queue) ? queue : [];
   state.queueSnapshots.set(threadId, { queue: next, revision });
-  flushPendingQueueMessages(threadId);
+  if (state.selectedThreadId === threadId) scheduleConversationRender(threadId);
   if (state.selectedThreadId === threadId && state.editingQueueItemId && !next.some((item) => item.id === state.editingQueueItemId)) {
     state.editingQueueItemId = null;
     if (ui.queueEditDialog.open) ui.queueEditDialog.close();
@@ -4910,10 +4559,10 @@ async function refreshWorkspace({ quiet = false } = {}) {
       applyCodexStatus(status);
       await loadProjects();
       if (state.codexReady) {
+        void loadAccountRateLimits();
         await Promise.all([
           loadModels(),
           loadCollaborationModes(),
-          loadAccountRateLimits(),
           refreshAllThreads({ foregroundProjectId: state.selectedProjectId }),
         ]);
       }
@@ -5065,6 +4714,14 @@ function initializeLocalPreferences() {
 
 function renderLocalPreferences() {
   ui.sendShortcut.value = state.sendShortcut;
+  const defaultModel = localStorage.getItem(userStorageKey("default-model")) || "";
+  ui.defaultModel.replaceChildren(new Option("自动", "", false, !defaultModel));
+  if (defaultModel && !state.models.some((model) => model.id === defaultModel)) {
+    ui.defaultModel.append(new Option(`${defaultModel}（当前不可用）`, defaultModel, false, true));
+  }
+  for (const model of state.models) {
+    ui.defaultModel.append(new Option(compactModelLabel(model), model.id, false, model.id === defaultModel));
+  }
   ui.completionNotifications.checked = state.completionNotificationsEnabled;
   ui.changeConnectionAddress.hidden = !window.CodexAndroid?.openConnectionSettings;
   const systemNotificationsReady = "Notification" in window && Notification.permission === "granted";
@@ -5344,7 +5001,7 @@ function applyCodexStatus(status) {
         : error || (codexState === "failed" ? "本机 Codex 连接失败" : "本机 Codex 连接中断");
   if (codexState !== "ready") {
     state.approvalRequests.clear();
-    for (const card of ui.conversation.querySelectorAll(".approval-card")) card.remove();
+    renderPendingRequests();
   }
   setServerStatus(codexState === "ready", text);
   if (state.codexStatusTimer) clearTimeout(state.codexStatusTimer);
@@ -5634,9 +5291,6 @@ function forgetClientThread(threadId) {
     state.asyncInputCards.delete(key);
     setAsyncQuestionDeferred(localStorage, userStorageKey("deferred-async-questions"), key, false);
   }
-  for (const [itemId, pending] of state.pendingQueueMessages) {
-    if (pending.threadId === threadId) state.pendingQueueMessages.delete(itemId);
-  }
   state.queueSnapshots.delete(threadId);
   state.threadTokenUsage.delete(threadId);
   for (const [requestId, request] of state.userInputRequests) {
@@ -5875,6 +5529,7 @@ ui.visualizationDialog.addEventListener("click", (event) => {
 ui.conversation.addEventListener("scroll", updateJumpLatest, { passive: true });
 ui.summary.addEventListener("change", () => saveSettings({ summary: ui.summary.value }));
 ui.composerModel.addEventListener("change", () => saveSettings({ model: ui.composerModel.value }));
+ui.defaultModel.addEventListener("change", () => localStorage.setItem(userStorageKey("default-model"), ui.defaultModel.value));
 ui.composerEffort.addEventListener("change", () => saveSettings({ effort: ui.composerEffort.value }));
 ui.composerTier.addEventListener("change", () => saveSettings({ serviceTier: ui.composerTier.value }));
 ui.copyConnectionAddress.addEventListener("click", () => copyWithFeedback(ui.copyConnectionAddress, location.origin));
