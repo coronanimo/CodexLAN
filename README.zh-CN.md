@@ -51,7 +51,7 @@ CodexLAN 不适合作为公开 SaaS，也不适合不互信的租户。网页账
 
 ## 运行要求
 
-- 服务端：Windows 10 或 11、Node.js 20+、已安装并登录的 Codex CLI。
+- 服务端：Windows 10 或 11、已安装并登录的 Codex CLI。源码构建使用 Node.js 24，构建后的发行包支持 Node.js 20+。
 - 客户端：当前版本的浏览器。
 - Android 客户端（可选）：Android 8.0+。
 
@@ -63,6 +63,7 @@ CodexLAN 不适合作为公开 SaaS，也不适合不互信的租户。网页账
 codex login
 codex login status
 npm ci
+npm run web:build
 Copy-Item config\codexlan.example.json config\codexlan.json
 npm run service:start
 ```
@@ -125,7 +126,8 @@ CodexLAN 以启动服务的 Windows 账号执行命令并访问文件。项目�
 ## 仓库结构
 
 - `server/`：HTTP 服务、App Server 客户端、持久化、配置和守护进程。
-- `public/`：共享的浏览器界面及桌面、移动端布局。
+- `web/`：共享 React/TypeScript 工作台，静态构建位于 `dist/web/`。
+- `shared/`、`products/`、`server/agents/`：中立合约、产品清单与代理适配器。见[当前架构图](docs/ARCHITECTURE.md)。
 - `android/`：可选的 Android WebView 客户端。
 - `test/`：自动化测试和模拟 App Server。
 - `docs/`：架构、部署、开发、排错、安全和发布文档。
@@ -134,6 +136,7 @@ CodexLAN 以启动服务的 Windows 账号执行命令并访问文件。项目�
 
 ```powershell
 npm ci
+npm run web:build
 npm run check
 npm run dev
 ```

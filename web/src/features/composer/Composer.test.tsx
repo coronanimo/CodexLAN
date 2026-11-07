@@ -10,6 +10,10 @@ import { TimelineRow } from "../conversation/ui/TimelineRow";
 import { createConversationFixture } from "../../dev/fixtures";
 import { Composer } from "./Composer";
 import { Workbench } from "../../app/Workbench";
+import { ActionContext } from "../../app/ActionContext";
+import type { ActionPort } from "../../app/ActionContext";
+import { Attachments } from "../../app/controllers/Attachments";
+import type { ReadClient } from "@lan/read-api";
 
 afterEach(cleanup);
 
@@ -60,4 +64,20 @@ describe("editor and history update boundaries", () => {
     view.rerender(show("b"));
     expect(screen.getByRole<HTMLTextAreaElement>("textbox").value).toBe("draft b");
   });
+});
+
+it("preserves drafts and uploaded attachments after failure, then only clears the accepted submission", async () => {
+  const upload = vi.fn().mockResolvedValue({ id: "opaque-file", name: "image.png", size: 4 });
+  const attachments = new Attachments({ upload } as unknown as ReadClient), drafts = new Map<string, string>();
+  const execute = vi.fn().mockRejectedValueOnce(new Error("delivery failed")).mockResolvedValue({});
+  const actions = { execute, attachments, drafts, conversationId: "a", selection: { conversationId: "a", projectId: "p", agentInstanceId: "agent" }, capabilities: { attachments: true } } as unknown as ActionPort;
+  attachments.add("a", [new File(["data"], "image.png", { type: "image/png" })]);
+  render(<Provider store={createAppStore()}><ActionContext.Provider value={actions}><Composer conversationId="a" drafts={drafts} /></ActionContext.Provider></Provider>);
+  const input = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "草稿" }); fireEvent.change(input, { target: { value: "keep this draft" } });
+  fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, isComposing: true }); expect(execute).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "发送" })); await screen.findByText("delivery failed");
+  expect(input.value).toBe("keep this draft"); expect(attachments.get("a")[0]?.uploaded?.id).toBe("opaque-file");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "发送" })); });
+  expect(execute).toHaveBeenLastCalledWith({ type: "submit", text: "keep this draft", attachments: ["opaque-file"] });
+  expect(upload).toHaveBeenCalledTimes(1); expect(input.value).toBe(""); expect(attachments.get("a")).toEqual([]); attachments.close();
 });

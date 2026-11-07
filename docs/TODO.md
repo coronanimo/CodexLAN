@@ -2,6 +2,8 @@
 
 This file tracks unfinished project-level work and the latest acceptance checkpoint.
 
+React replacement checkpoint (2026-11-07): see [current architecture](ARCHITECTURE.md) and [migration evidence](REACT-MIGRATION.md). The dated sections below describe the retired implementation; their old source paths, commands and screenshots are historical evidence, not current validation entry points. The current Node and web suites validate the replacement.
+
 ## 账号额度同步与首屏解耦（2026-11-04）
 
 - 已实现：token 用量只更新上下文窗口；额度通知按 `limitId` 直接合入缓存并推送界面，不再先失效缓存再查询。保留首次/手动/重连兜底读取，兼容旧服务的无数据通知；并发读取合并，旧响应或旧请求失败不会覆盖较新的通知。
@@ -163,7 +165,7 @@ node --test test/conversation-presentation.test.mjs test/async-user-input.test.m
 
 ## Product
 
-- Finish splitting `public/app.js` into the existing workspace, layout, composer, plan, desktop, and mobile modules. Conversation rendering, live execution, dispatch, and account settings still need clear owners.
+- Implement verified Antigravity, Pi and Claude Code adapters against the shared LAN contracts, including persistent native/LAN identity mappings.
 - Add a shared slash-command picker for Plan, Goal, and context compaction.
 - Improve keyboard navigation, screen-reader labels, and mobile-browser regression coverage.
 

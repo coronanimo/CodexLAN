@@ -23,7 +23,7 @@
     "web:watch": "vite build --watch --config web/vite.config.ts",
     "web:typecheck": "tsc --project web/tsconfig.json --noEmit",
     "web:test": "vitest run --config web/vite.config.ts",
-    "check": "node --check server/index.mjs && node --check server/service.mjs && node --check server/accounts.mjs && node --check server/codex-client.mjs && node --check server/config.mjs && node --check server/conversations.mjs && node --check server/http.mjs && node --check server/projects.mjs && node --check server/thread-titles.mjs && node --check server/workspace-store.mjs && node --check public/app.js && node --check public/profiling.js && node --check public/desktop.js && node --check public/goal.js && node --check public/mobile.js && npm test"
+    "check": "node scripts/check.mjs"
   },
   "dependencies": {
     "express": "5.2.1"
@@ -35,13 +35,18 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.2.1",
+    "anser": "2.3.5",
     "jsdom": "31.0.0",
+    "katex": "0.19.1",
+    "mermaid": "12.3.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-markdown": "10.1.0",
     "react-redux": "9.3.1",
     "react-virtuoso": "4.18.20",
+    "rehype-katex": "7.0.1",
     "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
     "typescript": "7.0.2",
     "vite": "8.3.6",
     "vitest": "5.1.0"

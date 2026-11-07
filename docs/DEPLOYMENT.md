@@ -5,6 +5,8 @@
 The verified deployment target is a Windows 10/11 server computer on a trusted private LAN. The Node listener does not provide TLS.
 
 ```powershell
+npm ci
+npm run web:build
 Copy-Item config\codexlan.example.json config\codexlan.json
 npm run service:start
 ```
@@ -19,7 +21,7 @@ npm run service:restart
 npm run service:stop
 ```
 
-The service currently runs from source and requires Node.js. There is no Windows binary package.
+The service requires Node.js. Source builds use Node 24; compiled releases support Node 20+. `scripts/build-release.ps1` prepares a fresh complete release with React assets and runtime dependencies. It does not activate the running installation or copy its configuration/data. There is no Windows binary package.
 
 ## Start automatically at sign-in
 
@@ -66,7 +68,7 @@ Do not put backups in the repository or a public release. Test restoration with 
 2. Back up `data/` and every configured workspace.
 3. Run `npm run service:stop` and confirm the Node/app-server processes have exited.
 4. Replace source files without replacing runtime data.
-5. Run `npm run check`.
+5. Build complete React assets with Node 24 (`npm ci`, `npm run web:build`) and run the affected checks. For installed releases, prepare a fresh release; do not mix individual runtime files from different builds.
 6. Start with `npm run service:start` and run the app-server compatibility checks in [DEVELOPMENT.md](DEVELOPMENT.md).
 7. Keep the backup until login, projects, history, queues, files, and active work are verified.
 

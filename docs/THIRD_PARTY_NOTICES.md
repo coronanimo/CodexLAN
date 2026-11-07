@@ -1,17 +1,15 @@
 # Third-party notices
 
-## Express 5.2.1 and production dependencies
+## Browser bundle
 
-The Node HTTP service uses Express under the MIT License. Its locked production dependency tree is recorded in `package-lock.json` and includes MIT, ISC, and BSD-3-Clause licensed packages.
+React, Redux Toolkit/react-redux, react-virtuoso, react-markdown/remark-gfm, remark-math/rehype-katex/KaTeX, Mermaid and Anser are installed from the pinned lockfile and bundled locally. No CDN is required. Their transitive packages retain their own licenses.
 
-## KaTeX 0.16.22
+Vite generates the bundled dependency license inventory at `dist/web/third-party-licenses.md` (served as `/third-party-licenses.md`). Include this file, the KaTeX font assets and this notice with the complete web asset directory. The former manually vendored browser libraries have been removed.
 
-KaTeX is distributed under the MIT License.
+## HTTP runtime
 
-Copyright (c) 2013–2020 Khan Academy and other contributors.
+Express 5.2.1 and its locked production dependencies retain their respective MIT, ISC and BSD licenses in the deployed `node_modules/`.
 
-The vendored browser bundle, stylesheet, and fonts under `public/vendor/katex/` are used to render mathematical notation locally without a CDN. The complete license text is retained at `public/vendor/katex/LICENSE`.
+## Android
 
-## Gradle Wrapper 8.9
-
-The Gradle Wrapper scripts and JAR under `android/` are distributed under the Apache License 2.0. The license and upstream notice are retained at `android/gradle/wrapper/LICENSE` and `android/gradle/wrapper/NOTICE`.
+The Gradle Wrapper scripts and JAR are distributed under Apache License 2.0. The upstream license and notice remain in `android/gradle/wrapper/LICENSE` and `NOTICE`.

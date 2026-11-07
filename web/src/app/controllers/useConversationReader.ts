@@ -6,8 +6,12 @@ import { ConversationReader } from "./ConversationReader";
 
 export function useConversationReader(client: ReadClient, selection: ConversationSelection | null) {
   const store = useStore.withTypes<AppStore>()();
-  const reader = useMemo(() => new ConversationReader(client, store), [client, store]);
+  const [connection, setConnection] = useState("");
   const [state, setState] = useState({ loading: false, error: "", before: null as string | null });
+  const reader = useMemo(() => new ConversationReader(client, store, (page, message) => {
+    setConnection(message);
+    if (page) setState({ loading: false, error: "", before: page.before });
+  }), [client, store]);
   const accept = (page: HistoryPage | null) => {
     if (page) setState({ loading: false, error: "", before: page.before });
   };
@@ -28,5 +32,5 @@ export function useConversationReader(client: ReadClient, selection: Conversatio
     try { accept(await (older ? reader.older() : reader.refresh())); }
     catch (error) { setState((value) => ({ ...value, loading: false, error: error instanceof Error ? error.message : "读取失败。" })); }
   };
-  return { ...state, refresh: () => void load(false), older: () => void load(true) };
+  return { ...state, connection, refreshControls: reader.refreshControls, refresh: () => void load(false), older: () => void load(true) };
 }

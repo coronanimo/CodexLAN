@@ -19,6 +19,13 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid #3c82c4; outli
 .message-role { color: #6d7b90; font-size: 12px; }
 .message-row p { line-height: 1.65; }
 .message-row pre { overflow: auto; padding: 12px; background: #edf2f8; }
+.message-row pre { max-height: 360px; }
+.streaming-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.content-link { padding: 0 3px; border: 0; background: transparent; text-align: left; }
+.image-preview { max-width: 100%; max-height: 65dvh; object-fit: contain; }
+.document-preview { display: block; width: 100%; height: 65dvh; border: 0; margin-top: 12px; }
+.file-preview { max-height: 65dvh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.katex-display { max-width: 100%; overflow: auto; }
 .message-row table { display: block; max-width: 100%; overflow: auto; }
 .user-text { white-space: pre-wrap; }
 .composer-zone { padding: 10px max(16px, calc((100% - 780px) / 2)) max(12px, env(safe-area-inset-bottom)); border-top: 1px solid #dce5f0; background: white; }
@@ -34,3 +41,38 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid #3c82c4; outli
 .detail-disclosure pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #edf2f8; padding: 12px; }
 .login-panel { max-width: 420px; margin: 10vh auto; padding: 20px; }
 .login-panel label { display: grid; gap: 6px; margin: 16px 0; }
+.conversation-controls { max-height: 30dvh; overflow: auto; margin-top: 8px; font-size: 13px; }
+.conversation-controls details { padding: 6px 0; }
+.conversation-controls label, .question-card label { display: grid; gap: 6px; margin: 8px 0; }
+.conversation-controls textarea { width: 100%; min-height: 72px; }
+.conversation-controls li p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.question-card { border: 1px solid #ced9e8; border-radius: 8px; padding: 12px; margin: 8px 0; }
+.question-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+.workbench-modal { width: min(680px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); border: 1px solid #ced9e8; border-radius: 12px; padding: 20px; color: inherit; }
+.workbench-modal::backdrop { background: #10213d77; }
+.workbench-modal label { display: grid; gap: 6px; margin: 12px 0; }
+.modal-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.modal-heading h2 { margin: 0; font-size: 18px; }
+.management-list { list-style: none; padding: 0; }
+.management-list li { border-bottom: 1px solid #dce5f0; padding: 12px 0; }
+.management-list small { display: block; overflow-wrap: anywhere; margin: 6px 0; }
+.attachment-list { max-height: 120px; overflow: auto; font-size: 12px; }
+.attachment-list > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0; }
+.workspace-frame { display: grid; grid-template-columns: 260px minmax(0, 1fr); height: 100dvh; overflow: hidden; }
+.desktop-navigation { min-width: 0; min-height: 0; border-right: 1px solid #dce5f0; }
+.workspace-sidebar { display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr); gap: 10px; height: 100%; min-height: 0; padding: 16px 12px; }
+.workspace-sidebar h1 { font-size: 18px; margin: 0; }
+.workspace-sidebar label { display: grid; gap: 5px; font-size: 12px; }
+.workspace-sidebar select { width: 100%; }
+.conversation-navigation { min-height: 0; }
+.conversation-link { width: 100%; min-height: 48px; display: grid; gap: 4px; border-color: transparent; background: transparent; color: #10213d; text-align: left; }
+.conversation-link span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conversation-link small { font-size: 11px; color: #52769b; }
+.conversation-link[aria-current] { background: #e5edf7; }
+.activity-navigation { max-height: 28dvh; overflow: auto; }
+.workbench-title { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.workbench-title h2 { font-size: 16px; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-navigation { display: none; }
+.empty-workspace { padding: 24px; text-align: center; color: #6d7b90; }
+.workbench-modal .workspace-sidebar { height: 72dvh; }
+@media (max-width: 760px) { .workspace-frame { grid-template-columns: minmax(0, 1fr); } .desktop-navigation { display: none; } .mobile-navigation { display: inline-block; } }

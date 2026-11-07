@@ -1,23 +1,58 @@
 import { createEntityAdapter, createSlice } from "@reduxjs/toolkit";
 import type { PayloadAction } from "@reduxjs/toolkit";
 import type { CommittedRows, TimelineRow } from "./types";
+import type { PresentationPatch } from "@lan/presentation";
 
 const rows = createEntityAdapter<TimelineRow>();
 const INITIAL_INDEX = 1_000_000;
-type Timeline = { ids: string[]; firstItemIndex: number; needsSnapshot: boolean };
+type Timeline = { ids: string[]; firstItemIndex: number; needsSnapshot: boolean; viewportRevision: number };
 type OrderedRows = CommittedRows;
 
 export const conversationSlice = createSlice({
   name: "conversation",
   initialState: rows.getInitialState({ timelines: {} as Record<string, Timeline> }),
   reducers: {
+    presentationPatched(state, { payload }: PayloadAction<PresentationPatch>) {
+      const timeline = state.timelines[payload.conversationId];
+      if (!timeline) return;
+      for (const id of payload.removeIds) {
+        const index = timeline.ids.indexOf(id);
+        if (index >= 0) { timeline.ids.splice(index, 1); rows.removeOne(state, id); }
+      }
+      for (const { row, beforeId, afterId } of payload.upserts) {
+        if (row.conversationId !== payload.conversationId) continue;
+        if (state.entities[row.id]) {
+          const previous = state.entities[row.id]!;
+          if (row.revision !== undefined && previous.revision !== undefined && row.revision <= previous.revision) continue;
+          rows.setOne(state, row); continue;
+        }
+        if (row.kind === "summary" && payload.appendRun) {
+          timeline.ids.push(row.id); rows.addOne(state, row); continue;
+        }
+        const before = beforeId ? timeline.ids.indexOf(beforeId) : -1;
+        const after = afterId ? timeline.ids.indexOf(afterId) : -1;
+        if (before >= 0 || after >= 0) {
+          timeline.ids.splice(before >= 0 ? before : after + 1, 0, row.id); rows.addOne(state, row);
+        }
+        // An unknown old run has no position in this loaded window. A late
+        // completion must never append it after the currently executing run.
+      }
+    },
     snapshotCommitted(state, { payload }: PayloadAction<OrderedRows>) {
       const owned = payload.rows.filter((row) => row.conversationId === payload.conversationId);
       const ids = [...new Set(owned.map((row) => row.id))];
       const retained = new Set(ids);
       rows.removeMany(state, (state.timelines[payload.conversationId]?.ids || []).filter((id) => !retained.has(id)));
       rows.upsertMany(state, owned);
-      state.timelines[payload.conversationId] = { ids, firstItemIndex: INITIAL_INDEX, needsSnapshot: false };
+      state.timelines[payload.conversationId] = { ids, firstItemIndex: INITIAL_INDEX, needsSnapshot: false, viewportRevision: (state.timelines[payload.conversationId]?.viewportRevision || 0) + 1 };
+    },
+    windowReconciled(state, { payload }: PayloadAction<OrderedRows>) {
+      const timeline = state.timelines[payload.conversationId];
+      if (!timeline) return;
+      const retained = new Set(payload.rows.map((row) => row.id));
+      rows.removeMany(state, timeline.ids.filter((id) => !retained.has(id)));
+      rows.setMany(state, payload.rows);
+      timeline.ids = payload.rows.map((row) => row.id);
     },
     // Only call these after the protocol adapter has established canonical order.
     orderedRowsPrepended(state, { payload }: PayloadAction<OrderedRows>) {
@@ -68,4 +103,4 @@ export const conversationSlice = createSlice({
   },
 });
 
-export const { snapshotCommitted, orderedRowsPrepended, orderedRowsAppended, rowsCommitted, conversationReleased } = conversationSlice.actions;
+export const { snapshotCommitted, windowReconciled, orderedRowsPrepended, orderedRowsAppended, rowsCommitted, conversationReleased, presentationPatched } = conversationSlice.actions;

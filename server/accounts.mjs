@@ -57,6 +57,7 @@ export function registerAccounts(application, { auth, store, onSessionsRevoked }
 
   application.post("/api/auth/logout", async (request, response) => {
     await auth.destroySession(request.identity.token);
+    onSessionsRevoked(request.identity.user.id);
     clearSessionCookie(request, response, auth.cookieName);
     json(response, 200, { ok: true });
   });

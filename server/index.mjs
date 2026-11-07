@@ -1,19 +1,20 @@
 import { createServer } from "node:http";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
-import { dirname, extname, join, normalize, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createGzip } from "node:zlib";
+import { registerStatic, staticVersion } from "./static.mjs";
 import express from "express";
 import { registerAccounts } from "./accounts.mjs";
 import { AppServerClient } from "./codex-client.mjs";
 import { isLoopbackIpv4, isPrivateIpv4, loadServerConfig, selectListenerAddress } from "./config.mjs";
-import { createConversations } from "./conversations.mjs";
 import { json } from "./http.mjs";
-import { registerProjects } from "./projects.mjs";
+import { registerProjects, resolveUploadedFiles } from "./projects.mjs";
 import { AuthService, WorkspaceStore } from "./workspace-store.mjs";
-import { createCodexReadAdapter } from "./agents/codex/read-adapter.mjs";
-import { registerLanReadRoutes } from "./core/read-routes.mjs";
+import { createCodexAdapter } from "./agents/codex/adapter.mjs";
+import { QueueCoordinator } from "./core/queue-coordinator.mjs";
+import { ConversationService } from "./core/conversation-service.mjs";
+import { registerLanRoutes } from "./core/routes.mjs";
 import { codexlan } from "../products/codexlan/manifest.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -35,8 +36,8 @@ const lanHost = localOnly ? null : selectListenerAddress(requestedHost);
 if (!localOnly && !lanHost) throw new Error("No private IPv4 address is available for the shared listener.");
 const listenHost = localOnly ? "127.0.0.1" : "0.0.0.0";
 const allowedListenerAddresses = new Set(["127.0.0.1", ...(lanHost ? [lanHost] : [])]);
-const staticRoot = join(appRoot, "public");
-const assetVersion = `${Math.trunc(statSync(join(staticRoot, "app.js")).mtimeMs)}`;
+const staticRoot = join(appRoot, "dist", "web");
+const assetVersion = staticVersion(staticRoot);
 const dataRoot = serverConfig.dataRoot;
 const workspaceRoot = serverConfig.workspaceRoot;
 const stateFile = join(dataRoot, "workspace-state.json");
@@ -65,11 +66,16 @@ const listenerState = {
     error: null,
   },
 };
-const conversations = createConversations({
-  store, codex,
+const agent = createCodexAdapter({
+  store, connection: codex,
   autoApprove: serverConfig.autoApprove,
   autoApproveBrowser: serverConfig.autoApproveBrowser,
 });
+const queue = new QueueCoordinator(store, agent);
+const conversations = new ConversationService(store, new Map([[agent.describe().instanceId, queue]]),
+  (project, id, files) => resolveUploadedFiles(project, id, files, serverConfig.attachmentRoot));
+codex.events.on("online", () => { void queue.recover().catch((error) => process.stderr.write(`[queue] 队列恢复失败：${error.message}\n`)); });
+let lanStreams;
 const workspaceApplication = createWorkspaceApplication();
 
 void startHttpServers().catch((error) => {
@@ -123,8 +129,11 @@ async function shutdown(exitCode) {
   shuttingDown = true;
   listenerState.local.status = "stopping";
   if (listenerState.lan.status === "ready") listenerState.lan.status = "stopping";
+  const draining = queue.close(), closingAgent = agent.close();
   await codex.close();
-  conversations.closeEventStreams();
+  await draining;
+  await closingAgent;
+  lanStreams?.dispose();
   await Promise.all(httpServers.map((server) => new Promise((resolveClose) => server.close(resolveClose))));
   await store.persist({});
   store.close();
@@ -144,19 +153,26 @@ function createWorkspaceApplication() {
     next();
   });
   registerHealthRoutes(application);
-  registerAccounts(application, { auth, store, onSessionsRevoked: conversations.closeUserEventStreams });
+  registerAccounts(application, { auth, store, onSessionsRevoked: (userId) => {
+    lanStreams?.closeUserEventStreams(userId);
+  } });
   registerRuntimeRoutes(application);
-  registerProjects(application, { store, conversations, attachmentRoot: serverConfig.attachmentRoot });
-  conversations.registerRoutes(application);
-  registerLanReadRoutes(application, {
+  registerProjects(application, { store, attachmentRoot: serverConfig.attachmentRoot,
+    onPermissionsChanged: () => lanStreams?.closeEventStreams(), projectBusy: agent.projectHasActiveThread,
+    validateAgentSettings: agent.validateSettings, forgetProject: agent.forgetProject });
+  lanStreams = registerLanRoutes(application, {
     edition: codexlan,
-    agents: [createCodexReadAdapter({ conversations, status: () => codex.state })],
+    agents: [agent], conversations,
     listProjects: (userId) => store.listProjects(userId),
     getProject: (id, userId) => store.getProject(id, userId),
     authorizeConversation: ({ conversationId, projectId, userId }) => store.requireThreadOwner(conversationId, userId, projectId),
+    canReadConversation: ({ projectId, conversationId, userId }) => store.threadProjects[conversationId] === projectId
+      && store.canAccessProject(store.projects.find((project) => project.id === projectId), userId),
+    conversationProject: (id) => store.threadProjects[id],
+    canReadProject: (id, userId) => store.canAccessProject(store.projects.find((project) => project.id === id), userId),
   });
   application.use("/api", (request, response) => json(response, 404, { error: "找不到 API。" }));
-  application.use((request, response) => serveStatic(request.codexUrl.pathname, request, response));
+  registerStatic(application, staticRoot);
   application.use((error, request, response, next) => {
     process.stderr.write(`[web] ${error.stack || error.message}\n`);
     if (!response.headersSent) return json(response, error.statusCode || 500, { error: error.statusCode ? error.message : "服务端处理请求时发生错误。" });
@@ -204,48 +220,11 @@ function registerRuntimeRoutes(application) {
 
 
 
-function serveStatic(pathname, request, response) {
-  const requested = pathname === "/" ? "/index.html" : pathname;
-  const filePath = normalize(join(staticRoot, requested));
-  if (!filePath.startsWith(staticRoot) || !existsSync(filePath) || !statSync(filePath).isFile()) return text(response, 404, "Not found");
-  const types = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".svg": "image/svg+xml",
-    ".woff": "font/woff",
-    ".woff2": "font/woff2",
-  };
-  const extension = extname(filePath);
-  const file = statSync(filePath);
-  const etag = `W/"${file.size.toString(16)}-${Math.trunc(file.mtimeMs).toString(16)}"`;
-  const headers = {
-    "Content-Type": types[extension] || "application/octet-stream",
-    "Cache-Control": extension === ".html" ? "no-cache" : "public, max-age=0, must-revalidate",
-    ETag: etag,
-  };
-  if (request.headers["if-none-match"] === etag) {
-    response.writeHead(304, headers);
-    return response.end();
-  }
-  const compressible = new Set([".html", ".js", ".css", ".svg"]).has(extension);
-  if (response.codexAcceptsGzip && compressible && file.size >= 1024) {
-    response.writeHead(200, { ...headers, "Content-Encoding": "gzip", Vary: "Accept-Encoding" });
-    return createReadStream(filePath).pipe(createGzip()).pipe(response);
-  }
-  response.writeHead(200, { ...headers, "Content-Length": file.size });
-  return createReadStream(filePath).pipe(response);
-}
 
 function setSecurityHeaders(response) {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
-}
-
-function text(response, status, body) {
-  response.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
-  response.end(body);
 }
 
 function normalizeSocketAddress(address) {

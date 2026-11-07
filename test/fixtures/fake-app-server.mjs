@@ -550,16 +550,36 @@ function fakeResult(method, params = {}) {
   if (method === "thread/turns/list") {
     const thread = threads.get(params.threadId);
     if (!thread) throw new Error("thread not found");
-    const descending = [...(thread.turns || [])].reverse();
-    const offset = Number(params.cursor || 0);
+    const ordered = params.sortDirection === "asc" ? [...(thread.turns || [])] : [...(thread.turns || [])].reverse();
+    const cursor = String(params.cursor || "");
+    const anchor = cursor.replace(/^turns-(after|include):/, "");
+    const offset = cursor.startsWith("turns-") ? ordered.findIndex((turn) => turn.id === anchor) + (cursor.startsWith("turns-after:") ? 1 : 0) : Number(cursor || 0);
+    if (offset < 0) throw new Error("invalid turn anchor");
     const limit = Math.max(1, Number(params.limit || 50));
-    const page = descending.slice(offset, offset + limit);
+    const page = ordered.slice(offset, offset + limit);
     const nextOffset = offset + page.length;
     return {
-      data: page.map(copy),
-      nextCursor: nextOffset < descending.length ? String(nextOffset) : null,
-      backwardsCursor: page.length ? String(Math.max(0, offset - 1)) : null,
+      data: page.map((turn) => params.itemsView === "notLoaded" ? { ...copy(turn), items: [] } : copy(turn)),
+      nextCursor: nextOffset < ordered.length ? `turns-after:${page.at(-1).id}` : null,
+      backwardsCursor: page.length ? `turns-include:${page[0].id}` : null,
     };
+  }
+  if (method === "thread/items/list") {
+    const thread = threads.get(params.threadId);
+    if (!thread) throw new Error("thread not found");
+    const ascending = thread.turns.filter((turn) => !params.turnId || turn.id === params.turnId).flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item, startedAtMs: null, completedAtMs: null })));
+    const ordered = params.sortDirection === "desc" ? ascending.toReversed() : ascending;
+    let offset = 0;
+    if (params.cursor?.type === "item") {
+      const position = ordered.findIndex((entry) => entry.item.id === params.cursor.itemId);
+      if (position < 0 || !params.turnId) throw new Error("invalid item anchor");
+      offset = position + 1;
+    } else if (String(params.cursor || "").startsWith("items-after:")) {
+      offset = ordered.findIndex((entry) => entry.item.id === params.cursor.slice(12)) + 1;
+      if (!offset) throw new Error("invalid item anchor");
+    } else if (params.cursor) offset = Number(String(params.cursor).replace(/^items:/, ""));
+    const data = ordered.slice(offset, offset + (params.limit || 50));
+    return { data: copy(data), nextCursor: offset + data.length < ordered.length ? `items-after:${data.at(-1).item.id}` : null, backwardsCursor: null };
   }
   if (method === "thread/read" || method === "thread/resume") {
     const thread = threads.get(params.threadId);

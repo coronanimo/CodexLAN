@@ -1,29 +1,22 @@
-import { useState } from "react";
 import type { FormEvent } from "react";
+import { useAuthentication } from "./controllers/useAuthentication";
 
 export function Login({ onSuccess }: { onSuccess: () => void }) {
-  const [error, setError] = useState("");
-  const [pending, setPending] = useState(false);
+  const auth = useAuthentication(onSuccess);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    setPending(true); setError("");
-    try {
-      const response = await fetch("/api/auth/login", { method: "POST", credentials: "same-origin",
-        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: data.get("username"), password: data.get("password") }) });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "登录失败。");
-      onSuccess();
-    } catch (error) { setError(error instanceof Error ? error.message : "登录失败。"); }
-    finally { setPending(false); }
+    await auth.submit(Object.fromEntries([...data].map(([key, value]) => [key, String(value)])));
   };
   return <main className="login-panel">
-    <h1>登录工作台</h1><p>使用当前服务的账号。首次管理员初始化仍在原工作台完成。</p>
+    <h1>{auth.setup ? "设置管理员" : "登录工作台"}</h1>
+    {auth.setup && <p>首次设置请在运行服务的电脑上完成。</p>}
     <form onSubmit={(event) => void submit(event)}>
       <label>账号<input name="username" autoComplete="username" required /></label>
-      <label>密码<input name="password" type="password" autoComplete="current-password" required /></label>
-      {error && <p role="alert">{error}</p>}
-      <button disabled={pending}>{pending ? "正在登录…" : "登录"}</button>
+      {auth.setup && <label>显示名称<input name="displayName" autoComplete="nickname" required /></label>}
+      <label>密码<input name="password" type="password" autoComplete={auth.setup ? "new-password" : "current-password"} required /></label>
+      {auth.error && <p role="alert">{auth.error}</p>}
+      <button disabled={auth.pending || auth.checking}>{auth.pending ? "正在处理…" : auth.setup ? "创建管理员" : "登录"}</button>
     </form>
   </main>;
 }

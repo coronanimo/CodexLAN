@@ -1,5 +1,3 @@
-import type { TimelineCommit } from "./presentation";
-
 // Protocol-neutral public metadata. A missing capability must not be emulated
 // by relabelling a different operation (for example submit as steer).
 export type AgentCapabilities = {
@@ -32,25 +30,6 @@ export type AgentSetting = {
   | { kind: "choice"; choices: readonly { value: string; label: string }[] }
   | { kind: "toggle" }
   | { kind: "number"; min?: number; max?: number }
-);
-
-export type ConversationRef = { conversationId: string; agentInstanceId: string };
-export type RunState = {
-  conversationId: string;
-  runId: string;
-  status: "running" | "completed" | "failed" | "interrupted";
-};
-
-// Versioned LAN envelope, separate from the provider's native event cursor.
-// The common application layer owns this envelope and browser SSE filtering.
-export type WorkspaceEvent = {
-  epoch: string;
-  sequence: number;
-  agentInstanceId: string;
-} & (
-  | { kind: "timeline.committed"; commit: TimelineCommit }
-  | { kind: "run.changed"; run: RunState }
-  | { kind: "recovery.required"; conversationId: string }
 );
 
 export type EditionManifest = {

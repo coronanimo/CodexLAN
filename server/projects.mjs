@@ -10,7 +10,7 @@ import { httpError, mergeSettings, samePath } from "./workspace-store.mjs";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
-export function registerProjects(application, { store, conversations, attachmentRoot = null }) {
+export function registerProjects(application, { store, onPermissionsChanged, projectBusy, validateAgentSettings, forgetProject, attachmentRoot = null }) {
   application.get("/api/projects/:projectId/members", async (request, response) => {
     json(response, 200, { members: await store.projectMembers(request.params.projectId, request.identity.user.id) });
   });
@@ -18,7 +18,7 @@ export function registerProjects(application, { store, conversations, attachment
     const body = await readJson(request);
     const members = await store.setProjectMembers(request.params.projectId, request.identity.user.id, body.memberIds);
     // Close existing SSE streams so revoked users cannot retain a live subscription.
-    for (const user of store.users) conversations.closeUserEventStreams(user.id);
+    onPermissionsChanged();
     json(response, 200, { members });
   });
   application.get("/api/projects", async (request, response) => {
@@ -32,13 +32,33 @@ export function registerProjects(application, { store, conversations, attachment
 
   application.get("/api/projects/:projectId/files/download", async (request, response) => {
     const project = await store.getProject(request.params.projectId, request.identity.user.id);
-    await sendProjectFile(response, project, request.codexUrl.searchParams.get("path"), request.method === "HEAD", attachmentRoot);
+    const query = request.codexUrl.searchParams;
+    let path = query.get("path");
+    if (query.has("fileId")) {
+      const conversationId = validateId(query.get("conversationId"), "conversationId");
+      await store.requireThreadOwner(conversationId, request.identity.user.id, project.id);
+      [path] = (await resolveUploadedFiles(project, conversationId, [query.get("fileId")], attachmentRoot)).map((file) => file.path);
+    }
+    await sendProjectFile(response, project, path, request.method === "HEAD", attachmentRoot);
+  });
+
+  application.get("/api/projects/:projectId/files/preview", async (request, response) => {
+    const project = await store.getProject(request.params.projectId, request.identity.user.id);
+    const path = await projectFilePath(project, request.codexUrl.searchParams.get("path"), attachmentRoot);
+    const extension = extname(path).toLowerCase();
+    if (!new Set([".html", ".htm", ".txt", ".md", ".json", ".csv", ".log", ".js", ".ts", ".tsx", ".jsx", ".py", ".css", ".xml", ".yaml", ".yml", ".mjs"]).has(extension)) throw httpError(415, "此文件请下载后打开。");
+    const size = statSync(path).size;
+    if (size > 200_000) throw httpError(413, "预览最多 200 KB，请下载原文件。");
+    response.writeHead(200, { "Content-Type": extension === ".html" || extension === ".htm" ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+      "Content-Length": size, "Cache-Control": "no-store", "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:" });
+    if (request.method === "HEAD") return response.end();
+    createReadStream(path, { start: 0, end: Math.max(0, size - 1) }).on("error", () => response.destroy()).pipe(response);
   });
 
   application.post("/api/projects/:projectId/files/upload", async (request, response) => {
     const user = request.identity.user;
     const project = await store.getProject(request.params.projectId, user.id);
-    const threadId = validateId(request.codexUrl.searchParams.get("threadId"), "threadId");
+    const threadId = validateId(request.codexUrl.searchParams.get("conversationId"), "conversationId");
     await store.requireThreadOwner(threadId, user.id, project.id);
     const file = await receiveProjectUpload(request, project, threadId, request.codexUrl.searchParams.get("name"), attachmentRoot);
     json(response, 201, { file });
@@ -61,13 +81,13 @@ export function registerProjects(application, { store, conversations, attachment
     const existing = await store.getProject(request.params.projectId, user.id, { requireAvailable: false });
     store.requireProjectManager(existing, user.id);
     const pathChanged = Object.hasOwn(body, "path") && !samePath(String(body.path || ""), existing.path);
-    if (pathChanged && conversations.projectHasActiveThread(existing.id)) throw httpError(409, "项目仍有任务正在执行，停止后才能修改目录。");
+    if (pathChanged && await projectBusy(existing.id)) throw httpError(409, "项目仍有任务正在执行，停止后才能修改目录。");
     const previousThreadIds = pathChanged ? store.threadIdsForProject(existing.id) : [];
     const settings = Object.hasOwn(body, "settings")
-      ? await conversations.validateSettings(mergeSettings(existing.settings, body.settings))
+      ? await validateAgentSettings(mergeSettings(existing.settings, body.settings))
       : undefined;
     const project = await store.updateProject(request.params.projectId, { ...body, ...(settings ? { settings } : {}) }, user.id);
-    if (pathChanged) conversations.forgetProject(project.id, previousThreadIds);
+    if (pathChanged) forgetProject(project.id, previousThreadIds);
     json(response, 200, { project });
   });
 
@@ -75,24 +95,21 @@ export function registerProjects(application, { store, conversations, attachment
     const projectId = request.params.projectId;
     const existing = await store.getProject(projectId, request.identity.user.id, { requireAvailable: false });
     store.requireProjectManager(existing, request.identity.user.id);
-    if (conversations.projectHasActiveThread(projectId)) throw httpError(409, "项目仍有任务正在执行，停止后才能删除。");
+    if (await projectBusy(projectId)) throw httpError(409, "项目仍有任务正在执行，停止后才能删除。");
     const previousThreadIds = store.threadIdsForProject(projectId);
     const project = await store.removeProject(projectId, request.identity.user.id);
-    conversations.forgetProject(project.id, previousThreadIds);
+    forgetProject(project.id, previousThreadIds);
     json(response, 200, { project });
   });
 
-  application.get("/api/projects/:projectId/threads", async (request, response) => {
-    const project = await store.getProject(request.params.projectId, request.identity.user.id);
-    if (request.codexUrl.searchParams.has("limit") || request.codexUrl.searchParams.has("cursor")) {
-      return json(response, 200, await conversations.listProjectThreadPage(project, request.identity.user, request.codexUrl.searchParams));
-    }
-    const threads = await conversations.listProjectThreads(project, request.identity.user);
-    json(response, 200, { threads });
-  });
 }
 
 async function sendProjectFile(response, project, requestedPath, headOnly = false, attachmentRoot = null) {
+  const filePath = await projectFilePath(project, requestedPath, attachmentRoot);
+  return sendLocalFile(response, filePath, statSync(filePath), headOnly);
+}
+
+async function projectFilePath(project, requestedPath, attachmentRoot) {
   if (typeof requestedPath !== "string" || !requestedPath.trim()) throw httpError(400, "缺少要下载的文件路径。");
   const projectRoot = await realpath(project.path);
   const candidate = resolve(projectRoot, normalizeDownloadPath(requestedPath));
@@ -117,7 +134,7 @@ async function sendProjectFile(response, project, requestedPath, headOnly = fals
   }
   const details = statSync(filePath);
   if (!details.isFile()) throw httpError(400, "该路径不是可下载文件。");
-  return sendLocalFile(response, filePath, details, headOnly);
+  return filePath;
 }
 
 async function receiveProjectUpload(request, project, threadId, requestedName, attachmentRoot = null) {
@@ -158,11 +175,26 @@ async function receiveProjectUpload(request, project, threadId, requestedName, a
       throw error;
     }
     await unlink(temporary);
-    return { name: fileName, path: destination, size: total };
+    return { id: Buffer.from(`${day}/${storedName}`).toString("base64url"), name: fileName, size: total };
   } catch (error) {
     await unlink(temporary).catch(() => {});
     throw error;
   }
+}
+
+export async function resolveUploadedFiles(project, conversationId, ids, centralRoot) {
+  if (!Array.isArray(ids) || ids.length > 20 || ids.some((id) => typeof id !== "string" || id.length > 1024)) throw httpError(400, "附件列表无效。");
+  const root = await realpath(centralRoot ? join(centralRoot, project.id, "attachments", conversationId) : join(project.path, ".codexlan", "attachments", conversationId));
+  return Promise.all(ids.map(async (id) => {
+    const relativeName = Buffer.from(id, "base64url").toString("utf8");
+    const candidate = resolve(root, relativeName);
+    requirePathInside(root, candidate, "附件不属于当前会话。");
+    const path = await realpath(candidate);
+    requirePathInside(root, path, "附件不能指向当前会话目录之外。");
+    const details = statSync(path);
+    if (!details.isFile()) throw httpError(400, "附件不是文件。");
+    return { id, path, name: basename(path).replace(/^[0-9a-f-]{36}-/i, ""), size: details.size };
+  }));
 }
 
 async function removeProjectAttachment(project, requestedPath, centralRoot = null) {

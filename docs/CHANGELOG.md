@@ -4,6 +4,13 @@ Notable changes to CodexLAN are recorded here. Versions follow [Semantic Version
 
 ## Unreleased
 
+### React replacement (2026-11-07)
+
+- React/TypeScript is the sole web entry; the previous public application and transitional adapters are removed. Shared application services and a native Codex adapter replace the conversation monolith. Antigravity, Pi and Claude Code remain future adapters.
+- Timeline rows subscribe by ID and are virtualized individually. Local editor drafts, canonical nested pagination, reconnect revisions and bounded resource reads replace document-wide updates and hidden full outputs. See [current architecture](ARCHITECTURE.md) for ownership and limits.
+- Standard Markdown/GFM/math, on-demand sandboxed Mermaid, ANSI output, plan/recovery resources and stream downloads use the new workbench. Long copies/prints are explicitly bounded; full Markdown downloads use the resource stream.
+- Complete static releases include production assets and dependency licenses. Vite HMR or watch builds preserve a fast edit loop. The descriptions below record previous releases and do not define the replacement's exact layout.
+
 ### Added
 
 - Independent `autoApproveBrowser` configuration to allow local browser control without per-conversation approval cards. It defaults to `false` and still enforces Codex browser policy and active-conversation checks.

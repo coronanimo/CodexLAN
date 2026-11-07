@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   node-check:
+    needs: web-check
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -22,6 +23,10 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci --ignore-scripts --omit=dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: react-web
+          path: dist/web
       - run: npm run check
 
   web-check:
@@ -36,6 +41,10 @@ jobs:
       - run: npm run web:typecheck
       - run: npm run web:test
       - run: npm run web:build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: react-web
+          path: dist/web
 
   android-build:
     runs-on: windows-latest

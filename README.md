@@ -56,7 +56,7 @@ To skip per-conversation confirmation, set `"autoApproveBrowser": true` in `conf
 ## Requirements
 
 - Windows 10 or 11 on the server computer.
-- Node.js 20 or newer.
+- Node.js 24 for source builds; the compiled release runs on Node.js 20 or newer.
 - Codex CLI installed and signed in.
 - A current browser on each client device.
 - Android 8.0 or newer only when using the optional Android client.
@@ -69,6 +69,7 @@ From the repository root:
 codex login
 codex login status
 npm ci
+npm run web:build
 Copy-Item config\codexlan.example.json config\codexlan.json
 npm run service:start
 ```
@@ -142,7 +143,8 @@ See [Security](docs/SECURITY.md) before adding users or changing network exposur
 ## Repository layout
 
 - `server/`: HTTP service, App Server client, persistence, configuration, and supervisor.
-- `public/`: shared browser interface and desktop/mobile styles.
+- `web/`: shared React/TypeScript workbench; compiled assets are in `dist/web/`.
+- `shared/`, `products/`, `server/agents/`: neutral contracts, product manifests and provider adapters. See the [current architecture diagram](docs/ARCHITECTURE.md).
 - `android/`: optional Android WebView client.
 - `test/`: automated tests and the fake App Server fixture.
 - `docs/`: architecture, deployment, development, troubleshooting, release, and project documents.

@@ -15,6 +15,22 @@ const threadId = "33333333-3333-4333-8333-333333333333";
 const turnId = "44444444-4444-4444-8444-444444444444";
 const itemId = "call_command";
 
+test("queue identities, attachment references and uncertain delivery survive storage reload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "codexlan-queue-reload-"));
+  const options = { dataRoot: root, stateFile: join(root, "state.json"), workspace: root, legacyJsonMirror: false };
+  let store = new WorkspaceStore(options); await store.ready;
+  await store.setThreadProject(threadId, "project");
+  const first = await store.enqueue(threadId, "project", "first", [{ id: "opaque", path: join(root, "file.txt"), name: "file.txt", size: 14 }]);
+  const second = await store.enqueue(threadId, "project", "second");
+  await store.setQueueDelivery(threadId, first.id, { status: "uncertain", message: "timeout" });
+  const revision = store.queueRevisions[threadId]; store.close();
+  store = new WorkspaceStore(options); await store.ready;
+  assert.deepEqual(store.queues[threadId].map((item) => item.id), [first.id, second.id]);
+  assert.equal(store.queues[threadId][0].delivery.status, "uncertain");
+  assert.deepEqual(store.queues[threadId][0].attachments, first.attachments);
+  assert.equal(store.queueRevisions[threadId], revision); store.close();
+});
+
 test("migrates legacy compressed state with a consistent backup and exact business fields", sqliteTest, async () => {
   const root = await mkdtemp(join(tmpdir(), "codexlan-storage-migration-"));
   const file = join(root, "workspace-state.sqlite");

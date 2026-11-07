@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   root: fileURLToPath(new URL(".", import.meta.url)),
   plugins: [react()],
   resolve: {
@@ -19,11 +19,9 @@ export default defineConfig({
     fs: { allow: [".", "../shared", "../products"].map((path) => fileURLToPath(new URL(path, import.meta.url))) },
   },
   build: {
-    outDir: "../dist/web-preview", emptyOutDir: false,
-    rolldownOptions: { input: {
-      workbench: fileURLToPath(new URL("index.html", import.meta.url)),
-      fixtures: fileURLToPath(new URL("fixtures.html", import.meta.url)),
-    } },
+    license: { fileName: "third-party-licenses.md" },
+    outDir: mode === "fixtures" ? "../dist/web-fixtures" : "../dist/web", emptyOutDir: false,
+    rolldownOptions: { input: mode === "fixtures" ? fileURLToPath(new URL("fixtures.html", import.meta.url)) : fileURLToPath(new URL("index.html", import.meta.url)) },
   },
   test: { environment: "node", include: ["src/**/*.test.{ts,tsx}"] },
-});
+}));

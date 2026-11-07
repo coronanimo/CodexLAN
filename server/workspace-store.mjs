@@ -5,8 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { WorkspaceDatabase, WORKSPACE_SCHEMA_VERSION } from "./workspace-database.mjs";
-import { commandExecutionSnapshot } from "../public/execution-events.js";
-import { turnPlanSnapshot } from "../public/plan.js";
+import { commandExecutionSnapshot, turnPlanSnapshot } from "./core/persistence-values.mjs";
 
 let DatabaseSync = null;
 try {
@@ -610,6 +609,19 @@ export class WorkspaceStore {
     return structuredClone(selected);
   }
 
+  async getTurnPresentation(threadId, turnId) {
+    await this.ready;
+    const metric = this.turnMetrics[threadId]?.[turnId];
+    return { startedAt: metric?.startedAt, completedAt: metric?.completedAt, plan: metric?.plan ? structuredClone(metric.plan) : null,
+      recoveryCount: Object.values(metric?.items || {}).filter((item) => item.snapshot).length };
+  }
+
+  async getRecoveryItem(threadId, turnId, index) {
+    await this.ready;
+    const items = Object.values(this.turnMetrics[threadId]?.[turnId]?.items || {}).filter((item) => item.snapshot);
+    return { snapshot: items[index] ? structuredClone(items[index].snapshot) : null, count: items.length };
+  }
+
   async getTurnMetricTimings(threadId) {
     await this.ready;
     return Object.fromEntries(Object.entries(this.turnMetrics[threadId] || {}).map(([id, { startedAt, completedAt }]) => [id, { startedAt, completedAt }]));
@@ -754,9 +766,10 @@ export class WorkspaceStore {
     if (changed) await this.persist({});
   }
 
-  async enqueue(threadId, projectId, text) {
+  async enqueue(threadId, projectId, text, attachments = []) {
     await this.ready;
     const item = { id: randomUUID(), projectId, text, createdAt: new Date().toISOString() };
+    if (attachments.length) item.attachments = structuredClone(attachments);
     this.queues[threadId] ||= [];
     this.queues[threadId].push(item);
     this.bumpQueueRevision(threadId);
@@ -798,6 +811,17 @@ export class WorkspaceStore {
     item.updatedAt = new Date().toISOString();
     this.bumpQueueRevision(threadId);
     await this.persist({});
+    return structuredClone(item);
+  }
+
+  async setQueueDelivery(threadId, itemId, delivery) {
+    await this.ready;
+    const item = this.queues[threadId]?.find((entry) => entry.id === itemId);
+    if (!item) return null;
+    if (delivery === null) delete item.delivery;
+    else item.delivery = structuredClone(delivery);
+    this.bumpQueueRevision(threadId);
+    await this.persist({ queues: [threadId], queueRevisions: [threadId] });
     return structuredClone(item);
   }
 

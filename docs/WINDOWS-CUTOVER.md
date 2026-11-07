@@ -43,7 +43,7 @@ Other projects retain their existing paths. In particular, the configured worksp
 
 Existing attachments remain in each old project's `.codexlan\attachments` so historical absolute paths and Codex transcript references continue to work. New uploads use the centralized home attachment directory with per-project authorization. Do not delete the old F-drive repository or its attachments after cutover; migrate historical references before final removal. Codex's own history and authentication under `%USERPROFILE%\.codex` are not moved or rewritten.
 
-The source checkout and deployed release are separate copies. Current working-tree modifications were included; preparation did not commit or discard them. Changes made after preparation are not automatically deployed. The release includes only server/public/config schema files, package metadata, production dependencies and the snapshot helper, without Git metadata, production configuration, databases, build tools or packet captures.
+The source checkout and deployed release are separate copies. This historical preparation captured the then-current working tree; later source changes are not automatically deployed. Current React releases are prepared with `scripts/build-release.ps1` and include server/shared/products, `dist/web`, configuration schema, package metadata and production dependencies. Production configuration, databases, backups and development tools remain separate.
 
 ## User cutover
 
