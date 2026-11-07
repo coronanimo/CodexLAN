@@ -99,6 +99,7 @@ async function conversation(t, { autoApprove = true, autoApproveBrowser = false 
   };
   const store = {
     ready: Promise.resolve(), threadProjects: { [threadId]: projectId }, projects: [{ id: projectId, ownerId }],
+    canAccessProject: (project, userId) => project?.ownerId === userId,
     queues: {}, turnMetrics: {}, asyncInputAnswers: {},
     recordTurnMetric: async () => {}, listProjects: async () => [], listQueuedThreadIds: async () => [],
     getProject: async (id, userId) => { assert.equal(id, projectId); if (userId !== ownerId) throw new Error("not the owner"); return { id }; },

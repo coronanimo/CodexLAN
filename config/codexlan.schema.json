@@ -12,11 +12,13 @@
       "type": ["string", "null"]
     },
     "workspaceRoot": {
-      "description": "Shared workspace boundary. Managed user projects are created below this directory.",
+      "description": "Default location for new project directories, not an access boundary. Administrators may register any absolute project path.",
       "type": "string",
       "minLength": 1
     },
     "dataRoot": { "type": "string", "minLength": 1 },
+    "logRoot": { "type": "string", "minLength": 1 },
+    "attachmentRoot": { "type": "string", "minLength": 1 },
     "codexBin": { "type": ["string", "null"] },
     "autoApprove": {
       "description": "Automatically approve command execution, file changes, and requested permissions for the Codex session.",

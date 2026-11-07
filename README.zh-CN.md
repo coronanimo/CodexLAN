@@ -89,7 +89,7 @@ npm run service:start
 | `port` | 本机和局域网共用的 HTTP 端口，默认 `8688`。 |
 | `host` | `auto` 选择一个专用 IPv4 地址；`127.0.0.1` 仅允许本机访问。 |
 | `dataRoot` | 保存账号、会话、队列、线程设置和守护状态。相对路径从 `config/` 解析；状态主库为 `workspace-state.sqlite`，JSON 文件暂作兼容镜像。 |
-| `workspaceRoot` | 可选的工作区边界。省略时使用 `<dataRoot>/projects`；已有项目仍可指向自己的绝对路径。 |
+| `workspaceRoot` | 新项目的默认创建目录，不是访问边界。省略时使用 `<dataRoot>/projects`；管理员可以添加任意绝对目录，访问权由项目授权记录决定。 |
 | `codexBin` | 可选的 Codex 可执行文件路径；省略时从 `PATH` 查找 `codex`。 |
 | `autoApprove` | 自动批准当前 Codex 会话的命令执行、文件修改和权限请求。默认 `false`，只应对完全信任的用户启用。 |
 | `autoApproveBrowser` | 自动允许所有会话控制本机浏览器（含已登录网站），不显示浏览器审批卡。默认 `false`；独立于 `autoApprove`，只应对完全信任的用户启用。 |
@@ -120,7 +120,7 @@ New-NetFirewallRule -DisplayName 'CodexLAN 8688' -Direction Inbound -Action Allo
 
 内置服务使用明文 HTTP，不要直接把端口转发到公网。需要跨公网访问时，应在受维护的反向代理或私有网络网关后终止 TLS，并限制可访问的用户；项目目前没有经过验证的反向代理配置。
 
-CodexLAN 以启动服务的 Windows 账号执行命令并访问文件。成员项目受 `workspaceRoot` 约束，管理员可以选择其他绝对路径。添加账号、设置工作区或改变网络暴露范围前，请阅读[安全说明](docs/SECURITY.md)和[部署、备份与升级](docs/DEPLOYMENT.md)。
+CodexLAN 以启动服务的 Windows 账号执行命令并访问文件。项目不按用户名文件夹隔离；所有者可以在项目管理的“授权”中允许多个账号共同访问项目文件、聊天与队列。已有任意目录由管理员添加后授权；普通成员留空目录创建新项目。添加账号、设置工作区或改变网络暴露范围前，请阅读[安全说明](docs/SECURITY.md)和[部署、备份与升级](docs/DEPLOYMENT.md)。
 
 ## 仓库结构
 

@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { WorkspaceStore } from "../server/workspace-store.mjs";
 
-test("repairs a legacy member project path without dropping its thread binding", async () => {
+test("preserves explicit member project paths without a username-directory boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "codexlan-member-project-"));
   const dataRoot = join(root, "data");
   const workspace = join(root, "workspace");
@@ -53,11 +53,10 @@ test("repairs a legacy member project path without dropping its thread binding",
     const [project] = await store.listProjects("22222222-2222-4222-8222-222222222222");
     // Windows CI can expose tmpdir through a DOS short-path alias; repaired
     // project paths intentionally use the canonical directory name.
-    const canonicalTarget = await realpath(target);
-    assert.equal(project.path, canonicalTarget);
+    assert.equal(project.path, workspace);
     assert.deepEqual(store.threadIdsForProject(project.id), ["33333333-3333-4333-8333-333333333333"]);
     const persisted = JSON.parse(await readFile(stateFile, "utf8"));
-    assert.equal(persisted.projects[0].path, canonicalTarget);
+    assert.equal(persisted.projects[0].path, workspace);
   } finally {
     store?.close();
     await rm(root, { recursive: true, force: true });

@@ -95,7 +95,7 @@ Edit the copied `config/codexlan.json`, not the example file. Supported settings
 | `port` | HTTP port shared by loopback and LAN access. Default: `8688`. |
 | `host` | `auto` selects a private IPv4 interface; `127.0.0.1` disables LAN access. |
 | `dataRoot` | Accounts, sessions, queues, thread settings, and supervisor state. Relative paths resolve from `config/`; SQLite is the durable state store and JSON remains a compatibility mirror during migration. |
-| `workspaceRoot` | Optional boundary for automatically managed user projects. When omitted, CodexLAN uses `<dataRoot>/projects`. Existing projects may still point to their own absolute directories. |
+| `workspaceRoot` | Default creation directory, not an access boundary. When omitted, CodexLAN uses `<dataRoot>/projects`. Administrators can register any absolute project path; owner and collaborator grants determine access. |
 | `codexBin` | Optional path to a specific Codex executable. When omitted, CodexLAN uses `codex` from `PATH`. |
 | `autoApprove` | Automatically grants command, file-change, and permission requests for the current Codex session. Default: `false`. Enable only for trusted users. |
 | `autoApproveBrowser` | Allows all conversations to control the local browser, including signed-in websites, without browser approval cards. Default: `false`. Independent of `autoApprove`; enable only for trusted users. |

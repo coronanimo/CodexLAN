@@ -200,3 +200,33 @@ test("opening a conversation overlaps history and Goal reads and reuses a fresh 
   await routes.get("/api/threads/:threadId")(request, response);
   assert.equal(calls.filter((method) => method === "thread/goal/get").length, 1);
 });
+
+test("opening a new conversation waits for its session and falls back when pagination is unsupported", async () => {
+  const project = { id: "11111111-1111-4111-8111-111111111111", settings: {} };
+  const thread = { id: "thread", status: "idle", turns: [{ id: "turn", items: [] }] };
+  let reads = 0;
+  const store = {
+    getProject: async () => project, requireThreadOwner: async () => {},
+    getThreadSettings: async () => ({}), getQueueSnapshot: async () => ({ queue: [], queueRevision: 0 }),
+    reconcileExecutionSupplements: async () => {}, getTurnMetrics: async () => ({}),
+    recordThreadAccess: async () => "now", getAsyncInputAnswers: async () => [],
+  };
+  const codex = { events: new EventEmitter(), request: async (method) => {
+    if (method === "thread/turns/list") throw new Error("paginated_threads is not supported yet");
+    if (method === "thread/goal/get") return { goal: null };
+    if (method === "thread/read") {
+      reads += 1;
+      if (reads <= 2) throw new Error("failed to read session metadata: rollout is empty");
+      return { thread };
+    }
+    assert.fail(`unexpected request: ${method}`);
+  } };
+  const conversations = createConversations({ store, codex });
+  const routes = new Map();
+  conversations.registerRoutes({ get: (path, handler) => routes.set(path, handler), post() {}, patch() {}, delete() {} });
+  const request = { identity: { user: { id: "user" } }, params: { threadId: thread.id }, codexUrl: new URL(`http://localhost/api/threads/thread?projectId=${project.id}`) };
+  let body;
+  await routes.get("/api/threads/:threadId")(request, { writeHead() {}, end(value) { body = JSON.parse(value); } });
+  assert.equal(body.thread.turns[0].id, "turn");
+  assert.ok(reads >= 3);
+});

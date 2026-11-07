@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { WorkspaceStore } from '../server/workspace-store.mjs';
+
+test('project grants survive SQLite reload, revoke access, and preserve bindings when relocated outside the default root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codexlan-project-grants-'));
+  const workspace = join(root, 'default');
+  await mkdir(workspace);
+  const options = { workspace, dataRoot: join(root, 'data'), stateFile: join(root, 'data', 'workspace-state.json'), legacyJsonMirror: false };
+  let store = new WorkspaceStore(options);
+  await store.ready;
+  const admin = await store.createFirstAdmin({ username: 'admin', password: 'admin-password-123', displayName: 'Admin' });
+  const member = await store.createUser({ username: 'member', password: 'member-password-123', displayName: 'Member' });
+  const project = (await store.listProjects(admin.id))[0];
+  await store.setThreadProject('11111111-1111-4111-8111-111111111111', project.id);
+  await store.setProjectMembers(project.id, admin.id, [member.id]);
+  await assert.rejects(store.updateProject(project.id, { name: 'stolen' }, member.id), /只有项目/);
+  await assert.rejects(store.setProjectMembers(project.id, member.id, []), /只有项目/);
+  const otherPath = join(root, 'arbitrary', 'outside-default');
+  await store.updateProject(project.id, { path: otherPath }, admin.id);
+  assert.equal(await store.requireThreadOwner('11111111-1111-4111-8111-111111111111', member.id), project.id);
+  store.close();
+  store = new WorkspaceStore(options);
+  await store.ready;
+  assert.equal((await store.listProjects(member.id))[0].path, otherPath);
+  assert.equal(await store.requireThreadOwner('11111111-1111-4111-8111-111111111111', member.id), project.id);
+  await store.setProjectMembers(project.id, admin.id, []);
+  await assert.rejects(store.requireThreadOwner('11111111-1111-4111-8111-111111111111', member.id), /聊天不存在/);
+  assert.equal((await store.listProjects(member.id)).length, 0);
+  store.close();
+});

@@ -20,7 +20,7 @@ const config = await loadServerConfig({ appRoot });
 const serviceRoot = join(config.dataRoot, "service");
 const statePath = join(serviceRoot, "state.json");
 const commandPath = join(serviceRoot, "command.json");
-const logRoot = join(appRoot, "logs");
+const logRoot = config.logRoot;
 const logPath = join(logRoot, "codexlan.log");
 
 await Promise.all([

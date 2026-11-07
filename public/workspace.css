@@ -47,6 +47,12 @@
 .topbar-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 9; display: grid; width: 178px; gap: 5px; padding: 7px; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--surface-overlay); box-shadow: 0 13px 36px #10213d20; backdrop-filter: blur(10px); }
 .topbar-menu button { width: 100%; padding: 8px 9px; text-align: left; }
 .topbar-menu .danger-button { border-color: transparent; color: var(--danger); background: transparent; }
+#thread-menu { width: 190px; gap: 2px; padding: 6px; border-radius: 12px; }
+#thread-menu button { min-height: 36px; border: 0; border-radius: 7px; padding: 8px 11px; background: transparent; font-size: 12px; font-weight: 600; }
+#thread-menu button:not(:disabled):hover { background: var(--surface-canvas); }
+#thread-menu button:focus-visible { outline: 2px solid var(--dispatch); outline-offset: -2px; }
+#thread-menu .danger-button { color: var(--danger); }
+#thread-menu .danger-button:not(:disabled):hover { background: var(--danger-soft); }
 .model-controls { display: flex; min-width: 0; max-width: 100%; flex-wrap: wrap; justify-content: end; gap: 8px; }
 .model-controls label { display: grid; gap: 3px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .model-controls select { max-width: 142px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 25px 6px 8px; color: var(--ink); background: var(--paper); font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; }

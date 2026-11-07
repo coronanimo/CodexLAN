@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { conversationNeedsSnapshot, mergeConversationTurns, reduceConversationEvent, recoveryItems, resetConversationVersions } from "../public/conversation-state.js";
+import { conversationNeedsSnapshot, mergeConversationTurns, mergeLatestConversationTurns, reduceConversationEvent, recoveryItems, resetConversationVersions } from "../public/conversation-state.js";
 import { LiveThreadState } from "../server/live-thread-state.mjs";
 import { mergeHistoricalExecutionItem } from "../public/execution-events.js";
 
 const ids = (turns) => turns[0].items.map((item) => item.id);
 const event = (method, params) => ({ method, params: { threadId: "thread", turnId: "turn", ...params } });
+
+test("latest history precedes a live turn missing from the history page", () => {
+  const previous = [{ id: "active", items: [] }, { id: "completed", items: [] }];
+  const history = [{ id: "completed", items: [] }];
+  assert.deepEqual(mergeLatestConversationTurns(previous, history, "active").map((turn) => turn.id), ["completed", "active"]);
+  const authoritative = [{ id: "active", items: [] }, { id: "completed", items: [] }];
+  assert.deepEqual(mergeLatestConversationTurns(previous, authoritative, "active").map((turn) => turn.id), ["active", "completed"]);
+});
 
 test("started owns the slot; late text, completion and repeated projections do not move it", () => {
   const server = new LiveThreadState();

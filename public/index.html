@@ -24,7 +24,7 @@
         <div class="auth-heading">
           <span id="auth-kicker">个人工作区</span>
           <h1 id="auth-title">登录 CodexLAN</h1>
-          <p id="auth-description">进入只属于你的项目与聊天。</p>
+          <p id="auth-description">访问你的项目和获授权的共享项目。</p>
         </div>
         <form id="login-form" class="auth-form">
           <label>用户名<input id="login-username" name="username" autocomplete="username" autocapitalize="none" required></label>
@@ -135,6 +135,7 @@
             <button id="mobile-refresh" class="icon-button mobile-only mobile-refresh" type="button" aria-label="刷新页面" title="刷新页面">
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
             </button>
+            <button id="open-search" class="icon-button search-trigger" type="button" aria-label="搜索对话" title="搜索对话"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg></button>
             <button id="quick-new-thread" class="icon-button quick-new-thread" type="button" aria-label="新建聊天" title="在当前项目新建聊天"><span class="quick-new-thread-plus" aria-hidden="true"></span></button>
             <div id="thread-menu-wrap" class="topbar-menu-wrap">
               <button id="open-thread-menu" class="icon-button" type="button" aria-label="聊天操作" aria-controls="thread-menu" aria-expanded="false"><span class="more-dots" aria-hidden="true"></span></button>
@@ -143,6 +144,8 @@
                 <button id="fork-thread" class="quiet-button" type="button" disabled>分叉聊天</button>
                 <button id="compact-thread" class="quiet-button" type="button" disabled>压缩上下文</button>
                 <button id="delete-thread" class="danger-button" type="button" disabled>删除聊天记录</button>
+                <button id="copy-thread-id" class="quiet-button" type="button">复制对话 ID</button>
+                <button id="copy-thread-title" class="quiet-button" type="button">复制对话标题</button>
               </div>
             </div>
           </div>
@@ -433,6 +436,7 @@
     <template id="queue-item-template"><li class="queue-item"><span class="queue-index"></span><span class="queue-text"></span><div class="queue-actions"><button data-action="guide" type="button" aria-label="转为当前任务的引导" title="转为引导"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 12 15-7-5 14-3-5zM11 14l3-3"/></svg></button><button data-action="edit" type="button" aria-label="编辑排队任务">✎</button><button data-action="up" type="button" aria-label="上移">↑</button><button data-action="down" type="button" aria-label="下移">↓</button><button data-action="remove" type="button" aria-label="移除">×</button></div></li></template>
     <script src="/vendor/katex/katex.min.js?v=0.16.22"></script>
     <script src="/vendor/mermaid/mermaid.min.js?v=11.17.2-global2"></script>
+    <dialog id="search-dialog" class="search-dialog" aria-labelledby="search-title"><div class="search-heading"><div><h2 id="search-title">搜索对话</h2><p>搜索有权访问的项目和聊天内容</p></div><button id="close-search" class="icon-button" type="button" aria-label="关闭搜索">×</button></div><label class="search-input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg><input id="search-input" type="search" aria-label="搜索对话" placeholder="搜索对话内容或标题" autocomplete="off"></label><div id="search-results" class="search-results" aria-live="polite"></div><button id="search-more" class="quiet-button search-more" type="button" hidden>加载更多</button></dialog>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

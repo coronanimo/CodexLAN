@@ -1,8 +1,8 @@
 import { timestampMilliseconds } from "./elapsed-time.js";
 import { isActiveThreadStatus } from "./elapsed-time.js";
+import { displayUserInputText } from "./async-user-input.js";
 
 const MAX_COMMAND_TEXT = 16 * 1024;
-const MAX_PROCESS_COPY_ITEM = 16 * 1024;
 export const MAX_SAVED_COMMAND_OUTPUT = 16 * 1024;
 export const MAX_LIVE_COMMAND_OUTPUT = 64 * 1024;
 
@@ -204,22 +204,23 @@ export function executionItemText(item = {}) {
   return "";
 }
 
-export function turnProcessMarkdown({ plan, items, recovered = [] } = {}) {
+export function turnMarkdown({ plan, diff, items, recovered = [] } = {}) {
   const sections = [];
-  const planSection = processPlanMarkdown(plan);
-  if (planSection) sections.push(planSection);
   const seen = new Set();
   for (const item of items || []) {
     if (!item || (item.id && seen.has(item.id))) continue;
     if (item.id) seen.add(item.id);
-    const section = processItemMarkdown(item);
+    const section = turnItemMarkdown(item);
     if (section) sections.push(section);
   }
+  const planSection = processPlanMarkdown(plan);
+  if (planSection) sections.push(planSection);
+  if (diff?.trim()) sections.push(`## 累计文件差异\n\n${markdownCodeBlock(diff, "diff")}`);
   const recoverySections = [];
   for (const item of recovered) {
     if (!item || (item.id && seen.has(item.id))) continue;
     if (item.id) seen.add(item.id);
-    const section = processItemMarkdown(item);
+    const section = turnItemMarkdown(item, 3);
     if (section) recoverySections.push(section);
   }
   if (recoverySections.length) sections.push(`## 恢复记录 · 原始位置未知\n\n${recoverySections.join("\n\n")}`);
@@ -244,12 +245,21 @@ function processPlanMarkdown(value = {}) {
   return lines.join("\n");
 }
 
-function processItemMarkdown(item) {
-  if (item.type === "userMessage" || item.type === "plan") return "";
-  if (item.type === "agentMessage" && item.phase !== "commentary") return "";
-  if (item.type === "agentMessage") {
-    const text = limitedProcessText(item.text, false);
-    return text ? `### 进度\n\n${text}` : "";
+function turnItemMarkdown(item, level = 2) {
+  const heading = "#".repeat(level);
+  if (item.type === "userMessage") {
+    const text = displayUserInputText((item.content || []).map((part) => {
+      if (part.type === "text") return part.text || "";
+      const path = part.path || part.url;
+      return path ? `[${part.name || part.type}](${path})` : "";
+    }).filter(Boolean).join("\n"));
+    return text.trim() ? `${heading} ${item.inputKind === "guide" ? "引导" : "你"}\n\n${text}` : "";
+  }
+  if (item.type === "agentMessage" || item.type === "plan") {
+    const text = item.text || (item.questions || []).map((question) => [question.title,
+      ...(question.options || []).map((option) => `- ${option}`)].filter(Boolean).join("\n")).join("\n\n");
+    const label = item.delivery === "async" ? "提问" : item.phase === "commentary" ? "进度" : "Codex";
+    return text.trim() ? `${heading} ${label}\n\n${text}` : "";
   }
   if (!isExecutionItem(item)) return "";
   const name = processItemName(item);
@@ -257,10 +267,9 @@ function processItemMarkdown(item) {
   if (item.type === "commandExecution" && item.outputTruncated) {
     body = `…前面的实时命令输出已截断…\n\n${body}`;
   }
-  body = limitedProcessText(body, item.type === "commandExecution");
   if (!body) body = `状态：${processStatus(item)}`;
   const language = item.type === "fileChange" ? "diff" : processItemUsesCodeBlock(item) ? "text" : null;
-  return `### ${name}\n\n${language ? markdownCodeBlock(body, language) : body}`;
+  return `${heading} ${name}\n\n${language ? markdownCodeBlock(body, language) : body}`;
 }
 
 function processItemName(item) {
@@ -283,16 +292,9 @@ function processItemUsesCodeBlock(item) {
   return ["commandExecution", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "subAgentActivity"].includes(item.type);
 }
 
-function limitedProcessText(value, keepEnd) {
-  const text = String(value || "").trim();
-  if (text.length <= MAX_PROCESS_COPY_ITEM) return text;
-  return keepEnd
-    ? `…前面的内容已截断…\n\n${text.slice(-MAX_PROCESS_COPY_ITEM)}`
-    : `${text.slice(0, MAX_PROCESS_COPY_ITEM)}\n\n…后面的内容已截断…`;
-}
-
 function markdownCodeBlock(value, language) {
-  const longest = Math.max(0, ...[...String(value).matchAll(/`+/g)].map((match) => match[0].length));
+  let longest = 0;
+  for (const match of String(value).matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
   const fence = "`".repeat(Math.max(3, longest + 1));
   return `${fence}${language}\n${value}\n${fence}`;
 }

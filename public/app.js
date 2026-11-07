@@ -2,7 +2,7 @@ import { downloadableFiles, downloadLocalFile, localFileDownloadUrl, textPreview
 import { renderMarkdownDocument } from "./markdown-preview.js";
 import { formatJsonText, plainInlineMarkdown } from "./text-format.js";
 import { conversationDateKey, elapsedTiming, formatConversationDate, formatDuration, formatElapsed, formatMessageDateTime, formatMessageTime, timestampMilliseconds } from "./elapsed-time.js";
-import { commandDisplayText, executionItemText, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, summarizeExecutionTiming, terminalExecutionStatus, turnProcessMarkdown } from "./execution-events.js";
+import { commandDisplayText, executionItemText, isExecutionItem, mergeHistoricalExecutionItem, reconcileStaleExecutionTurn, summarizeExecutionTiming, terminalExecutionStatus, turnMarkdown } from "./execution-events.js";
 import { accountLimitWindows, contextWindowUsage, hasCurrentThreadHistory, invalidateThreadHistory, isActiveThreadRuntime, isActiveThreadStatus, mergeAccountRateLimits, mergeThreadListPage, mergeThreadSummaryPage, newThreadSettings, recentThreadEntries, sidebarProjectEntries, sidebarThreadEntries, threadDisplayName, userMessageClientId, visibleServiceTiers } from "./workspace.js";
 import { renderAnsiOutput } from "./ansi-output.js";
 import { diffLineStats, renderFileChanges, unifiedDiffChanges } from "./diff-output.js";
@@ -16,7 +16,7 @@ import { copyTextToClipboard, fileChangesText, isPreviewableImage, printableMark
 import { EVENT_STREAM_WATCHDOG_INTERVAL_MS, eventStreamNeedsRestart } from "./event-stream.js";
 import { profileMark, profileSpan } from "./profiling.js";
 import { deriveRunDiagnostic } from "./run-diagnostics.js";
-import { conversationNeedsSnapshot, mergeConversationTurns, reduceConversationEvent, recoveryItems, resetConversationVersions } from "./conversation-state.js";
+import { conversationNeedsSnapshot, mergeConversationTurns, mergeLatestConversationTurns, reduceConversationEvent, recoveryItems, resetConversationVersions } from "./conversation-state.js";
 import { reconcileTimelineChildren } from "./conversation-view.js";
 import { reconcileSidebarChildren } from "./sidebar-list.js";
 import { createAsyncQuestionView, setAsyncQuestionCollapsed, showAnsweredAsyncQuestion } from "./conversation-controls.js";
@@ -394,7 +394,7 @@ function showAuth(setupRequired, message = "") {
   ui.authTitle.textContent = setupRequired ? "创建管理员账号" : "登录 CodexLAN";
   ui.authDescription.textContent = setupRequired
     ? "创建这个服务的管理员账号。首次设置只能在服务器电脑上完成。"
-    : "进入只属于你的项目与聊天。";
+    : "访问你的项目和获授权的共享项目。";
   setTimeout(() => (setupRequired ? ui.setupUsername : ui.loginUsername).focus(), 0);
 }
 
@@ -757,9 +757,7 @@ async function selectThread(threadId, { closeNavigation = true, preserveFollowLa
   if (result.tokenUsage) rememberThreadTokenUsage(threadId, result.tokenUsage);
   const selected = currentThread();
   const previous = selected?.id === threadId ? selected : null;
-  const turns = mergeHistory && previous
-    ? mergeTurnPages(previous.turns || [], result.thread.turns || [])
-    : mergeConversationTurns(previous?.turns || [], result.thread.turns || [], { canonical: true });
+  const turns = mergeLatestConversationTurns(previous?.turns || [], result.thread.turns || [], (result.runtime || result.thread.runtime)?.activeTurnId);
   const history = mergeHistory && previous?.history
     ? { ...result.history, hasMore: previous.history.hasMore, before: previous.history.before }
     : result.history;
@@ -1931,10 +1929,6 @@ function syncApprovalRequests(threadId, requests) {
   if (state.selectedThreadId === threadId) renderPendingRequests();
 }
 
-function mergeTurnPages(existing, incoming) {
-  return mergeConversationTurns(existing, incoming, { canonical: true });
-}
-
 async function loadOlderTurns() {
   const project = currentProject();
   const thread = currentThread();
@@ -2150,7 +2144,7 @@ function ensureExecutionGroup(turnId, turnStatus, timing) {
   group.footer = createTurnFooter({
     id: turnId,
     onDiff: () => openFileChangePreview({ type: "fileChange", changes: group.changes }),
-    onCopy: (button) => copyWithFeedback(button, processMarkdownForGroup(group)),
+    onCopy: (button) => copyWithFeedback(button, markdownForGroup(group)),
   });
   root.append(list, group.footer.root);
   ui.conversation.append(root);
@@ -2193,14 +2187,9 @@ function updateExecutionGroup(group, turnStatus) {
   const label = running ? diagnostic.label : failed ? "失败" : stopped ? "已停止" : "已完成";
   const tone = running ? "running" : failed ? "failed" : stopped ? "stopped" : "complete";
   for (const name of ["running", "failed", "stopped", "complete"]) group.root.classList.toggle(name, tone === name);
-  const turn = currentThread()?.turns?.find((entry) => entry.id === group.turnId);
   const executionItems = [...group.items.values()].map((entry) => entry.item);
-  // Decide action visibility from metadata, without serializing tool output
-  // into Markdown on every streamed update. Copy still uses the full source.
-  const copyable = Boolean(group.items.size || group.recovered.length || group.planValue?.plan?.length || group.planValue?.explanation?.trim()
-    || turn?.items?.some((item) => item.type === "agentMessage" && item.phase === "commentary" && item.text?.trim()));
   updateTurnFooter(group.footer, {
-    label, tone, running, plan: group.planValue, copyable,
+    label, tone, running, plan: group.planValue,
     timing: running ? null : summarizeExecutionTiming(group, [...executionItems, ...group.recovered]),
     changes: group.changes, recovered: group.recovered,
   });
@@ -2408,7 +2397,7 @@ function limitExecutionDetail(value, limit = 16000, keepEnd = false) {
     : `${text.slice(0, limit)}\n\n…后面的内容已截断显示`;
 }
 
-function processMarkdownForGroup(group) {
+function markdownForGroup(group) {
   if (!group?.turnId) return "";
   const storedTurn = (currentThread()?.turns || []).find((turn) => turn.id === group.turnId);
   const liveItems = new Map([...group.items.values()].map((entry) => [entry.item.id, entry.item]));
@@ -2419,8 +2408,9 @@ function processMarkdownForGroup(group) {
     if (item.id) liveItems.delete(item.id);
   }
   items.push(...liveItems.values());
-  return turnProcessMarkdown({
-    plan: storedTurn?.task?.plan || state.turnMetrics.get(group.turnId)?.plan,
+  return turnMarkdown({
+    plan: group.planValue || storedTurn?.task?.plan || state.turnMetrics.get(group.turnId)?.plan,
+    diff: storedTurn?.task?.diff,
     items,
     recovered: group.recovered,
   });
@@ -4823,7 +4813,10 @@ function renderProjectManager() {
     } else if (remove.disabled) {
       remove.title = "至少保留一个项目。";
     }
-    actions.append(open, rename, edit, remove);
+    const canManage = project.ownerId === state.user?.id || state.user?.role === "admin";
+    const share = projectAction("授权", () => openProjectMembers(project));
+    actions.append(open);
+    if (canManage) actions.append(rename, edit, share, remove);
     row.append(detail, actions);
     ui.projectManagerList.append(row);
   }
@@ -4836,6 +4829,63 @@ function projectAction(label, action) {
   button.textContent = label;
   button.addEventListener("click", () => Promise.resolve(action()).catch(showError));
   return button;
+}
+
+async function openProjectMembers(project) {
+  const { members } = await api(`/api/projects/${encodeURIComponent(project.id)}/members`);
+  const dialog = document.createElement("dialog");
+  dialog.className = "project-dialog";
+  const form = document.createElement("form");
+  const title = document.createElement("h2");
+  title.textContent = `${project.name} · 项目授权`;
+  dialog.setAttribute("aria-label", title.textContent);
+  const heading = document.createElement("div");
+  heading.className = "dialog-heading";
+  heading.append(title);
+  const description = document.createElement("p");
+  description.textContent = "被授权账号可以访问和操作项目文件、该项目的聊天与队列。所有者负责管理项目和授权。";
+  const checks = [];
+  for (const member of members) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = member.granted;
+    checkbox.disabled = member.owner;
+    label.append(checkbox, document.createTextNode(`${member.displayName || member.username} (${member.username})${member.owner ? " · 所有者" : ""}${member.active ? "" : " · 已停用"}`));
+    checks.push({ member, checkbox });
+    form.append(label);
+  }
+  const error = document.createElement("p");
+  error.className = "form-error";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "primary-button";
+  save.textContent = "保存授权";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "quiet-button";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => dialog.close());
+  const actions = document.createElement("div");
+  actions.className = "dialog-actions";
+  actions.append(document.createElement("span"), document.createElement("span"), cancel, save);
+  form.prepend(heading, description);
+  form.append(error, actions);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      await api(`/api/projects/${encodeURIComponent(project.id)}/members`, { method: "PUT", body: { memberIds: checks.filter(({ checkbox, member }) => checkbox.checked && !member.owner).map(({ member }) => member.id) } });
+      dialog.close();
+      await loadProjects();
+      renderProjectManager();
+    } catch (failure) { error.textContent = failure.message; }
+    finally { save.disabled = false; }
+  });
+  dialog.append(form);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 function openProjectRenameDialog(project) {
@@ -4900,10 +4950,10 @@ function openProjectDialog(project = null) {
   ui.projectPath.readOnly = !admin;
   ui.projectPath.setAttribute("aria-readonly", String(!admin));
   ui.projectPath.required = false;
-  ui.projectPath.placeholder = admin ? "留空则在个人目录创建，或输入任意绝对目录" : "";
+  ui.projectPath.placeholder = admin ? "输入任意绝对目录；留空则按项目名称创建" : "";
   ui.projectPath.value = project?.path || (admin
     ? ""
-    : `${state.workspaceRoot || "工作区根目录"}\\${state.user?.username || "账号"}\\（按项目名称自动创建）`);
+    : `${state.workspaceRoot || "默认项目目录"}\\（按项目名称自动创建）`);
   ui.projectError.textContent = "";
   ui.deleteProject.hidden = !project;
   ui.projectDialog.showModal();
@@ -5433,6 +5483,57 @@ function reloadPage() {
 ui.refreshWorkspace.addEventListener("click", reloadPage);
 ui.mobileRefresh.addEventListener("click", reloadPage);
 ui.openGlobalSettings.addEventListener("click", openGlobalSettings);
+const searchDialog = $("#search-dialog");
+const searchInput = $("#search-input");
+const searchResults = $("#search-results");
+const searchMore = $("#search-more");
+let searchTimer, searchSequence = 0, searchCursor = null;
+async function searchConversations(append = false) {
+  const term = searchInput.value.trim();
+  const sequence = ++searchSequence;
+  if (!term) { searchResults.textContent = "输入关键词，查找对话。"; searchMore.hidden = true; return; }
+  if (!append) searchResults.textContent = "正在搜索…";
+  searchMore.hidden = true;
+  try {
+    const data = await api(`/api/workspace/search?q=${encodeURIComponent(term)}${append && searchCursor ? `&cursor=${encodeURIComponent(searchCursor)}` : ""}`);
+    if (sequence !== searchSequence) return;
+    if (!append || !searchResults.children.length) searchResults.replaceChildren();
+    for (const result of data.results) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "search-result";
+      const title = document.createElement("strong"); title.textContent = threadDisplayName(result.thread);
+      const project = document.createElement("small"); project.textContent = result.projectName;
+      const snippet = document.createElement("span"); snippet.textContent = result.snippet;
+      button.append(title, project, snippet);
+      button.addEventListener("click", () => {
+        const existing = findThread(result.projectId, result.thread.id);
+        updateThreadInState(result.projectId, { ...result.thread, ...(existing?.name && !result.thread.name ? { name: existing.name } : {}) });
+        searchDialog.close();
+        void selectProject(result.projectId, { threadId: result.thread.id }).catch(showError);
+      });
+      searchResults.append(button);
+    }
+    searchCursor = data.nextCursor;
+    searchMore.hidden = !searchCursor;
+    if (!searchResults.children.length) searchResults.textContent = searchCursor ? "本页没有可访问的结果，可继续加载。" : "没有找到匹配的对话。";
+  } catch (error) {
+    if (sequence === searchSequence) {
+      if (append) { searchMore.hidden = false; showActivity(`加载更多失败：${error.message}`, true); }
+      else searchResults.textContent = `搜索失败：${error.message}`;
+    }
+  }
+}
+$("#open-search").addEventListener("click", () => { searchDialog.showModal(); searchInput.focus(); if (searchInput.value.trim()) void searchConversations(); else searchResults.textContent = "输入关键词，查找对话。"; });
+$("#close-search").addEventListener("click", () => searchDialog.close());
+searchDialog.addEventListener("close", () => { ++searchSequence; clearTimeout(searchTimer); });
+searchInput.addEventListener("input", () => {
+  ++searchSequence; clearTimeout(searchTimer); searchCursor = null; searchMore.hidden = true;
+  searchResults.textContent = searchInput.value.trim() ? "正在搜索…" : "输入关键词，查找对话。";
+  searchTimer = setTimeout(() => searchConversations(), 300);
+});
+searchMore.addEventListener("click", () => searchConversations(true));
+$("#copy-thread-id").addEventListener("click", (event) => copyWithFeedback(event.currentTarget, state.selectedThreadId));
+$("#copy-thread-title").addEventListener("click", (event) => copyWithFeedback(event.currentTarget, currentThread() ? threadDisplayName(currentThread()) : ""));
 ui.newThread.addEventListener("click", () => createThread().catch(showError));
 ui.quickNewThread.addEventListener("click", () => createThread().catch(showError));
 ui.guide.addEventListener("click", () => { state.mode = "guide"; updateComposer(); });

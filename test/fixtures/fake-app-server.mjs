@@ -523,6 +523,14 @@ function fakeResult(method, params = {}) {
     if (materializedThreads.has(source.id)) materializedThreads.add(thread.id);
     return { thread: params.excludeTurns ? { ...copy(thread), turns: [] } : copy(thread) };
   }
+  if (method === "thread/search") {
+    const term = String(params.searchTerm || "").toLowerCase();
+    const matching = [...threads.values()].filter((thread) => JSON.stringify(thread).toLowerCase().includes(term));
+    const offset = Number(params.cursor || 0);
+    const limit = Math.max(1, Number(params.limit || 50));
+    return { data: matching.slice(offset, offset + limit).map((thread) => ({ thread: copy(thread), snippet: `匹配：${params.searchTerm}` })),
+      nextCursor: offset + limit < matching.length ? String(offset + limit) : null };
+  }
   if (method === "thread/list") {
     const key = params.sortKey === "updated_at" ? "updatedAt" : "createdAt";
     const matching = [...threads.values()].filter((thread) => !params.cwd || (Array.isArray(params.cwd) ? params.cwd.includes(thread.cwd) : thread.cwd === params.cwd))

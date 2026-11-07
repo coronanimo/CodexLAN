@@ -10,6 +10,7 @@ function streamHarness() {
   const pendingRead = new Promise((resolve, reject) => { resolveRead = resolve; rejectRead = reject; });
   const store = {
     ready: Promise.resolve(), projects: [{ id: "project", ownerId: "user" }],
+    canAccessProject: (project, userId) => project?.ownerId === userId,
     threadProjects: { [threadId]: "project" }, turnMetrics: {}, queues: {}, queueRevisions: {}, asyncInputAnswers: {},
     requireThreadOwner: async () => {}, listQueuedThreadIds: async () => [], recordTurnMetric: async () => {},
   };

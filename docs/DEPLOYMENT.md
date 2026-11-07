@@ -38,7 +38,7 @@ There is no default username or password. On empty application state, open the p
 ## LAN checklist
 
 1. Keep the Windows network profile set to Private.
-2. Set `workspaceRoot` to the smallest shared boundary containing the managed user directories.
+2. Set `workspaceRoot` to the default directory for creating new projects. Project access is recorded by owner and collaborator IDs, independently of the project's absolute path; no username subdirectory is required.
 3. Start without a firewall rule first; add a Private-profile rule only if another LAN device cannot connect.
 4. Allow accounts only for mutually trusted people.
 5. Prevent the server computer from sleeping while long-running work must remain reachable.

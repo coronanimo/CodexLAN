@@ -16,12 +16,16 @@ test("loads server settings from config/codexlan.json and resolves relative path
       workspaceRoot: "../workspace",
       dataRoot: "../runtime",
       codexBin: null,
+      logRoot: "../logs-external",
+      attachmentRoot: "../attachments-external",
     }));
     const config = await loadServerConfig({ appRoot: root, env: {} });
     assert.equal(config.port, 8688);
     assert.equal(config.host, undefined);
     assert.equal(config.workspaceRoot, join(root, "workspace"));
     assert.equal(config.dataRoot, join(root, "runtime"));
+    assert.equal(config.logRoot, join(root, "logs-external"));
+    assert.equal(config.attachmentRoot, join(root, "attachments-external"));
     assert.equal(config.configPath, join(root, "config", "codexlan.json"));
     assert.equal(config.autoApproveBrowser, false);
   } finally {

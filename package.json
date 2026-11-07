@@ -17,7 +17,7 @@
     "service:restart": "node server/service.mjs restart",
     "service:status": "node server/service.mjs status",
     "service:log": "node server/service.mjs log",
-    "test": "node scripts/test.mjs",
+    "test": "node scripts/run-tests.mjs",
     "check": "node --check server/index.mjs && node --check server/service.mjs && node --check server/accounts.mjs && node --check server/codex-client.mjs && node --check server/config.mjs && node --check server/conversations.mjs && node --check server/http.mjs && node --check server/projects.mjs && node --check server/thread-titles.mjs && node --check server/workspace-store.mjs && node --check public/app.js && node --check public/profiling.js && node --check public/desktop.js && node --check public/goal.js && node --check public/mobile.js && npm test"
   },
   "dependencies": {

@@ -10,6 +10,8 @@ const CONFIG_KEYS = new Set([
   "host",
   "workspaceRoot",
   "dataRoot",
+  "logRoot",
+  "attachmentRoot",
   "codexBin",
   "autoApprove",
   "autoApproveBrowser",
@@ -45,6 +47,9 @@ export async function loadServerConfig({ appRoot, env = process.env } = {}) {
     workspaceRoot: pathSetting(workspaceRootSetting, "workspaceRoot", configBase, appRoot),
     workspaceRootConfigured: workspaceRootSetting.configured,
     dataRoot,
+    logRoot: pathSetting(setting(fileConfig, env, "logRoot", "CODEX_LOG_DIR", join(appRoot, "logs")), "logRoot", configBase, appRoot),
+    attachmentRoot: Object.hasOwn(fileConfig, "attachmentRoot")
+      ? pathSetting({ value: fileConfig.attachmentRoot }, "attachmentRoot", configBase, appRoot) : null,
     codexBin,
     autoApprove,
     autoApproveBrowser,

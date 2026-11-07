@@ -143,7 +143,7 @@ function createWorkspaceApplication() {
   registerHealthRoutes(application);
   registerAccounts(application, { auth, store, onSessionsRevoked: conversations.closeUserEventStreams });
   registerRuntimeRoutes(application);
-  registerProjects(application, { store, conversations });
+  registerProjects(application, { store, conversations, attachmentRoot: serverConfig.attachmentRoot });
   conversations.registerRoutes(application);
   application.use("/api", (request, response) => json(response, 404, { error: "找不到 API。" }));
   application.use((request, response) => serveStatic(request.codexUrl.pathname, request, response));

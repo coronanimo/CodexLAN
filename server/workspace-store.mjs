@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { WorkspaceDatabase, WORKSPACE_SCHEMA_VERSION } from "./workspace-database.mjs";
@@ -31,6 +31,9 @@ async function migrateWorkspaceState(input) {
     throw new Error(`Unsupported workspace state version: ${input.version ?? "missing"}.`);
   }
   const state = input.version === 9 ? await migrateV9State(structuredClone(input)) : input;
+  for (const project of state.projects || []) {
+    if (project.memberIds !== undefined && (!Array.isArray(project.memberIds) || project.memberIds.some((id) => typeof id !== "string" || !(state.users || []).some((user) => user.id === id)))) throw new Error("项目授权包含无效账号。");
+  }
   if (!Array.isArray(state.projects)
     || !Array.isArray(state.users)
     || ["queues", "queueRevisions", "threadSettings", "turnMetrics", "threadProjects", "threadAccesses", "sessions"].some((field) => !isRecord(state[field]))) {
@@ -189,7 +192,6 @@ export class WorkspaceStore {
       process.stderr.write(`[data] 工作区状态文件无法读取，已移至 ${quarantined}：${stateError.message}\n`);
     }
     if (state) {
-      await repairMemberProjectPaths(state.projects, state.users, this.workspace);
       this.projects = state.projects;
       this.queues = state.queues;
       this.queueRevisions = state.queueRevisions;
@@ -254,14 +256,43 @@ export class WorkspaceStore {
 
   async listProjects(ownerId) {
     await this.ready;
-    const projects = ownerId ? this.projects.filter((project) => project.ownerId === ownerId) : this.projects;
+    const projects = ownerId ? this.projects.filter((project) => this.canAccessProject(project, ownerId)) : this.projects;
     return structuredClone(projects.map((project) => ({ ...project, available: projectDirectoryAvailable(project.path) })));
+  }
+
+  canAccessProject(project, userId) {
+    return Boolean(project && userId && (project.ownerId === userId || project.memberIds?.includes(userId)));
+  }
+
+  requireProjectManager(project, userId) {
+    if (!userId || project.ownerId === userId) return;
+    if (this.users.some((user) => user.id === userId && user.role === "admin") && this.canAccessProject(project, userId)) return;
+    throw httpError(403, "只有项目所有者或已获授权的管理员可以管理项目。");
+  }
+
+  async projectMembers(projectId, userId) {
+    const project = await this.getProject(projectId, userId, { requireAvailable: false });
+    this.requireProjectManager(project, userId);
+    return this.users.map(({ id, username, displayName, active }) => ({
+      id, username, displayName, active, owner: project.ownerId === id,
+      granted: this.canAccessProject(project, id),
+    }));
+  }
+
+  async setProjectMembers(projectId, userId, memberIds) {
+    const project = await this.getProject(projectId, userId, { requireAvailable: false });
+    this.requireProjectManager(project, userId);
+    if (!Array.isArray(memberIds) || memberIds.some((id) => typeof id !== "string" || !this.users.some((user) => user.id === id))) throw httpError(400, "授权账号无效。");
+    project.memberIds = [...new Set(memberIds)].filter((id) => id !== project.ownerId);
+    project.updatedAt = new Date().toISOString();
+    await this.persist({ projects: [projectId] });
+    return this.projectMembers(projectId, userId);
   }
 
   async getProject(id, ownerId = null, { requireAvailable = true } = {}) {
     await this.ready;
     const project = this.projects.find((entry) => entry.id === id);
-    if (!project || (ownerId && project.ownerId !== ownerId)) throw httpError(404, "项目不存在或已删除。");
+    if (!project || (ownerId && !this.canAccessProject(project, ownerId))) throw httpError(404, "项目不存在或已删除。");
     if (requireAvailable && !projectDirectoryAvailable(project.path)) throw httpError(409, "项目目录当前不可用，请恢复目录后重试。");
     return project;
   }
@@ -273,13 +304,10 @@ export class WorkspaceStore {
     let path;
     if (Object.hasOwn(input, "path") && String(input.path || "").trim()) {
       const candidate = projectDirectoryPath(input.path);
-      if (owner.role !== "admin") requireStrictPathInside(managedUserRoot(this.workspace, owner.username), candidate, "成员只能在自己的项目目录下添加项目。");
+      if (owner.role !== "admin") throw httpError(403, "已有目录须由管理员添加后授权；新项目请留空目录。");
       path = await createProjectDirectory(candidate);
-      if (owner.role !== "admin") {
-        requireStrictPathInside(await realpath(managedUserRoot(this.workspace, owner.username)), path, "成员只能在自己的项目目录下添加项目。");
-      }
     } else {
-      path = await createManagedProjectDirectory(this.workspace, owner.username, name);
+      path = await createManagedProjectDirectory(this.workspace, name);
     }
     this.requireUniqueProjectPath(path);
     const project = { ...makeProject({ ...input, name, path }), ownerId };
@@ -290,21 +318,15 @@ export class WorkspaceStore {
 
   async updateProject(id, input, ownerId = null) {
     const project = await this.getProject(id, ownerId, { requireAvailable: false });
+    this.requireProjectManager(project, ownerId);
     if (Object.hasOwn(input, "path") && resolve(String(input.path || "")) !== resolve(project.path)) {
-      const owner = await this.getUser(project.ownerId);
+      const owner = await this.getUser(ownerId || project.ownerId);
       if (owner.role !== "admin") throw httpError(403, "成员不能修改项目目录。");
       if (Object.values(this.queues).some((queue) => queue.some((item) => item.projectId === project.id))) {
         throw httpError(409, "项目仍有等待任务，处理完后才能修改目录。");
       }
       const path = await createProjectDirectory(input.path);
       this.requireUniqueProjectPath(path, project.id);
-      for (const [threadId, projectId] of Object.entries(this.threadProjects)) {
-        if (projectId !== project.id) continue;
-        delete this.threadProjects[threadId];
-        delete this.asyncInputAnswers[threadId];
-        this.markChanges({ threadProjects: [threadId], asyncInputAnswers: [threadId] });
-        this.deleteThreadAccess(threadId);
-      }
       project.path = path;
     }
     if (Object.hasOwn(input, "name")) project.name = validateProjectName(input.name);
@@ -321,7 +343,9 @@ export class WorkspaceStore {
 
   async removeProject(id, ownerId = null) {
     await this.ready;
-    const index = this.projects.findIndex((project) => project.id === id && (!ownerId || project.ownerId === ownerId));
+    const existing = await this.getProject(id, ownerId, { requireAvailable: false });
+    this.requireProjectManager(existing, ownerId);
+    const index = this.projects.findIndex((project) => project.id === id);
     if (index === -1) throw httpError(404, "项目不存在或已删除。");
     if (Object.values(this.queues).some((queue) => queue.some((item) => item.projectId === id))) {
       throw httpError(409, "项目仍有等待任务，处理完后才能删除。");
@@ -350,7 +374,7 @@ export class WorkspaceStore {
       throw httpError(409, "检测到尚未迁移的旧版工作台数据，不能将其自动归给新管理员。");
     }
     const user = await makeStoredUser({ ...input, role: "admin" });
-    const defaultProjectPath = await createManagedProjectDirectory(this.workspace, user.username, "默认项目");
+    const defaultProjectPath = await createManagedProjectDirectory(this.workspace, "默认项目");
     const defaultProject = { ...makeProject({ name: "默认项目", path: defaultProjectPath }), ownerId: user.id };
     this.users.push(user);
     this.projects.push(defaultProject);
@@ -416,7 +440,7 @@ export class WorkspaceStore {
     await this.ready;
     const boundProjectId = this.threadProjects[threadId];
     const project = this.projects.find((entry) => entry.id === boundProjectId);
-    if (!project || project.ownerId !== ownerId) throw httpError(404, "聊天不存在或不属于当前账号。");
+    if (!project || !this.canAccessProject(project, ownerId)) throw httpError(404, "聊天不存在或不属于当前账号。");
     if (projectId && boundProjectId !== projectId) throw httpError(404, "聊天不存在或不属于当前项目。");
     return boundProjectId;
   }
@@ -428,7 +452,7 @@ export class WorkspaceStore {
   async bindProjectThreads(threads, ownerId, projectId) {
     await this.ready;
     const project = this.projects.find((entry) => entry.id === projectId);
-    if (!project || project.ownerId !== ownerId) throw httpError(404, "项目不存在或已删除。");
+    if (!project || !this.canAccessProject(project, ownerId)) throw httpError(404, "项目不存在或已删除。");
     let changed = false;
     const changedIds = [];
     for (const thread of threads) {
@@ -1147,44 +1171,6 @@ export function samePath(left, right) {
   return normalizePath(left) === normalizePath(right);
 }
 
-function managedUserRoot(workspace, username) {
-  return join(workspace, normalizeUsername(username));
-}
-
-async function repairMemberProjectPaths(projects, users, workspace) {
-  for (const project of projects) {
-    const owner = users.find((user) => user.id === project.ownerId);
-    if (!owner || owner.role === "admin") continue;
-    const userRoot = managedUserRoot(workspace, owner.username);
-    if (isStrictPathInside(userRoot, project.path)) continue;
-    const target = join(userRoot, safeProjectDirectoryName(project.name));
-    if (!projectDirectoryAvailable(target)) {
-      throw new Error(`成员项目“${project.name}”不在账号目录中，且迁移目标不存在：${target}`);
-    }
-    if (projects.some((candidate) => candidate.id !== project.id && samePath(candidate.path, target))) {
-      throw new Error(`成员项目“${project.name}”的迁移目标已被其他项目占用：${target}`);
-    }
-    const [resolvedUserRoot, resolvedTarget] = await Promise.all([realpath(userRoot), realpath(target)]);
-    if (!isStrictPathInside(resolvedUserRoot, resolvedTarget)) {
-      throw new Error(`成员项目“${project.name}”的迁移目标越过账号目录：${target}`);
-    }
-    project.path = resolvedTarget;
-    project.updatedAt = new Date().toISOString();
-  }
-}
-
-function isStrictPathInside(root, candidate) {
-  const relativePath = relative(resolve(root), resolve(candidate));
-  return Boolean(relativePath)
-    && !relativePath.startsWith(`..${sep}`)
-    && relativePath !== ".."
-    && !isAbsolute(relativePath);
-}
-
-function requireStrictPathInside(root, candidate, message) {
-  if (!isStrictPathInside(root, candidate)) throw httpError(403, message);
-}
-
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -1236,8 +1222,8 @@ function isStoredSettings(value) {
     && setting.length <= 120);
 }
 
-async function createManagedProjectDirectory(workspace, username, projectName) {
-  const userRoot = managedUserRoot(workspace, username);
+async function createManagedProjectDirectory(workspace, projectName) {
+  const userRoot = workspace;
   await mkdir(userRoot, { recursive: true });
   const baseName = safeProjectDirectoryName(projectName);
   let candidate = join(userRoot, baseName);

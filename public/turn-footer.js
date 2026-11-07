@@ -58,9 +58,9 @@ export function createTurnFooter({ id, onDiff, onCopy }) {
   const copy = document.createElement("button");
   copy.type = "button";
   copy.className = "copy-text-button icon-copy-button turn-footer-copy";
-  copy.textContent = "复制过程";
-  copy.title = "复制过程";
-  copy.setAttribute("aria-label", "复制执行过程的 Markdown 原文");
+  copy.textContent = "复制全部";
+  copy.title = "复制本轮全部内容";
+  copy.setAttribute("aria-label", "复制本轮全部内容的 Markdown 原文");
   copy.onclick = () => onCopy(copy);
   const tools = document.createElement("div");
   tools.className = "turn-footer-tools";
@@ -117,7 +117,7 @@ export function createTurnFooter({ id, onDiff, onCopy }) {
   return { root, status, tools, toggle, headline, progress, planTitle, elapsed, diff, files, added, removed, copy, details, plan, planBody, timing, fields, recovery, recoveryBody, diagnostics };
 }
 
-export function updateTurnFooter(view, { label, tone, running, plan, timing, recovered = [], changes = [], copyable = false }) {
+export function updateTurnFooter(view, { label, tone, running, plan, timing, recovered = [], changes = [] }) {
   const presentation = turnPlanPresentation(plan);
   view.root.dataset.tone = tone;
   if (running && view.elapsed.parentElement !== view.tools) view.tools.append(view.elapsed);
@@ -139,7 +139,7 @@ export function updateTurnFooter(view, { label, tone, running, plan, timing, rec
   view.added.hidden = !stats.added;
   view.removed.hidden = !stats.removed;
   view.diff.setAttribute("aria-label", `查看本轮累计文件差异${count ? `：${count} 个文件` : ""}，新增 ${stats.added} 行，删除 ${stats.removed} 行`);
-  view.copy.hidden = running || !copyable;
+  view.copy.hidden = running;
   view.plan.hidden = !presentation.total && !presentation.explanation;
   view.planTitle.textContent = presentation.explanation || "";
   view.planTitle.title = presentation.explanation || "";

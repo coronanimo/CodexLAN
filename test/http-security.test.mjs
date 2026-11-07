@@ -20,12 +20,16 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
   const unboundNotificationThread = "00000000-0000-4000-8000-000000000001";
   await Promise.all([mkdir(workspace), mkdir(data), writeFile(outsideFile, "must-not-leak", "utf8")]);
   const port = await availablePort();
+  const configFile = join(temporaryRoot, "config.json");
+  const attachmentRoot = join(temporaryRoot, "attachments");
+  await writeFile(configFile, JSON.stringify({ attachmentRoot }));
   const origin = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["server/index.mjs"], {
     cwd: repositoryRoot,
     env: {
       ...process.env,
       NODE_ENV: "test",
+      CODEX_CONFIG: configFile,
       CODEX_WEB_HOST: "127.0.0.1",
       CODEX_WEB_PORT: String(port),
       CODEX_WORKDIR: workspace,
@@ -40,7 +44,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       CODEX_TEST_PLAN_UPDATE: "1",
       CODEX_TEST_EXIT_SIGNAL_FILE: exitSignalFile,
       CODEX_TEST_UNBOUND_NOTIFICATION_THREAD: unboundNotificationThread,
-      CODEX_TEST_SEED_CWD: join(workspace, "admin", "默认项目"),
+      CODEX_TEST_SEED_CWD: join(workspace, "默认项目"),
       CODEX_TEST_SEED_COUNT: "205",
       CODEX_TEST_LEGACY_LIST_TITLE: "1",
     },
@@ -692,6 +696,25 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(uploadedAttachment.status, 201);
     const uploadedFile = (await uploadedAttachment.json()).file;
     assert.equal(await readFile(uploadedFile.path, "utf8"), "attachment upload works");
+    assert.ok(uploadedFile.path.startsWith(join(attachmentRoot, createdProject.body.project.id)));
+    const ownDownload = await fetch(`${origin}/api/projects/${createdProject.body.project.id}/files/download?path=${encodeURIComponent(uploadedFile.path)}`, { headers: { Cookie: adminCookie } });
+    assert.equal(ownDownload.status, 200);
+    assert.equal(await ownDownload.text(), "attachment upload works");
+    const otherDownload = await fetch(`${origin}/api/projects/${secondProject.body.project.id}/files/download?path=${encodeURIComponent(uploadedFile.path)}`, { headers: { Cookie: adminCookie } });
+    assert.equal(otherDownload.status, 403);
+    const otherDelete = await request(origin, `/api/projects/${secondProject.body.project.id}/files/attachment?path=${encodeURIComponent(uploadedFile.path)}`, { method: "DELETE", cookie: adminCookie, csrf: adminCsrf });
+    assert.equal(otherDelete.status, 403);
+    const ownDelete = await request(origin, `/api/projects/${createdProject.body.project.id}/files/attachment?path=${encodeURIComponent(uploadedFile.path)}`, { method: "DELETE", cookie: adminCookie, csrf: adminCsrf });
+    assert.equal(ownDelete.status, 200);
+    const legacyDirectory = join(createdProject.body.project.path, ".codexlan", "attachments");
+    await mkdir(legacyDirectory, { recursive: true });
+    const legacyFile = join(legacyDirectory, "legacy.txt");
+    await writeFile(legacyFile, "historical attachment");
+    const legacyDownload = await fetch(`${origin}/api/projects/${createdProject.body.project.id}/files/download?path=${encodeURIComponent(legacyFile)}`, { headers: { Cookie: adminCookie } });
+    assert.equal(legacyDownload.status, 200);
+    assert.equal(await legacyDownload.text(), "historical attachment");
+    const legacyDelete = await request(origin, `/api/projects/${createdProject.body.project.id}/files/attachment?path=${encodeURIComponent(legacyFile)}`, { method: "DELETE", cookie: adminCookie, csrf: adminCsrf });
+    assert.equal(legacyDelete.status, 200);
 
     const persistedAfterThread = JSON.parse(await readFile(join(data, "workspace-state.json"), "utf8"));
     assert.equal(persistedAfterThread.version, 13);
@@ -809,7 +832,7 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
       body: { name: "Member project" },
     });
     assert.equal(memberProject.status, 201);
-    assert.equal(dirname(memberProject.body.project.path), join(workspace, "member"));
+    assert.equal(dirname(memberProject.body.project.path), await realpath(workspace));
 
     const rejectedMemberPath = join(temporaryRoot, "member-must-not-create-here");
     const memberOutsideProject = await request(origin, "/api/projects", {
@@ -825,6 +848,39 @@ test("enforces HTTP authentication, origin, CSRF, role, rate-limit, and path bou
     assert.equal(memberUsers.status, 403);
     const memberAdminDownload = await request(origin, `/api/admin/files/download?path=${encodeURIComponent(outsideFile)}`, { cookie: memberCookie });
     assert.equal(memberAdminDownload.status, 403);
+
+    const sharePath = `/api/projects/${createdProject.body.project.id}/members`;
+    const sharingThread = await request(origin, "/api/threads", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { projectId: createdProject.body.project.id, firstMessage: "Shared project test" } });
+    assert.equal(sharingThread.status, 201);
+    const sharingId = sharingThread.body.thread.id;
+    assert.equal((await request(origin, `/api/threads/${threadId}?projectId=${createdProject.body.project.id}`, { cookie: memberCookie })).status, 404);
+    const grant = await request(origin, sharePath, { method: "PUT", cookie: adminCookie, csrf: adminCsrf, body: { memberIds: [memberLogin.body.user.id] } });
+    assert.equal(grant.status, 200);
+    const sharedProjects = await request(origin, "/api/projects", { cookie: memberCookie });
+    assert.ok(sharedProjects.body.projects.some((project) => project.id === createdProject.body.project.id));
+    const sharedRead = await request(origin, `/api/threads/${sharingId}?projectId=${createdProject.body.project.id}`, { cookie: memberCookie });
+    assert.equal(sharedRead.status, 200, JSON.stringify(sharedRead.body));
+    const sharedEvents = await fetch(`${origin}/api/events?scope=workspace&threadId=${sharingId}`, { headers: { Cookie: memberCookie } });
+    const sharedInitial = await readSseUntil(sharedEvents.body.getReader(), (contents) => contents.includes('"method":"workspace/state"'));
+    assert.match(sharedInitial, /workspace\/state/);
+    const liveShared = await fetch(`${origin}/api/events?scope=workspace&threadId=${sharingId}`, { headers: { Cookie: memberCookie } });
+    const memberQueued = await request(origin, `/api/threads/${sharingId}/queue`, { method: "POST", cookie: memberCookie, csrf: memberCsrf, body: { projectId: createdProject.body.project.id, text: "Shared member queued message" } });
+    assert.equal(memberQueued.status, 202);
+    const memberQueueEvents = await readSseUntil(liveShared.body.getReader(), (contents) => contents.includes('"method":"queue/updated"'));
+    assert.match(memberQueueEvents, /queue\/updated/);
+    const revokeStream = await fetch(`${origin}/api/events?scope=workspace&threadId=${sharingId}`, { headers: { Cookie: memberCookie } });
+    const revokeReader = revokeStream.body.getReader();
+    await readWithTimeout(revokeReader, 1000);
+    assert.equal((await request(origin, sharePath, { method: "PUT", cookie: memberCookie, csrf: memberCsrf, body: { memberIds: [] } })).status, 403);
+    assert.equal((await request(origin, `/api/projects/${createdProject.body.project.id}`, { method: "DELETE", cookie: memberCookie, csrf: memberCsrf })).status, 403);
+    assert.equal((await request(origin, sharePath, { method: "PUT", cookie: adminCookie, csrf: adminCsrf, body: { memberIds: [] } })).status, 200);
+    let revokedClosed = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if ((await readWithTimeout(revokeReader, 1000)).done) { revokedClosed = true; break; }
+    }
+    assert.equal(revokedClosed, true);
+    assert.equal((await request(origin, `/api/threads/${threadId}?projectId=${createdProject.body.project.id}`, { cookie: memberCookie })).status, 404);
+    assert.equal((await fetch(`${origin}/api/events?scope=workspace&threadId=${sharingId}`, { headers: { Cookie: memberCookie } })).status, 404);
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const failed = await request(origin, "/api/auth/login", {

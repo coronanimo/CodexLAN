@@ -65,6 +65,17 @@ export function mergeConversationTurns(previous = [], incoming = [], { canonical
   return order.map((id) => turns.get(id)).filter(Boolean);
 }
 
+// The latest history page may lag behind a turn already received over SSE.
+// Keep that active turn after the history page even if an earlier event placed
+// it before a subsequently observed completed turn.
+export function mergeLatestConversationTurns(previous, incoming, activeTurnId) {
+  const merged = mergeConversationTurns(previous, incoming, { canonical: true });
+  if (!activeTurnId || incoming.some((turn) => turn.id === activeTurnId)) return merged;
+  const index = merged.findIndex((turn) => turn.id === activeTurnId);
+  if (index < 0) return merged;
+  return [...merged.slice(0, index), ...merged.slice(index + 1), merged[index]];
+}
+
 // One reducer for raw upstream inputs. Used before network coalescing, and by
 // older-service clients as an adapter; renderers never interpret protocol events.
 export function reduceConversationEvent(turns, message, version = 0) {

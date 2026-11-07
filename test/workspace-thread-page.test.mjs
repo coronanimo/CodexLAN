@@ -25,6 +25,12 @@ function fixture() {
     events: new EventEmitter(),
     request: async (method, params) => {
       calls.push({ method, params });
+      if (method === "thread/search") {
+        const start = Number(params.cursor || 0);
+        const matching = threads.filter((thread) => thread.name.includes(params.searchTerm));
+        return { data: matching.slice(start, start + params.limit).map((thread) => ({ thread, snippet: `匹配 ${thread.name}` })),
+          nextCursor: start + params.limit < matching.length ? String(start + params.limit) : null };
+      }
       if (method === "thread/list") {
         assert.equal(params.useStateDbOnly, true);
         const matching = threads.filter((thread) => !params.cwd || thread.cwd === params.cwd);
@@ -50,8 +56,31 @@ function fixture() {
       { writeHead() {}, end(value) { body = JSON.parse(value); } });
     return body;
   };
-  return { store, threads, calls, read };
+  const search = async (query) => {
+    let body;
+    await routes.get("/api/workspace/search")({ identity: { user: { id: "user" } }, codexUrl: new URL(`http://localhost/api/workspace/search?${query}`) },
+      { writeHead() {}, end(value) { body = JSON.parse(value); } });
+    return body;
+  };
+  return { store, threads, calls, read, search };
 }
+
+test("search filters foreign threads before exposing snippets and preserves pagination", async () => {
+  const { store, threads, calls, search } = fixture();
+  store.threadProjects["thread-0"] = "foreign-project";
+  store.threadProjects["thread-1"] = "project";
+  threads[1].cwd = "C:/moved";
+  threads[2].cwd = "C:/foreign";
+  threads[3].cwd = null;
+  const first = await search("q=Conversation");
+  assert.equal(first.results.some((item) => ["thread-0", "thread-2", "thread-3"].includes(item.thread.id)), false);
+  assert.equal(first.results[0].thread.id, "thread-1");
+  assert.match(first.results[0].snippet, /Conversation 1/);
+  assert.equal(first.nextCursor, "50");
+  const second = await search(`q=Conversation&cursor=${first.nextCursor}`);
+  assert.equal(second.results[0].thread.id, "thread-50");
+  assert.deepEqual(calls.filter((call) => call.method !== "thread/search"), []);
+});
 
 test("recent first paint queries one database page rather than all 1000 conversations", async () => {
   const { calls, read } = fixture();

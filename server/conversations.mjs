@@ -450,6 +450,42 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
   });
 
   function registerRoutes(application) {
+    application.get("/api/workspace/search", async (request, response) => {
+      const user = request.identity.user;
+      const term = (request.codexUrl.searchParams.get("q") || "").trim().slice(0, 200);
+      if (!term) return json(response, 200, { results: [], nextCursor: null });
+      const projects = (await store.listProjects(user.id)).filter((project) => project.available);
+      const cursor = request.codexUrl.searchParams.get("cursor");
+      let page;
+      try {
+        page = await codex.request("thread/search", { searchTerm: term, limit: 50, sortKey: "updated_at", ...(cursor ? { cursor } : {}) });
+      } catch (error) {
+        if (/method not found|unknown method|unsupported.*thread\/search/i.test(String(error.message))) {
+          throw httpError(501, "当前 Codex App Server 不支持对话搜索，请升级 Codex 后重试。");
+        }
+        throw error;
+      }
+      const groups = new Map();
+      for (const item of page.data || []) {
+        const thread = item.thread;
+        if (!thread?.id) continue;
+        const bound = store.threadProjects[thread.id];
+        const project = bound ? projects.find((entry) => entry.id === bound) : projects.find((entry) => sameThreadPath(entry.path, thread.cwd));
+        if (!project) continue;
+        if (!groups.has(project.id)) groups.set(project.id, { project, items: [] });
+        groups.get(project.id).items.push(item);
+      }
+      const allowed = new Map();
+      for (const { project, items } of groups.values()) {
+        const owned = await store.bindProjectThreads(items.map((item) => item.thread), user.id, project.id);
+        for (const thread of owned) allowed.set(thread.id, project);
+      }
+      const results = (page.data || []).filter((item) => allowed.has(item.thread?.id)).map((item) => {
+        const project = allowed.get(item.thread.id);
+        return { thread: { id: item.thread.id, name: item.thread.name || null }, snippet: item.snippet || "", projectId: project.id, projectName: project.name };
+      });
+      json(response, 200, { results, nextCursor: page.nextCursor || null });
+    });
     application.get("/api/workspace/threads", async (request, response) => {
       const user = request.identity.user;
       const query = request.codexUrl.searchParams;
@@ -1350,7 +1386,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
   }
 
   function sameThreadPath(left, right) {
-    return typeof left === "string" && (process.platform === "win32" ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right));
+    return typeof left === "string" && typeof right === "string" && (process.platform === "win32" ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right));
   }
   
   async function validateSettings(candidate = {}) {
@@ -1517,7 +1553,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
       queueRevision: migrated.queueRevision,
       runtime: { projectId: project.id, activeTurnId: null, status: "idle" },
     };
-    broadcastOwner(project.ownerId, {
+    broadcastProject(project.id, {
       method: "thread/replaced",
       params: {
         threadId: oldThreadId,
@@ -1612,7 +1648,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
             await advanceQueue(replacementThreadId);
           } catch (recoveryError) {
             process.stderr.write(`[web] 丢失聊天的队列恢复失败 (${threadId})：${recoveryError.message}\n`);
-            broadcastOwner(project.ownerId, { method: "queue/error", params: { threadId, message: recoveryError.message } });
+            broadcastProject(project.id, { method: "queue/error", params: { threadId, message: recoveryError.message } });
           }
           return;
         }
@@ -1851,7 +1887,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
     let payload;
     const fullPayload = () => payload ||= `event: ${eventName}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of eventClients) {
-      if (client.userId !== ownerId) continue;
+      if (!store.canAccessProject(store.projects.find((project) => project.id === projectId), client.userId)) continue;
       if (!client.scoped || client.threadId === threadId) writeEvent(client, fullPayload());
       else if (["turn/started", "turn/completed"].includes(message.method)) {
         const { items, ...turn } = message.params.turn || {};
@@ -1886,10 +1922,11 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
   }
 
   function broadcastThreadSummary(threadId, ownerId) {
-    if (![...eventClients].some((client) => client.userId === ownerId && client.scoped && client.threadId !== threadId)) return;
+    const project = store.projects.find((entry) => entry.id === store.threadProjects[threadId]);
+    if (![...eventClients].some((client) => store.canAccessProject(project, client.userId) && client.scoped && client.threadId !== threadId)) return;
     const event = { method: "workspace/summary", revision: threadRevisions.get(threadId) || 0, params: workspaceSnapshot(threadId, false) };
     const payload = `event: codex\ndata: ${JSON.stringify(event)}\n\n`;
-    for (const client of eventClients) if (client.userId === ownerId && client.scoped && client.threadId !== threadId) writeEvent(client, payload);
+    for (const client of eventClients) if (store.canAccessProject(project, client.userId) && client.scoped && client.threadId !== threadId) writeEvent(client, payload);
   }
 
   function broadcastServer(message) {
@@ -1898,9 +1935,9 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
     }
   }
 
-  function broadcastOwner(ownerId, message, eventName = "codex") {
+  function broadcastProject(projectId, message, eventName = "codex") {
     for (const client of eventClients) {
-      if (client.userId !== ownerId) continue;
+      if (!store.canAccessProject(store.projects.find((project) => project.id === projectId), client.userId)) continue;
       writeEvent(client, `event: ${eventName}\ndata: ${JSON.stringify(message)}\n\n`);
     }
   }
@@ -2011,7 +2048,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
     for (const threadId of threadIds) {
       const projectId = store.threadProjects[threadId];
       const ownerId = store.projects.find((project) => project.id === projectId)?.ownerId;
-      if (ownerId !== userId) continue;
+      if (!store.canAccessProject(store.projects.find((project) => project.id === projectId), userId)) continue;
       if (response.writableEnded || response.destroyed) return;
       const full = !client.scoped || client.threadId === threadId;
       const snapshot = workspaceSnapshot(threadId, full, client.afterRevision);
@@ -2072,7 +2109,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
     const readVersion = reader.version;
     try {
       const [metadata, page] = await Promise.all([
-        codex.request("thread/read", { threadId, includeTurns: false }),
+        readThreadWhenMaterialized(threadId, false),
         codex.request("thread/turns/list", {
           threadId,
           limit,
@@ -2099,7 +2136,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
       };
     } catch (error) {
       if (!isUnsupportedTurnsListError(error)) throw error;
-      const result = await codex.request("thread/read", { threadId, includeTurns: true });
+      const result = await readThreadWhenMaterialized(threadId, true);
       const allTurns = liveThreads.reconcile(threadId, result.thread.turns || [], readVersion);
       await store.reconcileExecutionSupplements(threadId, allTurns);
       const history = paginateTurns(allTurns, searchParams);
@@ -2110,6 +2147,18 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
       };
     } finally {
       liveThreads.endRead(reader);
+    }
+  }
+
+  async function readThreadWhenMaterialized(threadId, includeTurns) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await codex.request("thread/read", { threadId, includeTurns });
+      } catch (error) {
+        const message = String(error?.message || "").toLowerCase();
+        if (attempt >= 10 || !message.includes("failed to read session metadata") || !message.includes("is empty")) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
     }
   }
 
@@ -2124,6 +2173,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
   function isUnsupportedTurnsListError(error) {
     const message = String(error?.message || "").toLowerCase();
     return message.includes("unknown method thread/turns/list")
+      || message.includes("paginated_threads is not supported yet")
       || message.includes("thread/turns/list is not supported")
       || message.includes("method not found")
       || (message.includes("thread/turns/list") && (message.includes("unsupported") || message.includes("unavailable")));
