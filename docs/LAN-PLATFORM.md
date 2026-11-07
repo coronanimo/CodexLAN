@@ -1,6 +1,6 @@
 # Shared LAN platform
 
-CodexLAN, AGYLAN (Google Antigravity), PILAN (Pi Coding Agent) and CLAUDELAN (Claude Code) share a React workbench and application services. Only the Codex adapter currently runs. Other product manifests express intent, not implemented integrations.
+The platform is designed for CodexLAN, AGYLAN (Google Antigravity), PILAN (Pi Coding Agent) and CLAUDELAN (Claude Code) to share a React workbench and application services. Only the CodexLAN manifest and Codex adapter currently exist; the other products are future integration work.
 
 [Current architecture diagram](ARCHITECTURE.md)
 
