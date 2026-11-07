@@ -1,0 +1,26 @@
+:root { font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; color: #10213d; background: #f5f7fa; color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, textarea { font: inherit; }
+button { border: 1px solid #dce5f0; border-radius: 6px; padding: 6px 10px; background: white; color: #24669f; cursor: pointer; }
+button:focus-visible, textarea:focus-visible { outline: 2px solid #3c82c4; outline-offset: 2px; }
+.react-workbench { display: grid; height: 100dvh; min-width: 0; grid-template-rows: auto minmax(0, 1fr) auto; }
+.workbench-header { padding: 12px max(16px, calc((100% - 780px) / 2)); border-bottom: 1px solid #dce5f0; background: white; }
+.workbench-header h1 { margin: 0 0 8px; font-size: 16px; }
+.preview-controls { display: flex; gap: 6px; flex-wrap: wrap; }
+.timeline-panel { min-width: 0; min-height: 0; contain: layout paint; }
+.execution-row, .summary-row, .message-row { width: min(780px, calc(100% - 32px)); margin: 0 auto; }
+.execution-row { display: grid; min-height: 36px; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 8px; align-items: center; border-bottom: 1px solid #e5ebf2; font-size: 12px; }
+.execution-row > span, .execution-row small, .summary-row { color: #6d7b90; }
+.execution-row strong { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summary-row { padding: 10px 0; font-size: 12px; }
+.message-row { padding: 16px 0; overflow-wrap: anywhere; }
+.message-role { color: #6d7b90; font-size: 12px; }
+.message-row p { line-height: 1.65; }
+.message-row pre { overflow: auto; padding: 12px; background: #edf2f8; }
+.message-row table { display: block; max-width: 100%; overflow: auto; }
+.user-text { white-space: pre-wrap; }
+.composer-zone { padding: 10px max(16px, calc((100% - 780px) / 2)) max(12px, env(safe-area-inset-bottom)); border-top: 1px solid #dce5f0; background: white; }
+.composer-zone label, .composer-zone small { display: block; color: #6d7b90; font-size: 12px; }
+.composer-zone textarea { display: block; width: 100%; height: 84px; max-height: 180px; margin: 6px 0; padding: 8px; border: 1px solid #ced9e8; border-radius: 8px; resize: vertical; }
+@media (max-width: 760px) { .execution-row { min-height: 44px; } button { min-height: 44px; } }

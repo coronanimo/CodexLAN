@@ -18,9 +18,32 @@
     "service:status": "node server/service.mjs status",
     "service:log": "node server/service.mjs log",
     "test": "node scripts/run-tests.mjs",
+    "web:dev": "vite --config web/vite.config.ts",
+    "web:build": "vite build --config web/vite.config.ts",
+    "web:watch": "vite build --watch --config web/vite.config.ts",
+    "web:typecheck": "tsc --project web/tsconfig.json --noEmit",
+    "web:test": "vitest run --config web/vite.config.ts",
     "check": "node --check server/index.mjs && node --check server/service.mjs && node --check server/accounts.mjs && node --check server/codex-client.mjs && node --check server/config.mjs && node --check server/conversations.mjs && node --check server/http.mjs && node --check server/projects.mjs && node --check server/thread-titles.mjs && node --check server/workspace-store.mjs && node --check public/app.js && node --check public/profiling.js && node --check public/desktop.js && node --check public/goal.js && node --check public/mobile.js && npm test"
   },
   "dependencies": {
     "express": "5.2.1"
+  },
+  "devDependencies": {
+    "@reduxjs/toolkit": "2.14.0",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "jsdom": "31.0.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "react-redux": "9.3.1",
+    "react-virtuoso": "4.18.20",
+    "remark-gfm": "4.0.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
   }
 }

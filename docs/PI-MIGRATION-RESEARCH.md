@@ -1,5 +1,9 @@
 # CodexLAN 迁移到 Pi 的可行性调研
 
+> 历史调研，非当前协议或验收依据。文中的支持比例、复用比例、方法映射和工期
+> 未由本次架构工作重新验证。当前采用[共享 LAN 平台与独立适配器](LAN-PLATFORM.md)
+> 的方向，不把 Pi 伪装成 Codex 协议，也不以替换单个 client 文件作为迁移完成标准。
+
 **调研日期**: 2025-01-27  
 **调研目的**: 评估 CodexLAN 从 Codex App Server 迁移到 Pi Coding Agent 的可行性
 

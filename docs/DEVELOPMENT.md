@@ -15,6 +15,12 @@ Use separate `CODEX_WEB_DATA_DIR` and `CODEX_WORKDIR` directories for manual tes
 
 ## Source layout
 
+React preparation uses `web/`; see [React migration](REACT-MIGRATION.md). Run
+`npm run web:dev` for the isolated fixture preview, `npm run web:watch` for automatic
+static builds, and `npm run web:typecheck`, `npm run web:test`, `npm run web:build`
+for the affected frontend checks. The preview does not connect to a real account
+or send tasks, and is not the production web entry point.
+
 - `server/index.mjs` starts the HTTP service and assembles the server modules.
 - `server/service.mjs` controls the background supervisor.
 - `server/` also contains accounts, projects, conversations, persistence, HTTP helpers, and the App Server client.
@@ -79,7 +85,7 @@ Build details and release-signing variables are in [android/README.md](../androi
 
 - Server and browser JavaScript use ECMAScript modules.
 - HTTP routes use Express 5.
-- The browser application has no build step.
+- The current `public/` browser application has no build step; the separate React preview in `web/` uses Vite.
 - Changes to stored state include an explicit migration or a clear rejection of unsupported versions.
 - Changes to App Server requests and events include focused tests and a manual compatibility check.
 - Runtime data, build output, SDKs, signing material, downloaded tools, and release archives stay outside source control.

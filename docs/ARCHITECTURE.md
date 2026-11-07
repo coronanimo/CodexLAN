@@ -1,5 +1,10 @@
 # Architecture
 
+The target is a shared LAN workbench with replaceable agent adapters for
+CodexLAN, AGYLAN, PILAN and CLAUDELAN. See [LAN platform boundaries](LAN-PLATFORM.md)
+for ownership, preparation contracts and extraction gates. The runtime described
+below is the current Codex implementation, not a completed multi-agent platform.
+
 CodexLAN has three runtime parts:
 
 **Browser or Android WebView → HTTP and SSE → Node/Express service → JSONL over stdio → `codex app-server`**
@@ -20,6 +25,10 @@ The Node service owns the App Server process, serves the web interface, applies 
 - `server/http.mjs`: shared HTTP helpers.
 
 ### Web client
+
+The React replacement is being prepared separately in `web/`. Its data ownership,
+development workflow and staged acceptance are specified in [React migration](REACT-MIGRATION.md).
+The current production web client below remains authoritative until cutover.
 
 The browser application is plain HTML, CSS, and JavaScript with no build step. `public/app.js` coordinates the application while smaller modules own reusable behavior. Shared styles are split by responsibility into workspace, content, execution, composer, dialog, and sidebar files; `desktop.css` and `mobile.css` contain only platform-specific layout rules.
 
