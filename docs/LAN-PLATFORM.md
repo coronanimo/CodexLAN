@@ -7,7 +7,8 @@ queue, event and UI implementations.
 
 This document describes the target and incremental extraction. Existing
 `server/conversations.mjs` and `server/codex-client.mjs` are still Codex-specific.
-The new contracts and React foundation are preparation, not working integrations
+The Codex read-only HTTP seam and React client are implemented; command/lifecycle
+extraction and realtime subscription are pending. This is not a working integration
 for other products. Their native APIs and actual capabilities must be verified
 before implementing an adapter; a product name is not evidence of API support.
 
@@ -62,13 +63,17 @@ The current preparation creates these real entry points:
 - `server/agents/adapter-contract.ts`: server-only lifecycle, input, history,
   subscription and optional interrupt/guide ports. This is a draft interface to
   validate with Codex before it becomes a stable extension contract.
+- `server/core/read-routes.mjs`: shared authorized bootstrap, catalog, bounded
+  history and output-detail routes, with providers supplied at composition.
+- `server/agents/codex/`: native history reader and transitional read adapter;
+  the reader is shared with legacy routes so overlap/recovery rules have one owner.
 - `products/codexlan/manifest.ts`: CodexLAN identity/default provider. Product
   metadata is composed at the app boundary, not imported by shared UI features.
 - `web/src/features/`: shared conversation and editor components. Their model
   speaks `conversationId` / `runId`, not native Codex request names.
 
-The next extraction will establish `server/core/` for application services and
-`server/agents/codex/` for Codex-specific behavior. The existing server files are
+Further extraction will move remaining application services into `server/core/`
+and Codex-specific behavior into `server/agents/codex/`. The existing server files are
 the working source during extraction, not a permanent second implementation.
 Do not create a package/DI/plugin platform merely to populate these directories.
 Use ordinary modules and constructor injection; adapters receive only the ports
@@ -121,8 +126,8 @@ remain the same across products.
    genuinely different native semantics.
 
 Provider choice is runtime configuration; a new product should not require a
-new frontend build or a fork of the service. The current preview imports the
-CodexLAN manifest directly only because the bootstrap endpoint is not migrated.
+new frontend build or a fork of the service. The read-only client receives product
+metadata through bootstrap. Only the isolated fixture entry imports a manifest.
 Only CodexLAN has a manifest/implementation in this phase. Other names are targets,
 not advertised working adapters.
 

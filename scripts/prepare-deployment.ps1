@@ -31,7 +31,7 @@ function Copy-Tree([string]$Source, [string]$Destination, [string[]]$Extra = @()
 $null = New-Item -ItemType Directory -Path $SourceCheckout, $releaseRoot, (Join-Path $InstallationRoot 'runtime'), (Join-Path $HomeRoot 'backups'), (Join-Path $HomeRoot 'logs'), (Join-Path $HomeRoot 'attachments')
 # Preserve Git metadata and all current working-tree changes, but no local state/build caches.
 Copy-Tree $repositoryRoot $SourceCheckout @('/XD', 'node_modules', 'data', 'logs', '.codexlan', '.gradle', '.tools', 'build', 'release', 'dist', 'out', '/XF', 'PktMon.etl', 'codexlan.json', 'local.properties')
-foreach ($folder in @('server', 'public', 'config')) {
+foreach ($folder in @('server', 'public', 'config', 'shared', 'products')) {
     Copy-Tree (Join-Path $repositoryRoot $folder) (Join-Path $releaseRoot $folder) @('/XF', 'codexlan.json')
 }
 $null = New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'scripts')

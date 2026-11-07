@@ -16,10 +16,12 @@ Use separate `CODEX_WEB_DATA_DIR` and `CODEX_WORKDIR` directories for manual tes
 ## Source layout
 
 React preparation uses `web/`; see [React migration](REACT-MIGRATION.md). Run
-`npm run web:dev` for the isolated fixture preview, `npm run web:watch` for automatic
+`npm run web:dev` for the read-only client (`/fixtures.html` remains isolated), `npm run web:watch` for automatic
 static builds, and `npm run web:typecheck`, `npm run web:test`, `npm run web:build`
-for the affected frontend checks. The preview does not connect to a real account
-or send tasks, and is not the production web entry point.
+for the affected frontend checks. The root preview connects through `/api` to
+the development service at port 8689 (override with `LAN_API_ORIGIN`); it can log
+in/read but does not send tasks. Use isolated fixtures for automated checks. It
+is not the production web entry point.
 
 - `server/index.mjs` starts the HTTP service and assembles the server modules.
 - `server/service.mjs` controls the background supervisor.

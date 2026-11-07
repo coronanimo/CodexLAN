@@ -70,7 +70,7 @@ foreach ($parent in @('F:\GPTData\hu', 'F:\GPTData\li')) {
     }
 }
 $release = Join-Path $installation ('releases\0.8.0-project-access-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-foreach ($folder in @('server', 'public', 'config')) {
+foreach ($folder in @('server', 'public', 'config', 'shared', 'products')) {
     Copy-Tree (Join-Path $repository $folder) (Join-Path $release $folder) @('/XF', 'codexlan.json')
 }
 foreach ($name in @('package.json', 'package-lock.json', 'LICENSE')) { Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $release }

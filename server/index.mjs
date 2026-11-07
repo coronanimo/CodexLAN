@@ -12,6 +12,9 @@ import { createConversations } from "./conversations.mjs";
 import { json } from "./http.mjs";
 import { registerProjects } from "./projects.mjs";
 import { AuthService, WorkspaceStore } from "./workspace-store.mjs";
+import { createCodexReadAdapter } from "./agents/codex/read-adapter.mjs";
+import { registerLanReadRoutes } from "./core/read-routes.mjs";
+import { codexlan } from "../products/codexlan/manifest.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8"));
@@ -145,6 +148,13 @@ function createWorkspaceApplication() {
   registerRuntimeRoutes(application);
   registerProjects(application, { store, conversations, attachmentRoot: serverConfig.attachmentRoot });
   conversations.registerRoutes(application);
+  registerLanReadRoutes(application, {
+    edition: codexlan,
+    agents: [createCodexReadAdapter({ conversations, status: () => codex.state })],
+    listProjects: (userId) => store.listProjects(userId),
+    getProject: (id, userId) => store.getProject(id, userId),
+    authorizeConversation: ({ conversationId, projectId, userId }) => store.requireThreadOwner(conversationId, userId, projectId),
+  });
   application.use("/api", (request, response) => json(response, 404, { error: "找不到 API。" }));
   application.use((request, response) => serveStatic(request.codexUrl.pathname, request, response));
   application.use((error, request, response, next) => {

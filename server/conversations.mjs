@@ -13,6 +13,7 @@ import { asyncUserInputRequest, asyncAnswerMessage, answeredAsyncRequestIds } fr
 import { json, readJson, validateId, validateText } from "./http.mjs";
 import { createThreadTitleService, isMiniModel, shouldGenerateThreadTitle } from "./thread-titles.mjs";
 import { LiveThreadState } from "./live-thread-state.mjs";
+import { createCodexHistoryReader } from "./agents/codex/history-reader.mjs";
 import {
   SESSION_TIMER_MAX_MS,
   cleanSettings,
@@ -56,6 +57,8 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
   const goalReads = new Map();
   const threadPaths = new Map();
   const liveThreads = new LiveThreadState();
+  const historyReader = createCodexHistoryReader({ codex, liveThreads,
+    reconcileSupplements: (threadId, turns) => store.reconcileExecutionSupplements(threadId, turns) });
   const summaryTimers = new Map();
   const threadRevisions = new Map();
   const eventEpoch = randomUUID();
@@ -118,8 +121,6 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
   const REASONING_SUMMARIES = new Set(["auto", "concise", "detailed", "none"]);
   const COLLABORATION_MODES = new Set(["default", "plan"]);
   const USER_GOAL_STATUSES = new Set(["active", "paused"]);
-  const DEFAULT_HISTORY_PAGE_SIZE = 12;
-  const MAX_HISTORY_PAGE_SIZE = 40;
   let modelCache = { expiresAt: 0, data: [], isFallback: false };
   let modelRefreshPromise = null;
   let collaborationModeCache = { expiresAt: 0, data: [] };
@@ -2102,99 +2103,8 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
     }
   }
   
-  async function loadThreadPage(threadId, searchParams) {
-    const limit = historyPageLimit(searchParams);
-    const cursor = searchParams.get("before");
-    const reader = liveThreads.beginRead(threadId);
-    const readVersion = reader.version;
-    try {
-      const [metadata, page] = await Promise.all([
-        readThreadWhenMaterialized(threadId, false),
-        codex.request("thread/turns/list", {
-          threadId,
-          limit,
-          sortDirection: "desc",
-          itemsView: "full",
-          ...(cursor ? { cursor } : {}),
-        }),
-      ]);
-      const canonicalTurns = Array.isArray(page?.data) ? page.data : [];
-      await store.reconcileExecutionSupplements(threadId, canonicalTurns);
-      const turns = liveThreads.reconcile(threadId, canonicalTurns
-        .slice()
-        .reverse(), readVersion)
-        .map(compactHistoryTurn);
-      return {
-        thread: { ...metadata.thread, turns },
-        history: {
-          turns,
-          hasMore: Boolean(page?.nextCursor),
-          before: page?.nextCursor || null,
-          totalTurns: null,
-        },
-        allTurns: turns,
-      };
-    } catch (error) {
-      if (!isUnsupportedTurnsListError(error)) throw error;
-      const result = await readThreadWhenMaterialized(threadId, true);
-      const allTurns = liveThreads.reconcile(threadId, result.thread.turns || [], readVersion);
-      await store.reconcileExecutionSupplements(threadId, allTurns);
-      const history = paginateTurns(allTurns, searchParams);
-      return {
-        thread: { ...result.thread, turns: history.turns.map(compactHistoryTurn) },
-        history,
-        allTurns,
-      };
-    } finally {
-      liveThreads.endRead(reader);
-    }
-  }
-
-  async function readThreadWhenMaterialized(threadId, includeTurns) {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        return await codex.request("thread/read", { threadId, includeTurns });
-      } catch (error) {
-        const message = String(error?.message || "").toLowerCase();
-        if (attempt >= 10 || !message.includes("failed to read session metadata") || !message.includes("is empty")) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
-  }
-
-  function historyPageLimit(searchParams) {
-    const rawLimit = Number(searchParams.get("limit") || DEFAULT_HISTORY_PAGE_SIZE);
-    if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_HISTORY_PAGE_SIZE) {
-      throw httpError(400, `聊天历史每页数量必须是 1 到 ${MAX_HISTORY_PAGE_SIZE}。`);
-    }
-    return rawLimit;
-  }
-
-  function isUnsupportedTurnsListError(error) {
-    const message = String(error?.message || "").toLowerCase();
-    return message.includes("unknown method thread/turns/list")
-      || message.includes("paginated_threads is not supported yet")
-      || message.includes("thread/turns/list is not supported")
-      || message.includes("method not found")
-      || (message.includes("thread/turns/list") && (message.includes("unsupported") || message.includes("unavailable")));
-  }
-
-  function paginateTurns(turns, searchParams) {
-    const rawLimit = historyPageLimit(searchParams);
-    const before = searchParams.get("before");
-    let end = turns.length;
-    if (before) {
-      end = turns.findIndex((turn) => turn.id === before);
-      if (end < 0) throw httpError(409, "聊天历史位置已经变化，请重新打开聊天。");
-    }
-    const start = Math.max(0, end - rawLimit);
-    const page = turns.slice(start, end);
-    return {
-      turns: page,
-      hasMore: start > 0,
-      before: page[0]?.id || null,
-      totalTurns: turns.length,
-    };
+  function loadThreadPage(threadId, searchParams) {
+    return historyReader.readPage(threadId, searchParams, { mapTurn: compactHistoryTurn });
   }
 
   function compactNotification(message) {
@@ -2299,6 +2209,7 @@ export function createConversations({ store, codex, autoApprove = false, autoApp
     forgetProject: forgetProjectRuntime,
     listProjectThreads,
     listProjectThreadPage,
+    readRawThreadPage: (threadId, query) => historyReader.readPage(threadId, query, { includeCanonical: true }),
     projectHasActiveThread,
     registerRoutes,
     validateSettings,
