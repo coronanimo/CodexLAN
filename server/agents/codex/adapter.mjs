@@ -12,19 +12,24 @@ import { CodexConfiguration } from "./configuration.mjs";
 import { CodexRequests } from "./requests.mjs";
 import { PresentationBatcher } from "./presentation-batcher.mjs";
 import { CodexUsage } from "./usage.mjs";
-import { running, milliseconds, questionsFromItem, asyncAnswer, answeredIds } from "./protocol-values.mjs";
+import { running, milliseconds, questionsFromItem, asyncAnswer, answeredIds, displayInput } from "./protocol-values.mjs";
 import { AgentOperationError } from "../operation-error.mjs";
+import { readVisualization } from "./visualization.mjs";
+import { OutputRecovery } from "./output-recovery.mjs";
 
-export function createCodexAdapter({ connection, store, autoApprove = false, autoApproveBrowser = false }) {
+export function createCodexAdapter({ connection, store, autoApprove = false, autoApproveBrowser = false, canLoad = () => true }) {
   const projection = new NativeProjection(), batcher = new PresentationBatcher(), events = new EventEmitter();
-  const history = new CodexHistory(connection, projection, store), catalog = new CodexCatalog(connection, store), configuration = new CodexConfiguration(connection);
+  const history = new CodexHistory(connection, projection, store), catalog = new CodexCatalog(connection, store, (id) => goal(id), (id) => names.get(id)), configuration = new CodexConfiguration(connection);
   const requests = new CodexRequests({ connection, projection, autoApprove, autoApproveBrowser });
   const titles = createThreadTitleService({ codex: connection });
-  const goals = new Map(), goalReads = new Map(), acceptedInputs = new Map(), usage = new CodexUsage(connection), names = new Map(), summaries = new Map();
+  const goals = new Map(), goalReads = new Map(), acceptedInputs = new Map(), names = new Map(), summaries = new Map();
+  const usage = new CodexUsage(connection, () => { for (const id of batcher.listeners.keys()) notify(id, { kind: "controls.changed" }); });
+  const completions = new Map();
   const bindings = (id) => Boolean(store.threadProjects[id]);
   const notify = (id, event) => { batcher.publish(id, event); events.emit("event", id, event); };
   projection.onEvent = notify;
   const save = (promise) => void promise.catch((error) => process.stderr.write(`[adapter] 保存执行恢复数据失败：${error.message}\n`));
+  const recovery = new OutputRecovery(store, projection, (error) => process.stderr.write(`[adapter] 保存执行恢复数据失败：${error.message}\n`));
   const accept = (id, inputId) => {
     if (!acceptedInputs.has(id)) acceptedInputs.set(id, new Set());
     acceptedInputs.get(id).add(inputId);
@@ -46,9 +51,14 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
     if (message.method === "error") notify(id, { kind: "notice", message: String(p.error?.message || p.message || "代理执行失败。") });
     projection.receive(message);
     const runId = p.turnId || p.turn?.id;
+    if (runId && message.method === "item/commandExecution/outputDelta") recovery.capture(id, runId, p.itemId);
+    if (runId && message.method === "item/completed" && p.item?.type === "commandExecution") {
+      recovery.capture(id, runId, p.item.id); void recovery.flush();
+    }
     if (runId && ["turn/started", "turn/completed"].includes(message.method)) {
       save(store.recordTurnMetric(id, runId, message.method === "turn/started" ? { startedAt: milliseconds(p.turn?.startedAt) || Date.now() } : { completedAt: milliseconds(p.turn?.completedAt) || Date.now() }));
       if (message.method === "turn/completed") {
+        completions.set(id, { id: runId, status: p.turn?.status || "completed" });
         notify(id, { kind: "run.terminal", runId });
         // One completion read releases covered live state; there is no polling
         // loop and no full-history request on text deltas or editor input.
@@ -78,6 +88,7 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
     try { requests.receive(message); } catch (error) { connection.respondError(message.id, -32603, error.message); }
   };
   const offline = () => {
+    void recovery.flush();
     requests.reset();
     for (const [id, session] of projection.sessions) {
       for (const run of session.runs.values()) { run.append = false; run.version = 0; }
@@ -96,12 +107,26 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
       goalReads.set(id, connection.request("thread/goal/get", { threadId: id }).then((result) => {
         if ((goals.get(id)?.version || 0) === version) goals.set(id, { version, value: result.goal || null });
         return goals.get(id)?.value || null;
+      }).catch((error) => {
+        // Reading a historical catalog must never activate a native goal.
+        if (error.codexResponse && /thread not loaded/i.test(error.message)) return goals.get(id)?.value || null;
+        throw error;
       }).finally(() => goalReads.delete(id)));
     }
     return goalReads.get(id);
   }
   async function options(id, project) { return configuration.resolve(await store.getThreadSettings(id, project.settings)); }
   async function loaded(id, project) { const settings = await options(id, project); await connection.ensureLoaded(id, project, settings); return settings; }
+  async function loadSelected(id) {
+    if (canLoad(id)) {
+      try { await loaded(id, await store.getProject(store.threadProjects[id])); }
+      catch (error) {
+        // Reading a conversation must not require taking over another writer.
+        // Mutating operations still call loaded() and propagate the conflict.
+        if (!/already has an active writer/i.test(error.message)) throw error;
+      }
+    }
+  }
   async function probe(id, project) {
     await loaded(id, project);
     const checkpoint = projection.version, metadata = await history.metadata(id), session = projection.session(id);
@@ -146,7 +171,7 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
     connection.markThreadLoaded(id); names.set(id, "");
     await store.setThreadProject(id, project.id); await store.setThreadSettings(id, cleanSettings(settings)); await store.recordThreadAccess(user.id, id);
     notify(id, { kind: "conversation.created" });
-    return { id, projectId: project.id, agentInstanceId: "codex-local", title: "新会话" };
+    return { id, projectId: project.id, agentInstanceId: "codex-local", title: "未命名聊天" };
   }
   async function execute(id, project, command) {
     switch (command.type) {
@@ -154,9 +179,10 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
       case "answer": requests.answer(id, command.requestId, command.answers); return;
       case "approve": requests.approve(id, command.requestId, command.decision); return;
       case "interrupt": {
+        await loaded(id, project);
         const runId = validateId(command.runId, "runId"), session = projection.session(id);
         if (session.activeRunId && runId !== session.activeRunId) throw httpError(409, "当前执行任务已经变化。");
-        const previous = await goal(id);
+        const previous = await goal(id, true);
         const interrupted = connection.request("turn/interrupt", { threadId: id, turnId: runId }, { timeoutMs: 8_000 });
         const paused = previous?.status === "active" ? setGoal(id, { status: "paused" }).catch((error) => {
           notify(id, { kind: "notice", message: `当前任务已请求停止，但目标暂停失败：${error.message}` });
@@ -170,12 +196,14 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
         if (state.status === "running" || state.activeRunId) throw httpError(409, "任务执行完成后才能压缩上下文。");
         await connection.request("thread/compact/start", { threadId: id }); return;
       }
-      case "goal": return setGoal(id, command.patch);
+      case "goal": await loaded(id, project); return setGoal(id, command.patch);
       case "rename": {
         const name = validateText(command.name, "聊天名称").slice(0, 100); titles.cancel(id);
+        await loaded(id, project);
         await connection.request("thread/name/set", { threadId: id, name }); names.set(id, name); return;
       }
       case "suggestName": {
+        await loaded(id, project);
         const page = await history.readNative(id);
         return { name: await titles.suggest({ cwd: project.path, turns: page.turns, settings: await options(id, project), latest: true }) };
       }
@@ -185,12 +213,17 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
         if ((store.queues[id] || []).some((item) => item.delivery?.status === "submitting")) throw httpError(409, "消息正在提交，请稍后再删除。");
         titles.cancel(id); await connection.request("thread/delete", { threadId: id });
         notify(id, { kind: "removed" }); await store.removeThread(id);
-        projection.forget(id); requests.forget(id); goals.delete(id); names.delete(id); acceptedInputs.delete(id); usage.tokens.delete(id); summaries.delete(id); return;
+        projection.forget(id); requests.forget(id); goals.delete(id); names.delete(id); acceptedInputs.delete(id); usage.tokens.delete(id); summaries.delete(id); completions.delete(id); return;
       }
       case "settings": {
         const values = command.values;
         if (!values || typeof values !== "object" || Object.keys(values).some((key) => !["model", "effort", "serviceTier", "summary", "collaborationMode"].some((name) => key === `codex.${name}`))) throw httpError(400, "设置项无效。");
         const settings = mergeSettings(await store.getThreadSettings(id, project.settings), configuration.native(values));
+        if (Object.hasOwn(values, "codex.model")) {
+          await configuration.refresh(); const model = configuration.models.find((entry) => entry.id === settings.model);
+          if (model && !model.supportedReasoningEfforts?.some((entry) => entry.reasoningEffort === settings.effort)) settings.effort = model.defaultReasoningEffort || model.supportedReasoningEfforts?.[0]?.reasoningEffort;
+          if (settings.serviceTier && !model?.serviceTiers?.some((entry) => entry.id === settings.serviceTier)) delete settings.serviceTier;
+        }
         const effective = await configuration.resolve(settings); await connection.ensureLoaded(id, project, effective);
         await connection.request("thread/settings/update", { threadId: id, collaborationMode: effective.collaboration });
         await store.setThreadSettings(id, settings); notify(id, { kind: "controls.changed" }); return;
@@ -228,10 +261,13 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
     notify(id, { kind: "controls.changed" }); notify(id, { kind: "goal.changed" });
   }
   async function controls(id) {
-    const session = projection.sessions.get(id), settings = await store.getThreadSettings(id);
+    await loadSelected(id);
+    const session = projection.sessions.get(id), project = await store.getProject(store.threadProjects[id]);
+    const effective = await options(id, project);
+    const settings = { ...cleanSettings(effective), summary: effective.summary || "detailed", collaborationMode: effective.collaboration.mode, serviceTier: effective.serviceTier || "" };
     return { conversationId: id, activeRunId: session?.activeRunId || null, status: session?.status || "idle",
       goal: await goal(id), ...requests.snapshot(id),
-      settings: Object.fromEntries(Object.entries(settings).map(([key, value]) => [`codex.${key}`, value])), usage: await usage.snapshot(id) };
+      settings: Object.fromEntries(Object.entries(settings).map(([key, value]) => [`codex.${key}`, value])), usage: await usage.snapshot(id, { wait: false }) };
   }
   async function prepareAnswer(id, requestId, candidate) {
     const native = await connection.request("thread/read", { threadId: id, includeTurns: true });
@@ -265,21 +301,29 @@ export function createCodexAdapter({ connection, store, autoApprove = false, aut
   return {
     describe: () => ({ instanceId: "codex-local", providerId: "codex", displayName: "Codex", access: "interactive", status: connection.state,
       capabilities: { history: "paged", interrupt: true, steer: true, fork: true, compact: true, attachments: true, approvals: true, questions: true, plans: true, goals: true, usage: true }, settings: [] }),
-    list: async (...args) => { const page = await catalog.list(...args); for (const row of page.conversations) summaries.set(row.id, row); return page; },
-    search: (...args) => catalog.search(...args), readHistory: (...args) => history.page(...args), readDetail: (...args) => history.details(...args),
+    list: async (...args) => { const page = await catalog.list(...args); for (const row of [...page.conversations, ...(page.preferred ? [page.preferred] : [])]) summaries.set(row.id, row); return page; },
+    listAll: async (...args) => { const page = await catalog.listAll(...args); for (const row of page.conversations) summaries.set(row.id, row); return page; },
+    recordAccess: (id, user) => store.recordThreadAccess(user.id, id, { deferred: true }),
+    search: (...args) => catalog.search(...args),
+    readHistory: (id, options) => history.page(id, options),
+    readDetail: (id, options) => history.details(id, options),
     observe: (id, listener) => batcher.observe(id, listener), notify, controls, create, execute, submit, guide, probe,
     configuration: () => configuration.fields(), validateSettings: (settings) => configuration.resolve(settings).then(cleanSettings), prepareAnswer, fork,
+    presentInput: displayInput,
+    projectSettings: (project) => Object.fromEntries(Object.entries(project.settings || {}).map(([key, value]) => [`codex.${key}`, value])),
+    readVisualization,
     export: (id, ref) => history.export(id, ref),
     accepted: (id, inputId) => acceptedInputs.get(id)?.has(inputId) === true,
     summary: (id) => ({ id, agentInstanceId: "codex-local", projectId: store.threadProjects[id],
-      title: names.get(id) || summaries.get(id)?.title || "未命名会话", status: projection.sessions.get(id)?.status || summaries.get(id)?.status || "unknown", queueCount: store.queues[id]?.length || 0 }),
+      ...(names.get(id) || summaries.get(id)?.title ? { title: names.get(id) || summaries.get(id)?.title } : {}), status: projection.sessions.get(id)?.status || summaries.get(id)?.status || "unknown", queueCount: store.queues[id]?.length || 0,
+      goalStatus: goals.get(id)?.value?.status || summaries.get(id)?.goalStatus, completion: completions.get(id) }),
     knownIds: () => [...new Set([...projection.sessions.keys(), ...goals.keys(), ...Object.keys(store.queues)])],
     onEvent(listener) { events.on("event", listener); return () => events.off("event", listener); },
     projectHasActiveThread: projectBusy,
-    forgetProject(projectId, ids) { for (const id of ids) { projection.forget(id); requests.forget(id); goals.delete(id); usage.tokens.delete(id); acceptedInputs.delete(id); names.delete(id); summaries.delete(id); } },
+    forgetProject(projectId, ids) { for (const id of ids) { projection.forget(id); requests.forget(id); goals.delete(id); usage.tokens.delete(id); acceptedInputs.delete(id); names.delete(id); summaries.delete(id); completions.delete(id); } },
     close() { batcher.close(); connection.events.off("notification", notification); connection.events.off("response", response);
       connection.events.off("serverRequest", serverRequest); connection.events.off("offline", offline); connection.events.off("online", online);
-      return history.resources.close(); },
+      return Promise.all([recovery.flush(), history.resources.close()]); },
   };
 }
 

@@ -19,6 +19,7 @@
     "dataRoot": { "type": "string", "minLength": 1 },
     "logRoot": { "type": "string", "minLength": 1 },
     "attachmentRoot": { "type": "string", "minLength": 1 },
+    "attachmentReadRoot": { "description": "An additional project-scoped attachment root used only for reading historical files.", "type": "string", "minLength": 1 },
     "codexBin": { "type": ["string", "null"] },
     "autoApprove": {
       "description": "Automatically approve command execution, file changes, and requested permissions for the Codex session.",
@@ -27,6 +28,11 @@
     },
     "autoApproveBrowser": {
       "description": "Allow local browser control for all CodexLAN conversations without approval cards, including signed-in websites. Codex browser policy still applies. Independent of autoApprove.",
+      "type": "boolean",
+      "default": false
+    },
+    "parallel": {
+      "description": "Keep existing conversations read-only; only conversations created by this independent instance may execute tasks.",
       "type": "boolean",
       "default": false
     }

@@ -7,10 +7,11 @@ import { pipeline } from "node:stream/promises";
 import { requireAdmin } from "./accounts.mjs";
 import { json, readJson, validateId } from "./http.mjs";
 import { httpError, mergeSettings, samePath } from "./workspace-store.mjs";
+import { canonicalFilePath } from "../shared/content-files.mjs";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
-export function registerProjects(application, { store, onPermissionsChanged, projectBusy, validateAgentSettings, forgetProject, attachmentRoot = null }) {
+export function registerProjects(application, { store, onPermissionsChanged, projectBusy, validateAgentSettings, forgetProject, attachmentRoot = null, attachmentReadRoot = null, requireConversationWrite }) {
   application.get("/api/projects/:projectId/members", async (request, response) => {
     json(response, 200, { members: await store.projectMembers(request.params.projectId, request.identity.user.id) });
   });
@@ -39,12 +40,12 @@ export function registerProjects(application, { store, onPermissionsChanged, pro
       await store.requireThreadOwner(conversationId, request.identity.user.id, project.id);
       [path] = (await resolveUploadedFiles(project, conversationId, [query.get("fileId")], attachmentRoot)).map((file) => file.path);
     }
-    await sendProjectFile(response, project, path, request.method === "HEAD", attachmentRoot);
+    await sendProjectFile(response, project, path, request.method === "HEAD", attachmentRoot, attachmentReadRoot, query.get("preview") === "true");
   });
 
   application.get("/api/projects/:projectId/files/preview", async (request, response) => {
     const project = await store.getProject(request.params.projectId, request.identity.user.id);
-    const path = await projectFilePath(project, request.codexUrl.searchParams.get("path"), attachmentRoot);
+    const path = await projectFilePath(project, request.codexUrl.searchParams.get("path"), attachmentRoot, attachmentReadRoot);
     const extension = extname(path).toLowerCase();
     if (!new Set([".html", ".htm", ".txt", ".md", ".json", ".csv", ".log", ".js", ".ts", ".tsx", ".jsx", ".py", ".css", ".xml", ".yaml", ".yml", ".mjs"]).has(extension)) throw httpError(415, "此文件请下载后打开。");
     const size = statSync(path).size;
@@ -60,19 +61,20 @@ export function registerProjects(application, { store, onPermissionsChanged, pro
     const project = await store.getProject(request.params.projectId, user.id);
     const threadId = validateId(request.codexUrl.searchParams.get("conversationId"), "conversationId");
     await store.requireThreadOwner(threadId, user.id, project.id);
+    requireConversationWrite?.(threadId);
     const file = await receiveProjectUpload(request, project, threadId, request.codexUrl.searchParams.get("name"), attachmentRoot);
     json(response, 201, { file });
   });
 
   application.delete("/api/projects/:projectId/files/attachment", async (request, response) => {
     const project = await store.getProject(request.params.projectId, request.identity.user.id);
-    await removeProjectAttachment(project, request.codexUrl.searchParams.get("path"), attachmentRoot);
+    await removeProjectAttachment(project, request.codexUrl.searchParams.get("path"), attachmentRoot, requireConversationWrite);
     json(response, 200, { removed: true });
   });
 
   application.get("/api/admin/files/download", async (request, response) => {
     requireAdmin(request.identity.user);
-    await sendAdminFile(response, request.codexUrl.searchParams.get("path"), request.method === "HEAD");
+    await sendAdminFile(response, request.codexUrl.searchParams.get("path"), request.method === "HEAD", request.codexUrl.searchParams.get("preview") === "true");
   });
 
   application.patch("/api/projects/:projectId", async (request, response) => {
@@ -104,12 +106,12 @@ export function registerProjects(application, { store, onPermissionsChanged, pro
 
 }
 
-async function sendProjectFile(response, project, requestedPath, headOnly = false, attachmentRoot = null) {
-  const filePath = await projectFilePath(project, requestedPath, attachmentRoot);
-  return sendLocalFile(response, filePath, statSync(filePath), headOnly);
+async function sendProjectFile(response, project, requestedPath, headOnly = false, attachmentRoot = null, attachmentReadRoot = null, preview = false) {
+  const filePath = await projectFilePath(project, requestedPath, attachmentRoot, attachmentReadRoot);
+  return sendLocalFile(response, filePath, statSync(filePath), headOnly, preview);
 }
 
-async function projectFilePath(project, requestedPath, attachmentRoot) {
+async function projectFilePath(project, requestedPath, attachmentRoot, attachmentReadRoot) {
   if (typeof requestedPath !== "string" || !requestedPath.trim()) throw httpError(400, "缺少要下载的文件路径。");
   const projectRoot = await realpath(project.path);
   const candidate = resolve(projectRoot, normalizeDownloadPath(requestedPath));
@@ -122,15 +124,14 @@ async function projectFilePath(project, requestedPath, attachmentRoot) {
   }
   const projectRelativePath = relative(projectRoot, filePath);
   if (projectRelativePath.startsWith(`..${pathSeparator()}`) || projectRelativePath === ".." || isAbsolute(projectRelativePath)) {
-    if (!attachmentRoot) throw httpError(403, "只能下载当前项目目录内的文件。");
-    const centralRoot = await realpath(attachmentRoot).catch((error) => {
-      if (error.code === "ENOENT") throw httpError(403, "附件不属于当前项目。");
-      throw error;
-    });
-    const projectAttachments = await realpath(join(centralRoot, validateId(project.id, "projectId"))).catch(() => null);
-    if (!projectAttachments) throw httpError(403, "附件不属于当前项目。");
-    requirePathInside(centralRoot, projectAttachments, "附件目录越界。");
-    requirePathInside(projectAttachments, filePath, "附件不属于当前项目。");
+    let allowed = false;
+    for (const root of [attachmentRoot, attachmentReadRoot].filter(Boolean)) {
+      const centralRoot = await realpath(root).catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+      if (!centralRoot) continue;
+      const projectAttachments = await realpath(join(centralRoot, validateId(project.id, "projectId"))).catch(() => null);
+      if (projectAttachments && isPathInside(centralRoot, projectAttachments) && isPathInside(projectAttachments, filePath)) { allowed = true; break; }
+    }
+    if (!allowed) throw httpError(403, "附件不属于当前项目。");
   }
   const details = statSync(filePath);
   if (!details.isFile()) throw httpError(400, "该路径不是可下载文件。");
@@ -197,7 +198,7 @@ export async function resolveUploadedFiles(project, conversationId, ids, central
   }));
 }
 
-async function removeProjectAttachment(project, requestedPath, centralRoot = null) {
+async function removeProjectAttachment(project, requestedPath, centralRoot = null, requireConversationWrite) {
   if (typeof requestedPath !== "string" || !requestedPath.trim()) throw httpError(400, "缺少附件路径。");
   const projectRoot = await realpath(project.path);
   const candidate = resolve(projectRoot, normalizeDownloadPath(requestedPath));
@@ -218,6 +219,7 @@ async function removeProjectAttachment(project, requestedPath, centralRoot = nul
   }
   requirePathInside(trustedRoot, attachmentRootReal, "附件目录必须位于当前项目中。");
   requirePathInside(attachmentRootReal, filePath, "只能删除工作台生成的附件。");
+  requireConversationWrite?.(validateId(relative(attachmentRootReal, filePath).split(pathSeparator())[0], "conversationId"));
   const details = statSync(filePath);
   if (!details.isFile()) throw httpError(400, "附件路径不是文件。");
   await unlink(filePath);
@@ -246,10 +248,10 @@ function validateUploadFileName(value) {
   return fileName;
 }
 
-async function sendAdminFile(response, requestedPath, headOnly = false) {
+async function sendAdminFile(response, requestedPath, headOnly = false, preview = false) {
   if (typeof requestedPath !== "string" || !requestedPath.trim()) throw httpError(400, "缺少要读取的文件路径。");
   if (!isAbsolute(requestedPath.trim())) throw httpError(400, "文件路径必须是绝对路径。");
-  const candidate = resolve(requestedPath.trim());
+  const candidate = resolve(normalizeDownloadPath(requestedPath));
   let filePath;
   try {
     filePath = await realpath(candidate);
@@ -259,10 +261,11 @@ async function sendAdminFile(response, requestedPath, headOnly = false) {
   }
   const details = statSync(filePath);
   if (!details.isFile()) throw httpError(400, "该路径不是文件。");
-  return sendLocalFile(response, filePath, details, headOnly);
+  return sendLocalFile(response, filePath, details, headOnly, preview);
 }
 
-function sendLocalFile(response, filePath, details, headOnly) {
+function sendLocalFile(response, filePath, details, headOnly, preview = false) {
+  if (preview && details.size > 200_000) throw httpError(413, "预览最多 200 KB，请下载原文件。");
   const fileName = basename(filePath);
   response.writeHead(200, {
     "Content-Type": downloadContentType(fileName),
@@ -270,12 +273,12 @@ function sendLocalFile(response, filePath, details, headOnly) {
     "Content-Disposition": contentDisposition(fileName),
     "Cache-Control": "no-store",
   });
-  if (headOnly) return response.end();
-  createReadStream(filePath).pipe(response);
+  if (headOnly || !details.size) return response.end();
+  createReadStream(filePath, { start: 0, end: details.size - 1 }).on("error", () => response.destroy()).pipe(response);
 }
 
 function normalizeDownloadPath(value) {
-  let path = value.trim();
+  let path = canonicalFilePath(value.trim());
   if (/^file:\/\/\/[a-z]:\//i.test(path)) path = path.slice(8);
   if (/^\/[a-z]:[\\/]/i.test(path)) path = path.slice(1);
   return path;

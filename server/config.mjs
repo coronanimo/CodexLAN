@@ -12,9 +12,11 @@ const CONFIG_KEYS = new Set([
   "dataRoot",
   "logRoot",
   "attachmentRoot",
+  "attachmentReadRoot",
   "codexBin",
   "autoApprove",
   "autoApproveBrowser",
+  "parallel",
 ]);
 
 export async function loadServerConfig({ appRoot, env = process.env } = {}) {
@@ -50,9 +52,12 @@ export async function loadServerConfig({ appRoot, env = process.env } = {}) {
     logRoot: pathSetting(setting(fileConfig, env, "logRoot", "CODEX_LOG_DIR", join(appRoot, "logs")), "logRoot", configBase, appRoot),
     attachmentRoot: Object.hasOwn(fileConfig, "attachmentRoot")
       ? pathSetting({ value: fileConfig.attachmentRoot }, "attachmentRoot", configBase, appRoot) : null,
+    attachmentReadRoot: Object.hasOwn(fileConfig, "attachmentReadRoot")
+      ? pathSetting({ value: fileConfig.attachmentReadRoot }, "attachmentReadRoot", configBase, appRoot) : null,
     codexBin,
     autoApprove,
     autoApproveBrowser,
+    parallel: booleanSetting(Object.hasOwn(fileConfig, "parallel") ? fileConfig.parallel : false, "parallel"),
   };
 }
 

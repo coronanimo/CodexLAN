@@ -1,5 +1,6 @@
 import { presentItem, itemKey, summaryKey } from "./presentation.mjs";
 import { running } from "./protocol-values.mjs";
+import { changeStats } from "./change-summary.mjs";
 
 // The provider owns lifecycle/order facts. Each ingress changes indexed items;
 // it never rebuilds a loaded transcript to process one text delta.
@@ -8,7 +9,7 @@ export class NativeProjection {
   sessions = new Map();
   listeners = new Map();
   readers = new Set();
-  begin(id) { const read = { id, version: this.version }; this.readers.add(read); return read; }
+  begin(id) { const read = { id, version: ++this.version }; this.readers.add(read); return read; }
   end(read) { this.readers.delete(read); }
   observe(id, listener) {
     if (!this.listeners.has(id)) this.listeners.set(id, new Set());
@@ -25,8 +26,10 @@ export class NativeProjection {
     if (!id || !runId) return;
     const session = this.session(id);
     const version = session.version = ++this.version;
-    if (!session.runs.has(runId)) session.runs.set(runId, { id: runId, items: new Map(), order: [], aliases: new Map(), status: "inProgress", append: false });
+    if (!session.runs.has(runId)) session.runs.set(runId, { id: runId, ...session.terminalRuns?.get(runId), items: new Map(), order: [], aliases: new Map(), status: session.terminalRuns?.get(runId)?.status || "inProgress", append: false });
     const run = session.runs.get(runId), changed = new Set();
+    if (method === "turn/started" || method === "item/completed") run.activityLabel = "正在生成";
+    if (method === "item/started") run.activityLabel = ({ commandExecution: "正在运行命令", fileChange: "正在修改文件", reasoning: "正在整理思路", agentMessage: "正在输出回复", mcpToolCall: "正在调用工具", dynamicToolCall: "正在调用工具", collabAgentToolCall: "正在协作", subAgentActivity: "正在执行子任务", webSearch: "正在搜索网页", imageView: "正在查看图片", imageGeneration: "正在生成图片", contextCompaction: "正在整理上下文", sleep: "正在等待" })[p.item?.type] || "正在处理";
     const ingest = (entry, terminal = false) => {
       if (!entry?.id) return;
       const alias = entry.clientId;
@@ -37,6 +40,16 @@ export class NativeProjection {
         run.items.set(entry.id, { ...previous, id: entry.id });
       }
       const current = run.items.get(entry.id);
+      if (entry.type === "fileChange") {
+        run.fileChanges ||= new Map();
+        const totals = run.presentationStats ||= { files: 0, added: 0, removed: 0 };
+        for (const change of entry.changes || []) {
+          const old = run.fileChanges.get(change.path), next = changeStats([change]);
+          totals.added += next.added - (old?.added || 0); totals.removed += next.removed - (old?.removed || 0);
+          run.fileChanges.set(change.path, next);
+        }
+        totals.files = run.fileChanges.size;
+      }
       if (!current) run.order.push(entry.id);
       const value = boundedItem({ ...current, ...entry, version });
       if (terminal) { value.status = entry.status || "completed"; value.completedAt ||= Date.now(); }
@@ -48,11 +61,13 @@ export class NativeProjection {
       run.items.set(entry.id, value); changed.add(entry.id);
     };
     if (method === "turn/started") {
+      run.lifecycleVersion = version;
       if (!run.append && !run.completedAt) { run.append = true; run.appendSequence = ++session.appendCounter; }
       if (!run.completedAt) Object.assign(run, p.turn, { items: run.items, order: run.order, aliases: run.aliases });
       if (!run.completedAt) { session.activeRunId = runId; session.status = "running"; }
       for (const item of p.turn?.items || []) ingest(item);
     } else if (method === "turn/completed") {
+      run.lifecycleVersion = version;
       run.status = p.turn?.status || "completed"; run.completedAt = p.turn?.completedAt || Date.now();
       for (const item of p.turn?.items || []) ingest(item, true);
       for (const item of run.items.values()) if (running(item.status)) ingest({ ...item, status: run.status }, true);
@@ -60,8 +75,9 @@ export class NativeProjection {
     } else if (method === "item/started" || method === "item/completed") ingest(p.item, method === "item/completed");
     else if (method === "item/agentMessage/delta") {
       const current = run.items.get(p.itemId);
-      if (current?.previewTruncated) return;
-      ingest({ id: p.itemId, type: "agentMessage", ...current, text: `${current?.text || ""}${p.delta || ""}` });
+      if (current?.previewTruncated) {
+        ingest(current);
+      } else ingest({ id: p.itemId, type: "agentMessage", ...current, text: `${current?.text || ""}${p.delta || ""}` });
     } else if (method === "item/commandExecution/outputDelta") {
       const current = run.items.get(p.itemId);
       ingest({ id: p.itemId, type: "commandExecution", ...current, aggregatedOutput: `${p.replaceOutput ? "" : current?.aggregatedOutput || ""}${p.delta || ""}` });
@@ -73,7 +89,6 @@ export class NativeProjection {
       const index = p.summaryIndex || p.contentIndex || 0;
       values[index] = `${values[index] || ""}${p.delta || ""}`; ingest({ ...current, [field]: values });
       this.emit(id, { kind: "resource.changed", rowId: itemKey(id, runId, p.itemId) });
-      return;
     } else if (method === "item/fileChange/patchUpdated") ingest({ id: p.itemId, type: "fileChange", changes: p.changes || [] });
     else if (method === "turn/plan/updated") { run.plan = { explanation: p.explanation || "", plan: p.plan || [] }; }
     else if (method === "turn/diff/updated") { run.diff = p.diff || ""; }
@@ -101,6 +116,12 @@ export class NativeProjection {
   merge(id, nativeTurns, checkpoint, latest = false, partial = false, canonical = true) {
     if (canonical) this.noteCanonical(id, nativeTurns.map((turn) => turn.id));
     let session = this.sessions.get(id);
+    if (canonical) for (const turn of nativeTurns) if (!running(turn.status)) {
+      session ||= this.session(id);
+      session.terminalRuns ||= new Map();
+      session.terminalRuns.set(turn.id, { status: turn.status, startedAt: turn.startedAt, completedAt: turn.completedAt });
+      if (session.terminalRuns.size > 160) session.terminalRuns.delete(session.terminalRuns.keys().next().value);
+    }
     const turns = nativeTurns.map((turn) => {
       let live = session?.runs.get(turn.id);
       if (!live && running(turn.status)) {
@@ -110,7 +131,12 @@ export class NativeProjection {
           order: (turn.items || []).map((item) => item.id), aliases: new Map(), materialized: canonical };
         session.runs.set(turn.id, live);
       }
-      if (!live) return turn;
+      if (!live) { if (canonical) this.commitOrder(id, turn.id, turn.items || [], checkpoint); return turn; }
+      // Item and plan receipts do not reopen a canonically completed turn.
+      // Only a newer explicit turn lifecycle event can override that fact.
+      if (canonical && !running(turn.status) && !(live.lifecycleVersion > checkpoint)) {
+        live.status = turn.status; live.completedAt = turn.completedAt;
+      }
       for (const item of turn.items || []) if (item.clientId && item.clientId !== item.id && live.items.has(item.clientId)) {
         const pending = live.items.get(item.clientId), index = live.order.indexOf(item.clientId);
         live.items.delete(item.clientId); live.items.set(item.id, { ...pending, id: item.id, clientPending: false });
@@ -132,14 +158,40 @@ export class NativeProjection {
         const position = next ? items.findIndex((entry) => entry.id === next) : items.length;
         items.splice(position, 0, live.items.get(itemId));
       }
-      const covered = !running(turn.status) && ![...this.readers].some((reader) => reader.id === id && reader.version < (live.version || 0))
-        && live.order.every((key) => nativeIds.has(key)) && [...live.items.values()].every((item) => {
-          const saved = turn.items?.find((entry) => entry.id === item.id);
-          return saved && (!item.text || saved.text?.startsWith(item.text)) && (!item.aggregatedOutput || saved.aggregatedOutput?.endsWith(item.aggregatedOutput));
-        });
-      if (covered) session.runs.delete(turn.id);
+      if (canonical && checkpoint >= Math.max(live.orderCheckpoint || 0, session.orderCheckpoints?.get(turn.id) || 0)) {
+        // A page establishes only its own interval. Keep unseen prefix/suffix
+        // positions, and replace the covered interval with canonical identities.
+        const ordered = items.map((item) => item.id), covered = new Set(ordered);
+        const first = live.order.findIndex((key) => covered.has(key));
+        const last = live.order.findLastIndex((key) => covered.has(key));
+        if (first < 0) live.order = partial && latest ? [...live.order, ...ordered] : [...ordered, ...live.order];
+        else {
+          for (let index = first; index <= last; index++) {
+            const key = live.order[index];
+            if (covered.has(key)) continue;
+            const next = live.order.slice(index + 1, last + 1).find((key) => covered.has(key));
+            ordered.splice(next ? ordered.indexOf(next) : ordered.length, 0, key);
+          }
+          live.order = [...live.order.slice(0, first), ...ordered, ...live.order.slice(last + 1)];
+        }
+        for (const item of items) if (!live.items.has(item.id)) live.items.set(item.id, boundedItem({ ...item, version: checkpoint }));
+        live.orderCheckpoint = checkpoint;
+        this.commitOrder(id, turn.id, items, checkpoint);
+      }
+      // Completed items can be retired page by page. Older in-flight reads
+      // still need the live bridge, so keep their versions until a later read.
+      if (canonical && !running(turn.status) && !(live.lifecycleVersion > checkpoint)
+        && ![...this.readers].some((reader) => reader.id === id && reader.version < (live.version || 0))) {
+        for (const saved of turn.items || []) {
+          const item = live.items.get(saved.id);
+          if (item && item.version <= checkpoint && (!item.text || saved.text?.startsWith(item.text))
+            && (!item.aggregatedOutput || saved.aggregatedOutput?.endsWith(item.aggregatedOutput))) live.items.delete(saved.id);
+        }
+        live.order = live.order.filter((key) => live.items.has(key));
+        if (!live.items.size) session.runs.delete(turn.id);
+      }
       return { ...turn, version: Math.max(live.version || 0, checkpoint), ...(live.version > checkpoint || live.completedAt && running(turn.status) ? { status: live.status, completedAt: live.completedAt } : {}), items,
-        ...(live.plan ? { plan: live.plan } : {}), ...(live.diff ? { diff: live.diff } : {}) };
+        ...(live.activityLabel ? { activityLabel: live.activityLabel } : {}), ...(live.plan ? { plan: live.plan } : {}), ...(live.diff ? { diff: live.diff } : {}) };
     });
     // Only explicit provider append facts can bridge a not-yet-materialized run.
     // A completion of an unknown historical run has no append authority.
@@ -148,12 +200,30 @@ export class NativeProjection {
     return turns;
   }
   forget(id) { this.sessions.delete(id); }
+  commitOrder(id, runId, items, checkpoint) {
+    const session = this.session(id);
+    session.orderCheckpoints ||= new Map();
+    if (checkpoint < (session.orderCheckpoints.get(runId) || 0)) return;
+    session.orderCheckpoints.set(runId, checkpoint);
+    if (session.orderCheckpoints.size > 160) session.orderCheckpoints.delete(session.orderCheckpoints.keys().next().value);
+    const revision = ++this.version;
+    const ids = items.map((item) => itemKey(id, runId, item.id));
+    for (let offset = 0; offset < ids.length; offset += 10) {
+      const placements = ids.slice(offset, offset + 10).map((key, index) => {
+        const position = offset + index;
+        return { id: key, revision, afterId: position ? ids[position - 1] : undefined,
+          beforeId: ids[position + 1] || summaryKey(id, runId) };
+      });
+      this.emit(id, { kind: "patch", conversationId: id, appendRun: false, removeIds: [], upserts: [], placements });
+    }
+  }
 }
 
 function boundedItem(item) {
   const keys = ["id", "type", "status", "text", "command", "tool", "query", "cwd", "source", "exitCode", "durationMs", "clientId", "clientPending", "inputKind", "phase", "delivery", "questions", "summary", "content", "aggregatedOutput", "outputTruncated", "startedAt", "completedAt", "previewTruncated", "version"];
   const result = Object.fromEntries(keys.flatMap((key) => item[key] !== undefined ? [[key, item[key]]] : []));
   for (const key of ["path", "savedPath"]) if (typeof item[key] === "string" && item[key].length <= 4096) result[key] = item[key];
+  if (item.type === "fileChange") result.changes = (item.changes || []).slice(0, 20).map((change) => ({ path: String(change.path || "").slice(0, 256), stats: changeStats([change]) }));
   if (typeof result.text === "string" && result.text.length > 12_000) { result.text = result.text.slice(0, 12_000); result.previewTruncated = true; }
   if (Array.isArray(result.content) && result.type === "userMessage") {
     let remaining = 12_000, images = 0;

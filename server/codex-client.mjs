@@ -44,6 +44,7 @@ export class AppServerClient {
     this.events = new EventEmitter();
     this.pending = new Map();
     this.loadedThreads = new Set();
+    this.loadingThreads = new Map();
     this.nextId = 1;
     this.buffer = "";
     this.state = "starting";
@@ -173,6 +174,8 @@ export class AppServerClient {
         if (message.error) {
           const error = new Error(message.error.message || "Codex 请求失败。");
           error.codexResponse = true;
+          error.nativeMethod = pending.method;
+          if (/thread not loaded/i.test(error.message)) this.loadedThreads.delete(pending.params?.threadId);
           pending.reject(error);
         } else {
           // Observe acceptance synchronously, before later JSONL notifications
@@ -238,9 +241,13 @@ export class AppServerClient {
       this.markThreadLoaded(threadId);
       return null;
     }
-    const result = await this.request("thread/resume", threadResumeParams(threadId, project, settings));
-    this.markThreadLoaded(threadId);
-    return result;
+    if (!this.loadingThreads.has(threadId)) {
+      const operation = this.request("thread/resume", threadResumeParams(threadId, project, settings)).then((result) => {
+        this.markThreadLoaded(threadId); return result;
+      }).finally(() => { if (this.loadingThreads.get(threadId) === operation) this.loadingThreads.delete(threadId); });
+      this.loadingThreads.set(threadId, operation);
+    }
+    return this.loadingThreads.get(threadId);
   }
 
   markThreadLoaded(threadId) {

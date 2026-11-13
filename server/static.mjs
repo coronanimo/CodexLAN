@@ -10,11 +10,11 @@ export function registerStatic(application, root) {
     },
   }));
   application.use((request, response) => {
-    if (request.path === "/" && !existsSync(join(root, "index.html"))) return response.status(503).type("text").send("React 页面尚未构建。请在源码目录运行 npm run web:build。");
+    if (request.path === "/" && !existsSync(join(root, "index.html"))) return response.status(503).type("text").send("页面尚未构建。请在源码目录运行 npm run web:build。");
     response.status(404).type("text").send("Not found");
   });
 }
 export function staticVersion(root) {
   const entry = join(root, "index.html");
-  return existsSync(entry) ? `react-${Math.trunc(statSync(entry).mtimeMs)}` : "react-unbuilt";
+  return existsSync(entry) ? `web-${Math.trunc(statSync(entry).mtimeMs)}` : "web-unbuilt";
 }

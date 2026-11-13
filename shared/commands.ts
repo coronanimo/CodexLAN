@@ -3,8 +3,9 @@ export type Question = { id: string; header: string; question: string; isOther: 
 export type QuestionRequest = { id: string; delivery: "blocking" | "async"; questions: Question[] };
 export type ConversationControls = {
   conversationId: string; activeRunId: string | null; status: string;
+  writable?: boolean;
   queueRevision: number; queueCount: number; queue: { id: string; text: string; truncated: boolean; error?: string; delivery?: string }[];
-  goal: { objective: string; status: string; tokenBudget?: number | null } | null;
+  goal: { objective: string; status: string; tokenBudget?: number | null; tokensUsed?: number; timeUsedSeconds?: number } | null;
   questions: QuestionRequest[];
   approvals: { id: string; title: string; description: string; decisions: { value: string; label: string }[] }[];
   answered: string[];

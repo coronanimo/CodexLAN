@@ -8,8 +8,8 @@ export class QueueCoordinator {
   again = new Set();
   steering = new Set();
   closed = false;
-  constructor(store, agent) {
-    this.store = store; this.agent = agent;
+  constructor(store, agent, canDeliver = () => true) {
+    this.store = store; this.agent = agent; this.canDeliver = canDeliver;
     this.stop = agent.onEvent((id, event) => {
       if (event.kind === "input.accepted") void this.accept(id, event.inputId);
       if (event.kind === "run.terminal" || event.kind === "goal.changed") this.kick(id);
@@ -19,6 +19,7 @@ export class QueueCoordinator {
   busy(id) { return this.jobs.has(id) || [...this.steering].some((key) => key.startsWith(id + ":")); }
   notify(id) { this.agent.notify(id, { kind: "controls.changed" }); }
   async enqueue(id, project, text, attachments = []) {
+    if (!this.canDeliver(id)) throw httpError(403, "此会话在当前实例中只读。");
     if ((this.store.queues[id]?.length || 0) >= 100) throw httpError(409, "单个会话最多保留 100 条排队消息，请等待队列处理后再提交。");
     const item = await this.store.enqueue(id, project.id, text?.trim() ? validateText(text) : attachments.length ? "" : validateText(text), attachments);
     this.notify(id); this.kick(id);
@@ -44,9 +45,14 @@ export class QueueCoordinator {
   async edit(id, itemId, change) {
     this.editable(id, itemId);
     if (Object.hasOwn(change, "text")) await this.store.updateQueueItem(id, itemId, validateText(change.text));
-    else if (["up", "down"].includes(change.direction)) await this.store.moveQueueItem(id, itemId, change.direction);
+    else if (["up", "down"].includes(change.direction)) {
+      const items = this.store.queues[id], index = items.findIndex((item) => item.id === itemId);
+      const adjacent = items[index + (change.direction === "up" ? -1 : 1)];
+      if (adjacent?.delivery?.status === "submitting" || adjacent && this.steering.has(`${id}:${adjacent.id}`)) throw httpError(409, "相邻消息正在提交，暂时不能调整顺序。");
+      await this.store.moveQueueItem(id, itemId, change.direction);
+    }
     else throw httpError(400, "队列修改内容无效。");
-    this.notify(id); return this.snapshot(id);
+    this.notify(id); this.kick(id); return this.snapshot(id);
   }
   async accept(id, inputId) {
     if (await this.store.completeQueueItem(id, inputId)) this.notify(id);
@@ -63,6 +69,7 @@ export class QueueCoordinator {
     this.jobs.set(id, job); return job;
   }
   async deliver(id) {
+    if (!this.canDeliver(id)) return;
     const item = this.store.queues[id]?.[0];
     if (!item || item.delivery || this.steering.has(`${id}:${item.id}`)) return;
     const project = await this.store.getProject(item.projectId);

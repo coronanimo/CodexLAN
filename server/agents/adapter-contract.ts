@@ -1,10 +1,10 @@
 import type { AgentSetting } from "../../shared/agent-contract";
 import type { PresentationPatch } from "../../shared/presentation";
-import type { ConversationSummary, DetailPage, HistoryPage, ReadBootstrap } from "../../shared/read-api";
+import type { ConversationMetadata, ConversationSummary, DetailPage, HistoryPage, ReadBootstrap } from "../../shared/read-api";
 import type { ConversationCommand, ConversationControls } from "../../shared/commands";
 
 type Project = { id: string; path: string; settings?: Record<string, string> };
-type User = { id: string };
+type User = { id: string; role?: string };
 export type AgentInput = { id: string; text: string; runId?: string;
   attachments?: readonly { id?: string; path: string; name: string; size: number }[] };
 export type AgentEvent = ({ kind: "patch" } & PresentationPatch)
@@ -18,12 +18,17 @@ export type AgentEvent = ({ kind: "patch" } & PresentationPatch)
 // cursors and provider settings conversion stay inside its implementation.
 export interface AgentAdapter {
   describe(): ReadBootstrap["agents"][number];
-  list(project: Project, user: User, options?: { cursor?: string | null }): Promise<{
-    conversations: ConversationSummary[]; nextCursor: string | null;
+  list(project: Project, user: User, options?: { cursor?: string | null; order?: "original" | "recent" }): Promise<{
+    conversations: ConversationSummary[]; nextCursor: string | null; preferred?: ConversationSummary | null;
   }>;
+  listAll(projects: Project[], user: User, options?: { cursor?: string | null; order?: "original" | "recent" }): Promise<{ conversations: ConversationSummary[]; nextCursor: string | null }>;
+  recordAccess?(conversationId: string, user: User): Promise<unknown>;
+  presentInput?(text: string): string;
+  projectSettings?(project: Project): Record<string, string>;
   search(projects: Project[], user: User, query: string, cursor?: string | null): Promise<{ results: ConversationSummary[]; nextCursor: string | null }>;
   readHistory(conversationId: string, options?: { before?: string | null; limit?: number }): Promise<HistoryPage>;
-  readDetail(conversationId: string, options: { ref: string; after?: string | null }): Promise<DetailPage>;
+  readDetail(conversationId: string, options: { ref: string; after?: string | null; raw?: boolean }): Promise<DetailPage>;
+  readVisualization?(path: string, context: { project: Project; user: User }): Promise<string>;
   export(conversationId: string, ref: string): AsyncGenerator<string>;
   create(project: Project, user: User): Promise<ConversationSummary>;
   fork(conversationId: string, project: Project, user: User): Promise<ConversationSummary>;
@@ -41,7 +46,7 @@ export interface AgentAdapter {
   observe(conversationId: string, listener: (event: AgentEvent) => void): () => void;
   onEvent(listener: (conversationId: string, event: AgentEvent) => void): () => void;
   notify(conversationId: string, event: AgentEvent): void;
-  summary(conversationId: string): ConversationSummary;
+  summary(conversationId: string): ConversationMetadata;
   knownIds(): string[];
   projectHasActiveThread(projectId: string): boolean | Promise<boolean>;
   forgetProject(projectId: string, conversationIds: string[]): void;

@@ -5,18 +5,17 @@ import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isLoopbackIpv4, loadServerConfig, selectListenerAddress } from "./config.mjs";
+import { assertServiceTarget } from "./service-target.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const appRoot = resolve(dirname(scriptPath), "..");
 const action = process.argv[2] || "status";
 const managedProcessEnvironment = "CODEXLAN_MANAGED_PROCESS";
-const externalOnlyActions = new Set(["stop", "restart", "handoff"]);
-
-if (process.env[managedProcessEnvironment] === "1" && externalOnlyActions.has(action)) {
-  throw new Error(`Refusing service ${action} from a CodexLAN-managed process. Run this command from an external terminal.`);
-}
+const managedRootEnvironment = "CODEXLAN_MANAGED_DATA_ROOT";
 
 const config = await loadServerConfig({ appRoot });
+await assertServiceTarget({ action, managed: process.env[managedProcessEnvironment] === "1",
+  callerDataRoot: process.env[managedRootEnvironment], targetDataRoot: config.dataRoot });
 const serviceRoot = join(config.dataRoot, "service");
 const statePath = join(serviceRoot, "state.json");
 const commandPath = join(serviceRoot, "command.json");
@@ -250,7 +249,7 @@ async function runDaemon() {
     state.lanUrl = null;
     server = spawn(process.execPath, [join(appRoot, "server", "index.mjs")], {
       cwd: appRoot,
-      env: { ...process.env, [managedProcessEnvironment]: "1" },
+      env: { ...process.env, [managedProcessEnvironment]: "1", [managedRootEnvironment]: config.dataRoot },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
       windowsHide: true,
     });

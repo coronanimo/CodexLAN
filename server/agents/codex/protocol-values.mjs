@@ -1,4 +1,6 @@
 import { httpError } from "../../workspace-store.mjs";
+import { contentReferences } from "./content-references.mjs";
+import { canonicalFilePath } from "../../../shared/content-files.mjs";
 
 export function running(value) {
   return ["running", "inprogress", "active", "pending", "started"].includes(String(typeof value === "string" ? value : value?.type || "").toLowerCase());
@@ -13,13 +15,40 @@ export function itemText(item) {
   switch (item.type) {
     case "userMessage": return (item.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
     case "agentMessage": case "plan": return String(item.text || "");
-    case "reasoning": return [...(item.summary || []), ...(item.content || [])].join("\n\n");
-    case "commandExecution": return [item.command, item.aggregatedOutput, item.exitCode != null ? `Exit code: ${item.exitCode}` : ""].filter(Boolean).join("\n\n");
-    case "fileChange": return (item.changes || []).map((change) => `${change.path || ""}\n${change.diff || ""}`).join("\n\n");
+    case "reasoning": return [...new Set([...(item.summary || []), ...(item.content || [])].filter(Boolean))].join("\n\n");
+    case "commandExecution": return [item.cwd && `目录：${item.cwd}`, item.command, item.aggregatedOutput, item.exitCode != null ? `退出码：${item.exitCode}` : ""].filter(Boolean).join("\n\n");
+    case "fileChange": return (item.changes || []).map((change) => `diff --git a/${change.path || ""} b/${change.path || ""}\n${change.diff || ""}`).join("\n\n");
+    case "dynamicToolCall": return [item.arguments != null ? `参数\n${JSON.stringify(item.arguments, null, 2)}` : "", item.contentItems != null ? `结果\n${JSON.stringify(item.contentItems, null, 2)}` : ""].filter(Boolean).join("\n\n");
+    case "collabAgentToolCall": return [item.prompt, item.receiverThreadIds?.length && `目标：${item.receiverThreadIds.join(", ")}`, item.agentsStates && JSON.stringify(item.agentsStates, null, 2)].filter(Boolean).join("\n\n");
+    case "subAgentActivity": return [item.kind, item.agentPath, item.agentThreadId].filter(Boolean).join("\n");
+    case "webSearch": return [item.query, item.action && JSON.stringify(item.action, null, 2)].filter(Boolean).join("\n\n");
+    case "imageView": return item.path || "";
+    case "imageGeneration": return "生成图片";
+    case "contextCompaction": return "整理聊天上下文";
+    case "sleep": return `等待时长：${item.durationMs || 0} ms`;
     default: return [item.arguments != null ? `参数\n${JSON.stringify(item.arguments, null, 2)}` : "",
       item.result != null ? `结果\n${JSON.stringify(item.result, null, 2)}` : "", item.error != null ? `错误\n${JSON.stringify(item.error, null, 2)}` : ""].filter(Boolean).join("\n\n");
   }
 }
+export function displayInput(text) { return String(text || "").replace(/^\[CodexLAN async answer: [^\r\n\]]{1,200}\]\n/, ""); }
+export function messagePresentation(item) {
+  const raw = itemText(item), result = contentReferences(item.type === "userMessage" ? displayInput(raw) : raw, { omitStandaloneFileLabels: item.type === "userMessage" });
+  const images = item.type === "userMessage" ? (item.content || []).filter((part) => part.type === "localImage").map((part) => ({ path: part.path })) : [];
+  let characters = 0;
+  const pathKey = (path) => canonicalFilePath(path).replace(/\\/g, "/").toLowerCase();
+  const files = [...images, ...result.files].filter((file, index, all) => typeof file.path === "string" && file.path.length <= 4096 && all.findIndex((entry) => pathKey(entry.path) === pathKey(file.path)) === index).slice(0, 20)
+    .map(({ path }) => {
+      const label = result.files.find((file) => pathKey(file.path) === pathKey(path))?.label.slice(0, 256);
+      return { path, name: path.replace(/\\/g, "/").split("/").at(-1).slice(0, 256), label, image: images.some((image) => pathKey(image.path) === pathKey(path)) || /\.(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(path) };
+    })
+    .filter((file) => { characters += file.path.length + file.name.length; return characters <= 8000; });
+  characters = 0;
+  const visualizations = result.visualizations.filter((entry) => entry.path.length <= 4096).slice(0, 20)
+    .map(({ path, title, mode }) => ({ path, title: title.slice(0, 256), mode }))
+    .filter((entry) => { characters += entry.path.length + entry.title.length; return characters <= 8000; });
+  return { text: result.text, files, visualizations };
+}
+export function presentationText(item) { return ["userMessage", "agentMessage", "plan"].includes(item?.type) ? messagePresentation(item).text : itemText(item); }
 export function questionsFromItem(item) {
   if (item.type !== "agentMessage" || item.delivery !== "async") return null;
   if ((item.questions?.length || 0) > 3 || JSON.stringify(item.questions || []).length > 20_000) return null;

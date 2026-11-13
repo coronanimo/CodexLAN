@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { WorkspaceDatabase, WORKSPACE_SCHEMA_VERSION } from "./workspace-database.mjs";
 import { commandExecutionSnapshot, turnPlanSnapshot } from "./core/persistence-values.mjs";
+import { executionOutputCovered, hasExecutionResult } from "./core/execution-recovery.mjs";
 
 let DatabaseSync = null;
 try {
@@ -612,13 +613,14 @@ export class WorkspaceStore {
   async getTurnPresentation(threadId, turnId) {
     await this.ready;
     const metric = this.turnMetrics[threadId]?.[turnId];
-    return { startedAt: metric?.startedAt, completedAt: metric?.completedAt, plan: metric?.plan ? structuredClone(metric.plan) : null,
-      recoveryCount: Object.values(metric?.items || {}).filter((item) => item.snapshot).length };
+    return { startedAt: metric?.startedAt, completedAt: metric?.completedAt, durationMs: metric?.durationMs, plan: metric?.plan ? structuredClone(metric.plan) : null,
+      ...(metric?.completedAt !== undefined ? { commandMetrics: Object.fromEntries(Object.entries(metric.items || {}).filter(([, item]) => item.type === "commandExecution").map(([id, item]) => [id, { type: item.type, startedAt: item.startedAt, completedAt: item.completedAt, durationMs: item.durationMs }])) } : {}),
+      recoveryCount: Object.values(metric?.items || {}).filter((item) => !item.canonicalItemPresent && hasExecutionResult(item.snapshot)).length };
   }
 
   async getRecoveryItem(threadId, turnId, index) {
     await this.ready;
-    const items = Object.values(this.turnMetrics[threadId]?.[turnId]?.items || {}).filter((item) => item.snapshot);
+    const items = Object.values(this.turnMetrics[threadId]?.[turnId]?.items || {}).filter((item) => !item.canonicalItemPresent && hasExecutionResult(item.snapshot));
     return { snapshot: items[index] ? structuredClone(items[index].snapshot) : null, count: items.length };
   }
 
@@ -671,14 +673,31 @@ export class WorkspaceStore {
     } else await this.persist(changes);
   }
 
-  async reconcileExecutionSupplements(threadId, turns) {
+  async reconcileExecutionSupplements(threadId, turns, { complete = false } = {}) {
     await this.ready;
-    const changes = [];
+    const changes = new Set();
     for (const turn of turns) {
+      const metrics = this.turnMetrics[threadId]?.[turn.id]?.items || {};
+      const canonicalIds = new Set((turn.items || []).map((item) => item.id));
+      if (complete) for (const [itemId, metric] of Object.entries(metrics)) {
+        if (metric.snapshot && metric.canonicalItemPresent && !canonicalIds.has(itemId)) {
+          delete metric.canonicalItemPresent;
+          changes.add(JSON.stringify([threadId, turn.id, itemId]));
+        }
+      }
       for (const item of turn.items || []) {
-        const metric = this.turnMetrics[threadId]?.[turn.id]?.items?.[item.id];
+        const metric = metrics[item.id];
         const snapshot = metric?.snapshot;
-        if (!snapshot || !["completed", "failed", "declined", "interrupted"].includes(item.status)) continue;
+        if (!snapshot) continue;
+        const terminal = ["completed", "failed", "declined", "interrupted"].includes(item.status);
+        if (!terminal && !["completed", "failed", "interrupted"].includes(turn.status)) continue;
+        // Knowing the command's original location does not prove its local
+        // output is redundant. Retain unique content beside that command.
+        if (!metric.canonicalItemPresent) {
+          metric.canonicalItemPresent = true;
+          changes.add(JSON.stringify([threadId, turn.id, item.id]));
+        }
+        if (!terminal) continue;
         // Only discard a recovery copy after canonical history actually supplies
         // its fields. A completed notification alone does not prove persistence.
         const covered = Object.entries(snapshot).every(([key, value]) => {
@@ -686,16 +705,16 @@ export class WorkspaceStore {
           // their becoming more accurate must not keep a duplicate output body.
           if (key === "status") return true;
           if (key === "durationMs") return Number.isFinite(item.durationMs) && item.durationMs >= 0;
-          if (key === "aggregatedOutput") return typeof item.aggregatedOutput === "string" && item.aggregatedOutput.endsWith(value);
-          if (key === "outputTruncated") return item.outputTruncated === value || typeof item.aggregatedOutput === "string" && item.aggregatedOutput.endsWith(snapshot.aggregatedOutput || "");
+          if (key === "aggregatedOutput") return executionOutputCovered(item.aggregatedOutput, value, snapshot.status);
+          if (key === "outputTruncated") return item.outputTruncated === value || executionOutputCovered(item.aggregatedOutput, snapshot.aggregatedOutput || "", snapshot.status);
           return item[key] === value;
         });
         if (!covered) continue;
         delete metric.snapshot;
-        changes.push(JSON.stringify([threadId, turn.id, item.id]));
+        changes.add(JSON.stringify([threadId, turn.id, item.id]));
       }
     }
-    if (changes.length) await this.persist({ supplements: changes });
+    if (changes.size) await this.persist({ supplements: [...changes] });
   }
 
   pruneTurnMetrics(threadId) {
@@ -1291,6 +1310,7 @@ export function cleanTimingPatch(value = {}, { includeType = false, includeSnaps
   if (includeSnapshot) {
     const snapshot = commandExecutionSnapshot(value?.snapshot);
     if (snapshot) timing.snapshot = snapshot;
+    if (value?.canonicalItemPresent === true) timing.canonicalItemPresent = true;
   }
   return timing;
 }

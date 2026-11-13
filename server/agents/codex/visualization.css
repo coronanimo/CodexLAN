@@ -1,0 +1,81 @@
+:root {
+  --surface-canvas: #f5f7fa;
+  --surface-subtle: #fbfcfe;
+  --background: var(--surface-canvas);
+  --foreground: #25364d;
+  --muted: #e8edf3;
+  --muted-foreground: #66758a;
+  --border: #d5dee8;
+  --popover: #fff;
+  --popover-foreground: #25364d;
+  --viz-series-1: #3174c7;
+  --viz-series-2: #d45862;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+  background: var(--background);
+  font: 14px/1.55 Inter, "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+}
+
+body { padding: clamp(14px, 2.4vw, 30px); }
+body > div { max-width: 1180px; margin: 0 auto; }
+
+.viz-root {
+  padding: clamp(18px, 2.5vw, 32px);
+  border: 1px solid #dce4ed;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 12px 36px #1d355714;
+}
+
+.viz-root h1 {
+  margin: 0 !important;
+  color: #1f3048;
+  font-size: clamp(22px, 2.2vw, 30px);
+  font-weight: 700 !important;
+  line-height: 1.25;
+  letter-spacing: -.025em;
+}
+
+.viz-root h2 {
+  margin-top: 34px !important;
+  color: #293d58;
+  font-size: 17px;
+  font-weight: 700 !important;
+  letter-spacing: -.01em;
+}
+
+.viz-root .viz-subtitle {
+  max-width: 780px;
+  margin-top: 8px !important;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.viz-root .viz-legend { gap: 8px !important; margin: 12px 0 10px !important; }
+.viz-root .viz-key { gap: 6px !important; border: 1px solid #e0e7ef; border-radius: 999px; padding: 4px 9px; background: #f8fafc; color: #53657c; font-size: 12px; }
+.viz-root .viz-swatch { width: 9px !important; height: 9px !important; border-radius: 3px; }
+.viz-root .viz-note { max-width: 900px; font-size: 12px; line-height: 1.65; }
+.viz-root .chart-host { margin-top: 12px; padding: 12px; border: 1px solid #e0e7ef; border-radius: 12px; background: var(--surface-subtle); overflow: hidden; }
+.viz-root .tooltip { border-radius: 9px !important; box-shadow: 0 10px 28px #172a4730; }
+
+@media (max-width: 600px) {
+  body { padding: 0; }
+  .viz-root { padding: 20px 14px 28px; border: 0; border-radius: 0; box-shadow: none; }
+  .viz-root h1 { font-size: 22px; }
+  .viz-root h2 { margin-top: 30px !important; font-size: 16px; }
+  .viz-root .chart-host { margin: 10px -6px 0; padding: 6px; border-radius: 10px; }
+  .viz-root .axis text,
+  .viz-root .mark-label,
+  .viz-root .cell-label { font-size: 10px !important; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; transition: none !important; }
+}

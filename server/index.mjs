@@ -16,6 +16,7 @@ import { QueueCoordinator } from "./core/queue-coordinator.mjs";
 import { ConversationService } from "./core/conversation-service.mjs";
 import { registerLanRoutes } from "./core/routes.mjs";
 import { codexlan } from "../products/codexlan/manifest.mjs";
+import { ConversationAccess } from "./core/conversation-access.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageMetadata = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8"));
@@ -53,6 +54,7 @@ const store = new WorkspaceStore({
   legacyJsonMirror: process.env.NODE_ENV === "test",
 });
 await store.ready;
+const access = new ConversationAccess(dataRoot, serverConfig.parallel); await access.load();
 const auth = new AuthService(store);
 const codex = new AppServerClient({ workspace: workspaceRoot, appVersion, codexBin: configuredCodexBin });
 
@@ -68,12 +70,13 @@ const listenerState = {
 };
 const agent = createCodexAdapter({
   store, connection: codex,
+  canLoad: access.writable,
   autoApprove: serverConfig.autoApprove,
   autoApproveBrowser: serverConfig.autoApproveBrowser,
 });
-const queue = new QueueCoordinator(store, agent);
+const queue = new QueueCoordinator(store, agent, access.writable);
 const conversations = new ConversationService(store, new Map([[agent.describe().instanceId, queue]]),
-  (project, id, files) => resolveUploadedFiles(project, id, files, serverConfig.attachmentRoot));
+  (project, id, files) => resolveUploadedFiles(project, id, files, serverConfig.attachmentRoot), (id) => access.requireWrite(id));
 codex.events.on("online", () => { void queue.recover().catch((error) => process.stderr.write(`[queue] 队列恢复失败：${error.message}\n`)); });
 let lanStreams;
 const workspaceApplication = createWorkspaceApplication();
@@ -157,11 +160,11 @@ function createWorkspaceApplication() {
     lanStreams?.closeUserEventStreams(userId);
   } });
   registerRuntimeRoutes(application);
-  registerProjects(application, { store, attachmentRoot: serverConfig.attachmentRoot,
+  registerProjects(application, { store, attachmentRoot: serverConfig.attachmentRoot, attachmentReadRoot: serverConfig.attachmentReadRoot,
     onPermissionsChanged: () => lanStreams?.closeEventStreams(), projectBusy: agent.projectHasActiveThread,
-    validateAgentSettings: agent.validateSettings, forgetProject: agent.forgetProject });
+    validateAgentSettings: agent.validateSettings, forgetProject: agent.forgetProject, requireConversationWrite: (id) => access.requireWrite(id) });
   lanStreams = registerLanRoutes(application, {
-    edition: codexlan,
+    edition: codexlan, access, workspaceRoot,
     agents: [agent], conversations,
     listProjects: (userId) => store.listProjects(userId),
     getProject: (id, userId) => store.getProject(id, userId),
@@ -174,7 +177,7 @@ function createWorkspaceApplication() {
   application.use("/api", (request, response) => json(response, 404, { error: "找不到 API。" }));
   registerStatic(application, staticRoot);
   application.use((error, request, response, next) => {
-    process.stderr.write(`[web] ${error.stack || error.message}\n`);
+    process.stderr.write(`[web] ${request.method} ${request.codexUrl.pathname}${error.nativeMethod ? ` [${error.nativeMethod}]` : ""}: ${error.stack || error.message}\n`);
     if (!response.headersSent) return json(response, error.statusCode || 500, { error: error.statusCode ? error.message : "服务端处理请求时发生错误。" });
     response.end();
   });
@@ -185,6 +188,7 @@ function registerHealthRoutes(application) {
   application.get("/api/health", (request, response) => json(response, 200, {
     status: "alive",
     appVersion,
+    parallel: serverConfig.parallel,
     assetVersion,
     nodeVersion,
     nodeArchitecture,
@@ -224,7 +228,7 @@ function registerRuntimeRoutes(application) {
 function setSecurityHeaders(response) {
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Referrer-Policy", "no-referrer");
-  response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+  response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
 }
 
 function normalizeSocketAddress(address) {

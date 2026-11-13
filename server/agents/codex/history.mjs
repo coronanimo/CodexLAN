@@ -1,18 +1,20 @@
 import { httpError } from "../../workspace-store.mjs";
 import { randomUUID } from "node:crypto";
 import { presentItem, encodePosition } from "./presentation.mjs";
-import { itemText, running } from "./protocol-values.mjs";
+import { presentationText as itemText, itemText as originalText, running, messagePresentation } from "./protocol-values.mjs";
 import { CodexResources } from "./resources.mjs";
+import { executionOutputCovered } from "../../core/execution-recovery.mjs";
 
 export class CodexHistory {
   itemPaging = new Map();
   bookmarks = new Map();
   resources = new CodexResources();
+  recoveryReads = new Map();
   constructor(connection, projection, store) { this.connection = connection; this.projection = projection; this.store = store; }
   async readNative(id, cursor = null, view = "summary") {
     const read = this.projection.begin(id);
     try {
-      let page, metadata;
+      let page, metadata, complete = view === "full";
       try {
         [page, metadata] = await Promise.all([
           this.connection.request("thread/turns/list", { threadId: id, sortDirection: "desc", itemsView: view, limit: 4, ...(cursor ? { cursor } : {}) }),
@@ -20,8 +22,9 @@ export class CodexHistory {
         ]);
         page = { turns: (page.data || []).toReversed(), before: page.nextCursor || null };
       } catch (error) {
-        if (!/method not found|unknown method|paginated_threads is not supported|thread\/turns\/list.*(unsupported|unavailable|not supported)/i.test(error.message)) throw error;
+        if (!/method not found|unknown method|paginated_threads is not supported|thread not loaded|thread\/turns\/list.*(unsupported|unavailable|not supported)/i.test(error.message)) throw error;
         metadata = (await this.connection.request("thread/read", { threadId: id, includeTurns: true })).thread;
+        complete = true;
         const all = metadata.turns || [];
         const end = cursor ? all.findIndex((turn) => turn.id === cursor) : all.length;
         if (end < 0) throw httpError(409, "历史位置已失效，请重新同步。");
@@ -29,7 +32,11 @@ export class CodexHistory {
         page = { turns: all.slice(start, end), before: start ? all[start].id : null };
       }
       const canonical = page.turns;
-      await this.store.reconcileExecutionSupplements(id, canonical);
+      await this.store.reconcileExecutionSupplements(id, canonical, { complete });
+      for (const turn of canonical) {
+        const supplement = await this.store.getTurnPresentation?.(id, turn.id);
+        this.supplement(turn, supplement);
+      }
       const turns = this.projection.merge(id, canonical, read.version, !cursor);
       if (!cursor) {
         const session = this.projection.session(id);
@@ -52,13 +59,61 @@ export class CodexHistory {
       }
     }
   }
+  async reconcileRecovery(id, position) {
+    const key = JSON.stringify([id, position.run]);
+    if (this.recoveryReads.has(key)) return this.recoveryReads.get(key);
+    const read = (async () => {
+      if (!(await this.store.getTurnPresentation?.(id, position.run))?.recoveryCount) return;
+      if (position.kind !== "items") {
+        const page = await this.readNative(id, position.page, "full");
+        if (!page.canonical.some((turn) => turn.id === position.run)) throw httpError(409, "原始轮次暂不可用，请重新同步后核对。");
+        return;
+      }
+      // A transcript page does not establish that an unvisited command is
+      // missing. Audit the requested turn on demand, one bounded page at a time.
+      let cursor = null; const seen = new Set(), itemIds = new Set();
+      do {
+        const page = await this.connection.request("thread/items/list", { threadId: id, turnId: position.run, sortDirection: "asc", limit: 50, ...(cursor ? { cursor } : {}) });
+        if (!Array.isArray(page.data)) throw new Error("执行记录核对返回了无效数据。");
+        for (const entry of page.data || []) itemIds.add(entry.item.id);
+        await this.store.reconcileExecutionSupplements?.(id, [{ id: position.run, items: (page.data || []).map((entry) => entry.item) }]);
+        if (!(await this.store.getTurnPresentation?.(id, position.run))?.recoveryCount) return;
+        cursor = page.nextCursor || null;
+        if (cursor) { const token = JSON.stringify(cursor); if (seen.has(token)) throw new Error("执行副本核对位置重复，请重试。"); seen.add(token); }
+      } while (cursor);
+      await this.store.reconcileExecutionSupplements?.(id, [{ id: position.run, items: [...itemIds].map((id) => ({ id })) }], { complete: true });
+    })().finally(() => this.recoveryReads.delete(key));
+    this.recoveryReads.set(key, read);
+    return read;
+  }
+  async executionText(id, runId, item, raw = false) {
+    const text = raw ? originalText(item) : itemText(item);
+    if (item.type !== "commandExecution") return text;
+    await this.store.reconcileExecutionSupplements?.(id, [{ id: runId, items: [item] }]);
+    const snapshot = (await this.store.getItemMetric?.(id, runId, item.id))?.snapshot;
+    if (!snapshot?.aggregatedOutput?.trim()) return text;
+    // Formatting differences are not additional output. This comparison only
+    // affects presentation; the original local snapshot remains intact.
+    const comparable = (value) => String(value || "").replace(/\r\n/g, "\n").replace(/\x1b\[[0-9;]*m/g, "");
+    if (executionOutputCovered(comparable(item.aggregatedOutput), comparable(snapshot.aggregatedOutput), snapshot.status)) return text;
+    return `${text}\n\n[本地保留的输出片段 · 同一命令]\n${snapshot.aggregatedOutput}`;
+  }
+  supplement(turn, value) {
+    if (!value) return;
+    if (value.plan) turn.plan = value.plan;
+    turn.startedAt ??= value.startedAt;
+    turn.completedAt ??= value.completedAt;
+    turn.durationMs ??= value.durationMs;
+    if (value.commandMetrics) turn.commandMetrics = value.commandMetrics;
+    turn.recoveryCount = value.recoveryCount;
+  }
   async page(id, { before = null, limit = 100 } = {}) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw httpError(400, "历史每页数量必须是 1 到 200。");
     const position = before ? before.startsWith("h:") ? this.bookmark(id, before) : decodePosition(before) : { page: null };
     if (position.kind === "items" || !before && this.itemPaging.get(id) !== false) {
       try { return await this.itemPage(id, position, limit, !before); }
       catch (error) {
-        if (position.kind === "items" || !/method not found|unknown method|item pagination.*(not supported|unavailable)|thread\/items\/list.*(not supported|unsupported|unavailable)/i.test(error.message)) throw error;
+        if (position.kind === "items" || !/method not found|unknown method|thread not loaded|paginated_threads is not supported|item pagination.*(not supported|unavailable)|thread\/(?:items|turns)\/list.*(not supported|unsupported|unavailable)/i.test(error.message)) throw error;
         this.itemPaging.set(id, false);
       }
     }
@@ -130,14 +185,17 @@ export class CodexHistory {
         localAnchor = typeof source.cursor === "object" ? source.cursor.itemId : null;
       }
       this.itemPaging.set(id, true);
-      const items = page.data.toReversed().map((entry) => ({ ...entry.item, startedAtMs: entry.startedAtMs, completedAtMs: entry.completedAtMs }));
+      const items = await Promise.all(page.data.toReversed().map(async (entry) => {
+        const metric = await this.store.getItemMetric?.(id, source.run.id, entry.item.id) || {};
+        return { ...entry.item, ...metric, startedAtMs: entry.startedAtMs ?? metric.startedAt, completedAtMs: entry.completedAtMs ?? metric.completedAt };
+      }));
+      if (canonical) await this.store.reconcileExecutionSupplements?.(id, [{ ...source.run, items }]);
       const merged = this.projection.merge(id, [{ ...source.run, items }], read.version, !source.cursor || !canonical, canonical, canonical)[0];
       // Read persisted plan/timing data by run ID; it supplies supplemental facts,
       // never a new transcript position.
       const supplement = await this.store.getTurnPresentation?.(id, source.run.id);
-      if (supplement?.plan) merged.plan = supplement.plan;
-      merged.startedAt ??= supplement?.startedAt;
-      merged.completedAt ??= supplement?.completedAt;
+      this.supplement(merged, supplement);
+      merged.itemsPartial = !!page.nextCursor || !!source.cursor;
       let visible = merged.items;
       if (localAnchor) {
         const boundary = visible.findIndex((item) => item.id === localAnchor);
@@ -147,7 +205,8 @@ export class CodexHistory {
       const locations = visible.map((item) => ({ itemId: item.id, row: presentItem(id, merged, item, null) }));
       if (!source.cursor && !source.omitSummary) locations.push({ itemId: null, row: presentItem(id, merged, null, null) });
       const summary = locations.find((entry) => entry.row.kind === "summary")?.row;
-      if (summary && supplement?.recoveryCount) summary.recoveryDetailId = encodePosition({ kind: "items", page: null, run: merged.id, item: "$recovery" });
+      if (summary) summary.diffDetailId = encodePosition({ kind: "items", page: null, run: merged.id, item: "$diff" });
+      if (summary && !running(merged.status) && supplement?.recoveryCount) summary.recoveryDetailId = encodePosition({ kind: "items", page: null, run: merged.id, item: "$recovery" });
       for (const entry of locations) {
         const ref = encodePosition({ kind: "items", page: null, run: source.run.id, item: entry.itemId || "$turn" });
         if (entry.row.detailId) entry.row.detailId = ref;
@@ -174,48 +233,71 @@ export class CodexHistory {
       return { conversationId: id, rows: locations.slice(first).map((entry) => entry.row), before, revision: read.version };
     } finally { this.projection.end(read); }
   }
-  async details(id, { ref, after = null, authoritative = false }) {
+  async details(id, { ref, after = null, authoritative = false, raw = false }) {
     const position = decodePosition(ref);
     if (position.kind === "items" && this.itemPaging.get(id) === false) {
       delete position.kind;
       const legacyRef = encodePosition(position), continuation = after ? decodePosition(after) : null;
       if (continuation && continuation.resource !== ref) throw httpError(400, "输出游标不属于这条记录。");
-      const result = await this.resource(id, { ref: legacyRef, after: continuation ? encodePosition({ ...continuation, resource: legacyRef }) : null, authoritative });
+      const result = await this.resource(id, { ref: legacyRef, after: continuation ? encodePosition({ ...continuation, resource: legacyRef }) : null, authoritative, raw });
       if (result.nextCursor) result.nextCursor = encodePosition({ ...decodePosition(result.nextCursor), resource: ref });
       return result;
     }
-    try { return await this.resource(id, { ref, after, authoritative }); }
+    try { return await this.resource(id, { ref, after, authoritative, raw }); }
     catch (error) {
-      if (position.kind !== "items" || !/unknown method|method not found|thread\/items\/list.*(not supported|unsupported)/i.test(error.message)) throw error;
+      if (position.kind !== "items" || !/unknown method|method not found|thread not loaded|thread\/items\/list.*(not supported|unsupported)/i.test(error.message)) throw error;
       if (after) throw httpError(409, "代理的输出读取方式已变化，请回到开头重新读取。");
       this.itemPaging.set(id, false);
-      return this.details(id, { ref, after: null, authoritative });
+      return this.details(id, { ref, after: null, authoritative, raw });
     }
   }
-  async resource(id, { ref, after = null, authoritative = false }) {
+  async resource(id, { ref, after = null, authoritative = false, raw = false }) {
     const continuation = after ? decodePosition(after) : { page: null, offset: 0, previous: null };
     if (after && continuation.resource !== ref) throw httpError(400, "输出游标不属于这条记录。");
+    if (after && (continuation.raw === true) !== raw) throw httpError(400, "输出读取方式与游标不一致。");
     const offset = continuation.offset;
     if (!Number.isSafeInteger(offset) || offset < 0) throw httpError(400, "输出位置无效。");
     const position = decodePosition(ref);
     if (typeof position.run !== "string" || typeof position.item !== "string") throw httpError(400, "输出引用无效。");
     const observed = this.projection.sessions.get(id)?.runs.get(position.run)?.items.get(position.item);
     const sourceVersion = continuation.version ?? observed?.version ?? this.projection.sessions.get(id)?.runs.get(position.run)?.version ?? 0;
-    const advance = (value) => encodePosition({ page: null, resource: ref, version: sourceVersion, ...value });
+    const cacheVersion = `${sourceVersion}:${raw ? "raw" : "display"}`;
+    const advance = (value) => encodePosition({ page: null, resource: ref, version: sourceVersion, ...(raw ? { raw: true } : {}), ...value });
     if (!authoritative && !after && observed && running(observed.status) && ["commandExecution", "reasoning"].includes(observed.type)) {
       return { text: itemText(observed).slice(-16_000), nextCursor: null, live: true };
     }
     const supplement = async () => await this.store.getTurnPresentation?.(id, position.run) || {};
     const recovery = async (index) => {
       if (!Number.isSafeInteger(index) || index < 0) throw httpError(400, "恢复记录位置无效。");
+      if (position.item === "$recovery" && !after) await this.reconcileRecovery(id, position);
       const { snapshot: item, count } = await this.store.getRecoveryItem?.(id, position.run, index) || {};
       if (!item) return { text: "", nextCursor: null };
       const result = await this.resources.slice(JSON.stringify([id, ref, "recovery", item.id, sourceVersion]), offset,
-        async () => `## 本地恢复副本 · 原始位置未知\n\n以下是本地保留的执行内容，可能与原始输出重合，不用于推断时间顺序。\n\n${itemText(item)}\n\n`);
+        async () => position.item === "$recovery" ? `${itemText(item)}\n\n` : `## 本地补充输出\n\n以下执行记录在原始历史中缺失，由本地保留的执行结果恢复。\n\n${itemText(item)}\n\n`);
       return { text: result.text, nextCursor: result.nextOffset !== null ? advance({ phase: "recovery", index, offset: result.nextOffset })
         : index + 1 < count ? advance({ phase: "recovery", index: index + 1, offset: 0 }) : null };
     };
     if (position.item === "$recovery") return recovery(continuation.index || 0);
+    if (position.item === "$diff") {
+      const result = await this.resources.slice(JSON.stringify([id, ref, "diff", sourceVersion]), offset, async () => {
+        const changes = new Map();
+        if (position.kind === "items") {
+          let cursor = null; const cursors = new Set();
+          do {
+            const page = await this.connection.request("thread/items/list", { threadId: id, turnId: position.run, sortDirection: "asc", limit: 100, ...(cursor ? { cursor } : {}) });
+            for (const { item } of page.data || []) if (item.type === "fileChange") for (const change of item.changes || []) changes.set(change.path, change.diff || "");
+            cursor = page.nextCursor || null;
+            if (cursor) { const key = JSON.stringify(cursor); if (cursors.has(key)) throw new Error("文件差异位置重复，请重试。"); cursors.add(key); }
+          } while (cursor);
+        } else {
+          const page = await this.readNative(id, position.page, "full"), run = page.turns.find((turn) => turn.id === position.run);
+          if (run?.diff || run?.task?.diff) return run.diff || run.task.diff;
+          for (const item of run?.items || []) if (item.type === "fileChange") for (const change of item.changes || []) changes.set(change.path, change.diff || "");
+        }
+        return [...changes].map(([path, diff]) => `diff --git a/${path} b/${path}\n${diff}`).join("\n\n");
+      });
+      return { text: result.text, nextCursor: result.nextOffset !== null ? advance({ offset: result.nextOffset }) : null };
+    }
     if (position.kind === "items" && position.item === "$turn") {
       const phase = continuation.phase || (after ? "items" : "plan");
       if (phase === "recovery") return recovery(continuation.index || 0);
@@ -229,11 +311,11 @@ export class CodexHistory {
       }
       const previous = continuation.previous;
       if (previous !== null && typeof previous !== "string") throw httpError(400, "输出游标无效。");
-      const result = await this.resources.slice(JSON.stringify([id, ref, previous, sourceVersion]), offset, async () => {
+      const result = await this.resources.slice(JSON.stringify([id, ref, previous, cacheVersion]), offset, async () => {
         const page = await this.connection.request("thread/items/list", { threadId: id, turnId: position.run, sortDirection: "asc", limit: 1,
           ...(previous ? { cursor: { type: "item", itemId: previous } } : {}) });
         const item = page.data?.[0]?.item;
-        return { body: item ? `## ${item.type === "userMessage" ? "你" : item.type === "agentMessage" ? "Codex" : item.type}\n\n${itemText(item)}\n\n` : "",
+        return { body: item ? `## ${item.type === "userMessage" ? "你" : item.type === "agentMessage" ? "Codex" : item.type}\n\n${await this.executionText(id, position.run, item, raw)}\n\n` : "",
           metadata: { itemId: item?.id, more: !!page.nextCursor } };
       });
       return { text: result.text, nextCursor: result.nextOffset !== null ? advance({ phase: "items", previous, offset: result.nextOffset })
@@ -241,7 +323,7 @@ export class CodexHistory {
           : (await supplement()).recoveryCount ? advance({ phase: "recovery", index: 0, offset: 0 }) : null };
     }
     if (position.kind === "items" && position.item !== "$turn") {
-      const result = await this.resources.slice(JSON.stringify([id, ref, sourceVersion]), offset, async () => {
+      const result = await this.resources.slice(JSON.stringify([id, ref, cacheVersion]), offset, async () => {
       const previous = await this.connection.request("thread/items/list", { threadId: id, turnId: position.run,
         cursor: { type: "item", itemId: position.item }, sortDirection: "desc", limit: 1 });
       const precedingId = previous.data?.[0]?.item?.id;
@@ -249,11 +331,11 @@ export class CodexHistory {
         ...(precedingId ? { cursor: { type: "item", itemId: precedingId } } : {}), sortDirection: "asc", limit: 1 });
       const item = next.data?.find((entry) => entry.item.id === position.item)?.item;
       if (!item) throw httpError(409, "原始记录的位置已变化，请重新同步。");
-      return itemText(item);
+      return item.type === "commandExecution" ? this.executionText(id, position.run, item) : detailValue(item, raw);
       });
-      return { text: result.text, nextCursor: result.nextOffset !== null ? advance({ offset: result.nextOffset }) : null };
+      return { text: result.text, ...result.metadata, nextCursor: result.nextOffset !== null ? advance({ offset: result.nextOffset }) : null };
     }
-    const result = await this.resources.slice(JSON.stringify([id, ref, sourceVersion]), offset, async () => {
+    const result = await this.resources.slice(JSON.stringify([id, ref, cacheVersion]), offset, async () => {
     const page = await this.readNative(id, position.page, "full");
     const run = page.canonical.find((turn) => turn.id === position.run) || page.turns.find((turn) => turn.id === position.run);
     if (!run) throw httpError(409, "原始记录的位置已变化，请重新同步。");
@@ -263,29 +345,41 @@ export class CodexHistory {
       const sections = [plan?.plan?.length ? `## 计划\n\n${plan.explanation || ""}\n${plan.plan.map((step) => `- [${step.status === "completed" ? "x" : " "}] ${step.step}`).join("\n")}` : ""];
       const seen = new Set();
       for (const item of run.items || []) if (!seen.has(item.id)) {
-        seen.add(item.id); const content = itemText(item);
+        seen.add(item.id); const content = await this.executionText(id, position.run, item, raw);
         if (content) sections.push(`## ${item.type === "userMessage" ? "你" : item.type === "agentMessage" ? "Codex" : item.type}\n\n${content}`);
       }
       if (run.diff || run.task?.diff) sections.push(`## 累计文件差异\n\n${run.diff || run.task.diff}`);
+      for (let index = 0; ; index++) {
+        const { snapshot, count } = await this.store.getRecoveryItem?.(id, position.run, index) || {};
+        if (!snapshot) break;
+        sections.push(`## 本地补充输出\n\n以下执行记录在原始历史中缺失，由本地保留的执行结果恢复。\n\n${itemText(snapshot)}`);
+        if (index + 1 >= count) break;
+      }
       text = sections.filter(Boolean).join("\n\n");
     } else {
       const item = run.items?.find((entry) => entry.id === position.item);
       if (!item) throw httpError(409, "原始记录暂不可用，请重新同步。");
-      text = itemText(item);
+      return item.type === "commandExecution" ? this.executionText(id, position.run, item) : detailValue(item, raw);
     }
     return text;
     });
-    return { text: result.text, nextCursor: result.nextOffset !== null ? advance({ offset: result.nextOffset }) : null };
+    return { text: result.text, ...result.metadata, nextCursor: result.nextOffset !== null ? advance({ offset: result.nextOffset }) : null };
   }
   async *export(id, ref) {
     let after = null;
     do {
-      const page = await this.details(id, { ref, after, authoritative: true });
+      const page = await this.details(id, { ref, after, authoritative: true, raw: true });
       if (page.text) yield page.text;
       if (page.nextCursor === after && after !== null) throw new Error("输出游标没有前进。");
       after = page.nextCursor;
     } while (after !== null);
   }
+}
+function detailValue(item, raw = false) {
+  if (raw) return originalText(item);
+  if (!["userMessage", "agentMessage", "plan"].includes(item?.type)) return itemText(item);
+  const { text, files, visualizations } = messagePresentation(item);
+  return { body: text, metadata: { files, visualizations } };
 }
 function decodePosition(token) {
   try {

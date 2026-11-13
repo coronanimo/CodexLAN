@@ -19,12 +19,20 @@ export class PresentationBatcher {
       return;
     }
     if (event.kind !== "patch") { this.send(id, event); return; }
+    // Position commits must follow all content already queued, and cannot be
+    // coalesced away by a later content update of the same entity.
+    if (event.placements?.length) { this.flush(); this.send(id, event); return; }
     if (!this.listeners.has(id)) return;
     const key = JSON.stringify([id, event.upserts[0]?.row.runId]);
     let batch = this.pending.get(key);
     if (!batch) { batch = { id, appendRun: false, rows: new Map(), removeIds: new Set() }; this.pending.set(key, batch); }
     batch.appendRun ||= event.appendRun;
-    for (const entry of event.upserts) batch.rows.set(entry.row.id, entry);
+    for (const entry of event.upserts) {
+      const first = batch.rows.get(entry.row.id);
+      // Coalesce content, preserving the insertion dependencies from first
+      // publication. Later completion anchors can point into a future chunk.
+      batch.rows.set(entry.row.id, first ? { ...entry, beforeId: first.beforeId, afterId: first.afterId } : entry);
+    }
     for (const removed of event.removeIds) { batch.rows.delete(removed); batch.removeIds.add(removed); }
     if (!this.timer) this.timer = setTimeout(() => this.flush(), 50);
   }

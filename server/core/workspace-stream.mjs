@@ -29,7 +29,7 @@ export function createWorkspaceStream({ agents, projectFor, canReadProject, list
   }));
   return {
     async open(response, identity) {
-      const projects = (await listProjects(identity.user.id)).map(({ id, name, available }) => ({ id, name, available }));
+      const projects = (await listProjects(identity.user.id)).map(({ id, name, available, path }) => ({ id, name, available, path }));
       if (response.destroyed || response.writableEnded) return;
       response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
       response.write("retry: 2000\n\n");

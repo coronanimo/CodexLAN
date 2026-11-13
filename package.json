@@ -38,7 +38,7 @@
     "anser": "2.3.5",
     "jsdom": "31.0.0",
     "katex": "0.19.1",
-    "mermaid": "12.3.0",
+    "mermaid": "11.17.2",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-markdown": "10.1.0",

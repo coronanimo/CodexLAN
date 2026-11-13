@@ -4,7 +4,7 @@ import { openConversationStream } from "./conversation-stream.mjs";
 import { createWorkspaceStream } from "./workspace-stream.mjs";
 
 // Application authorization and HTTP are independent of a provider's protocol.
-export function registerLanRoutes(application, { edition, agents, conversations, listProjects, getProject, authorizeConversation, canReadConversation, conversationProject, canReadProject }) {
+export function registerLanRoutes(application, { edition, agents, conversations, listProjects, getProject, authorizeConversation, canReadConversation, conversationProject, canReadProject, access, workspaceRoot }) {
   const streams = new Set();
   const registry = new Map(agents.map((agent) => [agent.describe().instanceId, agent]));
   if (!agents.length || registry.size !== agents.length) throw new Error("Agent instances must be nonempty and unique.");
@@ -17,8 +17,9 @@ export function registerLanRoutes(application, { edition, agents, conversations,
   };
   application.get("/api/lan/bootstrap", async (request, response) => {
     const projects = await listProjects(request.identity.user.id);
-    json(response, 200, { version: 1, edition, user: publicUser(request.identity.user), agents: agents.map((agent) => agent.describe()),
-      projects: projects.map(({ id, name, available }) => ({ id, name, available })) });
+    json(response, 200, { version: 1, edition, workspaceRoot, parallel: access?.parallel === true, user: publicUser(request.identity.user), agents: agents.map((agent) => agent.describe()),
+      projects: projects.map((project) => ({ id: project.id, name: project.name, available: project.available, path: project.path,
+        settings: Object.fromEntries(agents.map((agent) => [agent.describe().instanceId, agent.projectSettings?.(project) || {}])) })) });
   });
   application.get("/api/lan/events", async (request, response) => {
     const client = { response, userId: request.identity.user.id }; streams.add(client);
@@ -33,8 +34,15 @@ export function registerLanRoutes(application, { edition, agents, conversations,
   });
   application.get("/api/lan/projects/:projectId/conversations", async (request, response) => {
     const project = await getProject(request.params.projectId, request.identity.user.id);
-    const result = await getAgent(request.codexUrl.searchParams).list(project, request.identity.user, { cursor: request.codexUrl.searchParams.get("cursor") });
+    const result = await getAgent(request.codexUrl.searchParams).list(project, request.identity.user, { cursor: request.codexUrl.searchParams.get("cursor"), order: request.codexUrl.searchParams.get("order") === "recent" ? "recent" : "original" });
     await getProject(project.id, request.identity.user.id);
+    json(response, 200, result);
+  });
+  application.get("/api/lan/conversations", async (request, response) => {
+    const query = request.codexUrl.searchParams, agent = getAgent(query);
+    const projects = (await listProjects(request.identity.user.id)).filter((project) => project.available);
+    const result = await agent.listAll(projects, request.identity.user, { cursor: query.get("cursor"), order: query.get("order") === "recent" ? "recent" : "original" });
+    result.conversations = result.conversations.filter((row) => canReadProject(row.projectId, request.identity.user.id));
     json(response, 200, result);
   });
   const authorized = async (request, query = request.codexUrl.searchParams) => {
@@ -51,6 +59,7 @@ export function registerLanRoutes(application, { edition, agents, conversations,
   application.get("/api/lan/conversations/:conversationId/controls", async (request, response) => {
     const { agent, conversationId, project } = await authorized(request);
     const result = await conversations.controls(agent, conversationId);
+    result.writable = access?.writable(conversationId) !== false;
     await getProject(project.id, request.identity.user.id); json(response, 200, result);
   });
   application.get("/api/lan/conversations/:conversationId/queue/:itemId", async (request, response) => {
@@ -60,12 +69,15 @@ export function registerLanRoutes(application, { edition, agents, conversations,
   application.post("/api/lan/projects/:projectId/conversations", async (request, response) => {
     const body = await readJson(request), project = await getProject(request.params.projectId, request.identity.user.id);
     const agent = getAgent(new URLSearchParams({ agentId: String(body.agentId || "") }));
-    json(response, 201, await agent.create(project, request.identity.user));
+    const settings = body.settings ? await agent.validateSettings({ ...project.settings, ...body.settings }) : project.settings;
+    const created = await agent.create({ ...project, settings }, request.identity.user);
+    await access?.created(created.id); json(response, 201, created);
   });
   application.post("/api/lan/conversations/:conversationId/commands", async (request, response) => {
     const body = await readJson(request);
     const { agent, conversationId, project } = await authorized(request, new URLSearchParams({ projectId: String(body.projectId || ""), agentId: String(body.agentId || "") }));
     const command = body.command;
+    access?.requireWrite(conversationId);
     if (!command || typeof command !== "object" || typeof command.type !== "string") throw httpError(400, "操作内容无效。");
     const result = await conversations.execute(agent, conversationId, project, command);
     json(response, 200, { ok: true, ...(result?.item?.id ? { receiptId: result.item.id } : {}), ...(result?.name ? { name: result.name } : {}) });
@@ -73,7 +85,9 @@ export function registerLanRoutes(application, { edition, agents, conversations,
   application.post("/api/lan/conversations/:conversationId/fork", async (request, response) => {
     const body = await readJson(request);
     const { agent, conversationId, project } = await authorized(request, new URLSearchParams({ projectId: String(body.projectId || ""), agentId: String(body.agentId || "") }));
-    json(response, 201, await agent.fork(conversationId, project, request.identity.user));
+    access?.requireWrite(conversationId);
+    const created = await agent.fork(conversationId, project, request.identity.user);
+    await access?.created(created.id); json(response, 201, created);
   });
   application.get("/api/lan/conversations/:conversationId/export", async (request, response) => {
     const { agent, conversationId, project } = await authorized(request);
@@ -103,6 +117,7 @@ export function registerLanRoutes(application, { edition, agents, conversations,
   application.get("/api/lan/conversations/:conversationId/history", async (request, response) => {
     const { agent, conversationId, project } = await authorized(request);
     const query = request.codexUrl.searchParams;
+    if (!query.get("before")) await agent.recordAccess?.(conversationId, request.identity.user);
     const result = await agent.readHistory(conversationId, { before: query.get("before"), limit: Number(query.get("limit") || 100) });
     await getProject(project.id, request.identity.user.id);
     json(response, 200, result);
@@ -110,12 +125,22 @@ export function registerLanRoutes(application, { edition, agents, conversations,
   application.get("/api/lan/conversations/:conversationId/details", async (request, response) => {
     const { agent, conversationId, project } = await authorized(request);
     const query = request.codexUrl.searchParams;
-    const result = await agent.readDetail(conversationId, { ref: query.get("ref"), after: query.get("after") });
+    const result = await agent.readDetail(conversationId, { ref: query.get("ref"), after: query.get("after"), raw: query.get("raw") === "true" });
     await getProject(project.id, request.identity.user.id);
     json(response, 200, result);
   });
+  application.get("/api/lan/conversations/:conversationId/visualization", async (request, response) => {
+    const { agent, project } = await authorized(request);
+    if (!agent.readVisualization) throw httpError(404, "当前代理不支持交互图表。");
+    const html = await agent.readVisualization(request.codexUrl.searchParams.get("path"), { project, user: request.identity.user });
+    await getProject(project.id, request.identity.user.id);
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": "sandbox allow-scripts; frame-ancestors 'self'" });
+    if (request.method === "HEAD") return response.end();
+    response.end(html);
+  });
   application.get("/api/lan/conversations/:conversationId/events", async (request, response) => {
     const { agent, conversationId, project } = await authorized(request);
+    await agent.recordAccess?.(conversationId, request.identity.user);
     const client = { response, userId: request.identity.user.id };
     streams.add(client); response.once("close", () => streams.delete(client));
     return openConversationStream({ response, identity: request.identity, agent, conversationId,

@@ -5,12 +5,12 @@ import { validateId } from "../http.mjs";
 export class ConversationService {
   answers = new Set();
   mutations = new Map();
-  constructor(store, queues, resolveAttachments) { this.store = store; this.queues = queues; this.resolveAttachments = resolveAttachments; }
+  constructor(store, queues, resolveAttachments, requireWrite = () => {}) { this.store = store; this.queues = queues; this.resolveAttachments = resolveAttachments; this.requireWrite = requireWrite; }
   async controls(agent, id) {
     const state = await agent.controls(id), queue = this.store.queues[id] || [];
     return { ...state, conversationId: id, queueCount: queue.length, queueRevision: this.store.queueRevisions[id] || 0,
-      queue: queue.slice(0, 100).map((item) => ({ id: item.id, text: item.text.slice(0, 1200), truncated: item.text.length > 1200,
-        ...(item.delivery ? { error: item.delivery.message || (item.delivery.status === "submitting" ? "正在提交" : "等待核对接收结果"), delivery: item.delivery.status } : {}) })),
+      queue: queue.slice(0, 100).map((item) => { const text = agent.presentInput?.(item.text) ?? item.text; return { id: item.id, text: text.slice(0, 1200), truncated: text.length > 1200,
+        ...(item.delivery ? { error: item.delivery.message || (item.delivery.status === "submitting" ? "正在提交" : "等待核对接收结果"), delivery: item.delivery.status } : {}) }; }),
       answered: await this.store.getAsyncInputAnswers(id) };
   }
   async queueItem(id, itemId) {
@@ -18,6 +18,7 @@ export class ConversationService {
     return { id: item.id, text: item.text };
   }
   async execute(agent, id, project, command) {
+    this.requireWrite(id);
     if (command.type === "submit" || command.type.startsWith("queue.") || command.type === "delete") {
       const previous = this.mutations.get(id) || Promise.resolve();
       const operation = previous.catch(() => {}).then(() => this.perform(agent, id, project, command));
