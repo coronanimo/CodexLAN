@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -14,7 +14,7 @@ test("bounds rows and detail chunks without truncating authoritative output or i
   const turn = { id: "run", status: "completed", items: [
     { id: "user", type: "userMessage", content: [{ type: "text", text: "prompt" }] },
     ...Array.from({ length: 250 }, (_, index) => ({ id: `tool-${index}`, type: "mcpToolCall", tool: "test", result: { output } })),
-    { id: "answer", type: "agentMessage", text: "a".repeat(30_000) },
+    { id: "answer", type: "agentMessage", text: "a".repeat(30_000) + "\n[报告](report.md)" },
   ] };
   let fullReads = 0;
   const adapter = new CodexHistory({ request: async (method, params) => {
@@ -46,6 +46,8 @@ test("bounds rows and detail chunks without truncating authoritative output or i
   } while (after !== null);
   assert.equal(JSON.parse(detail.replace(/^结果\n/, "")).output, output);
   assert.equal(fullReads, 1, "chunk paging must not repeatedly read the whole native result");
+  const replyDetails = await adapter.details("conversation", { ref: all.at(-2).detailId });
+  assert.equal(replyDetails.files[0].path, "report.md", "references beyond the summary boundary survive full-message loading");
   await assert.rejects(adapter.page("conversation", { before: "bad" }), /历史位置无效/);
 });
 
@@ -75,7 +77,8 @@ test("neutral routes authorize bounded reads and preserve queue, guidance and re
   const request = async (path, { cookie, csrf, method = "GET", body } = {}) => {
     const response = await fetch(origin + path, { method, headers: { Origin: origin, "Content-Type": "application/json",
       ...(cookie ? { Cookie: cookie } : {}), ...(csrf ? { "X-Codex-CSRF-Token": csrf } : {}) }, body: body ? JSON.stringify(body) : undefined });
-    return { response, status: response.status, body: await response.json() };
+    const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = text; }
+    return { response, status: response.status, body: result };
   };
   for (let attempt = 0; ; attempt++) {
     if (child.exitCode !== null || attempt > 100) throw new Error(`Test service did not start: ${errors}`);
@@ -89,10 +92,16 @@ test("neutral routes authorize bounded reads and preserve queue, guidance and re
   const bootstrap = await request("/api/lan/bootstrap", { cookie: admin });
   assert.equal(bootstrap.body.edition.displayName, "CodexLAN");
   assert.equal(bootstrap.body.agents[0].access, "interactive");
-  assert.equal(Object.hasOwn(bootstrap.body.projects[0], "path"), false);
+  assert.equal(bootstrap.body.projects[0].path, join(workspace, "默认项目"));
   const projectId = bootstrap.body.projects[0].id;
   const catalog = await request(`/api/lan/projects/${projectId}/conversations`, { cookie: admin });
   const id = catalog.body.conversations[0].id;
+  const visualizationFile = join(workspace, "默认项目", "chart.html"); await writeFile(visualizationFile, "<button>0</button><script>document.querySelector('button').onclick=()=>{}</script>");
+  const visualizationPath = `/api/lan/conversations/${id}/visualization?${new URLSearchParams({ projectId, path: visualizationFile })}`;
+  const visualization = await request(visualizationPath, { cookie: admin });
+  assert.equal(visualization.status, 200); assert.match(visualization.body, /<script>/); assert.match(visualization.response.headers.get("Content-Security-Policy"), /sandbox allow-scripts/);
+  const acrossProjects = await request("/api/lan/conversations?order=recent", { cookie: admin });
+  assert.equal(acrossProjects.status, 200); assert.ok(acrossProjects.body.conversations.every((row) => row.projectId === projectId));
   const path = `/api/lan/conversations/${id}/history?projectId=${projectId}`;
   const page = await request(path, { cookie: admin });
   assert.equal(page.status, 200); assert.ok(page.body.rows.length > 0 && page.body.rows.length <= 100); assert.ok(page.body.before);
@@ -105,9 +114,12 @@ test("neutral routes authorize bounded reads and preserve queue, guidance and re
   const member = await request("/api/users", { method: "POST", cookie: admin, csrf, body: { username: "member", displayName: "Member", password: "member-pass-123", role: "member" } });
   const login = await request("/api/auth/login", { method: "POST", body: { username: "member", password: "member-pass-123" } });
   const memberCookie = login.response.headers.get("set-cookie").split(";")[0];
+  assert.equal((await request("/api/lan/conversations?order=recent", { cookie: memberCookie })).body.conversations.some((row) => row.id === id), false);
   assert.equal((await request(detailPath, { cookie: memberCookie })).status, 404);
+  assert.equal((await request(visualizationPath, { cookie: memberCookie })).status, 404);
   await request(`/api/projects/${projectId}/members`, { method: "PUT", cookie: admin, csrf, body: { memberIds: [member.body.user?.id || member.body.id] } });
   assert.equal((await request(path, { cookie: memberCookie })).status, 200);
+  assert.equal((await request(visualizationPath, { cookie: memberCookie })).status, 200);
   await request(`/api/projects/${projectId}/members`, { method: "PUT", cookie: admin, csrf, body: { memberIds: [] } });
   assert.equal((await request(detailPath, { cookie: memberCookie })).status, 404);
   const calls = (await readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);

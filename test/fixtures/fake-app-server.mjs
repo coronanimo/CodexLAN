@@ -1,11 +1,14 @@
 import { createInterface } from "node:readline";
 import { appendFileSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const threads = new Map();
 const goals = new Map();
 const materializedThreads = new Set();
+const pagingLoadedThreads = new Set();
+const footerSentThreads = new Set();
 const pendingUserInputs = new Map();
 if (process.env.CODEX_TEST_SEED_CWD) {
   const count = Math.max(1, Number(process.env.CODEX_TEST_SEED_COUNT || 1));
@@ -31,9 +34,36 @@ if (process.env.CODEX_TEST_SEED_CWD) {
         exitCode: 0,
       })),
     }] : [];
+    if (process.env.CODEX_TEST_SEED_CONTENT === "1" && index === 0) turns.push({ id: randomUUID(), status: "completed", items: [
+      { id: randomUUID(), type: "fileChange", status: "completed", changes: [{ path: "app.ts", diff: "@@ -1 +1 @@\n-const oldValue = 1;\n+const value = 2;" }] },
+      { id: randomUUID(), type: "imageView", status: "completed", path: join(process.env.CODEX_TEST_SEED_CWD, "result.png") },
+      { id: randomUUID(), type: "agentMessage", text: `## 交付内容\n\n**Markdown 文档、图片、文件差异和交互图表。**\n\n[项目报告](${join(process.env.CODEX_TEST_SEED_CWD, "report.md")})\n\n\`\`\`mermaid\nflowchart LR\n输入 --> 处理 --> 结果\n\`\`\`\n\nvisualize${JSON.stringify({ path: join(process.env.CODEX_TEST_SEED_CWD, "chart.html"), title: "交互图表", mode: "wide" })}` },
+    ] });
+    if (process.env.CODEX_TEST_SEED_IMAGES === "1" && index === 0) {
+      const paths = ["first.png", "second.png"].map((name) => join(process.env.CODEX_TEST_SEED_CWD, name));
+      turns.push({ id: randomUUID(), status: "completed", items: [{ id: randomUUID(), type: "userMessage", content: [
+        { type: "text", text: "比较这两张图片\n" + paths.map((path, i) => `[图片 ${i + 1}](${path.replace(/\\/g, "/")})`).join("\n") },
+        ...paths.map((path) => ({ type: "localImage", path })),
+      ] }] });
+    }
+    if (process.env.CODEX_TEST_SEED_FOOTER === "1" && index === 0 && turns.length) {
+      const turn = turns.at(-1);
+      Object.assign(turn, { startedAt: 1_700_000_000_000, completedAt: 1_700_000_012_000, durationMs: 12000,
+        plan: { explanation: "保留原版计划", plan: [{ step: "核对最近对话", status: "completed" }, { step: "核对小结", status: "inProgress" }, { step: "核对手机操作", status: "pending" }] } });
+      turn.items.unshift({ id: randomUUID(), type: "commandExecution", command: "node verify-fixture.mjs", status: "completed", durationMs: 800, aggregatedOutput: "fixture check passed", exitCode: 0 });
+    }
+    if (process.env.CODEX_TEST_SEED_EXECUTIONS === '1' && index === 0 && turns.length) {
+      turns.at(-1).items.unshift(
+        { id: randomUUID(), type: 'commandExecution', command: '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "Get-Content README.md"', cwd: process.env.CODEX_TEST_SEED_CWD, status: 'completed', durationMs: 1200, aggregatedOutput: '\u001b[32mcheck passed\u001b[0m\n中文输出', exitCode: 0 },
+        { id: randomUUID(), type: 'reasoning', status: 'completed', summary: ['**核对条目展开**'], content: ['核对正文与滚动范围。'] },
+        { id: randomUUID(), type: 'mcpToolCall', status: 'completed', server: 'fixture', tool: 'inspect', arguments: { query: '查看目录' }, result: { text: '工具结果' }, durationMs: 400 },
+        { id: randomUUID(), type: 'dynamicToolCall', status: 'failed', namespace: 'fixture', tool: 'verify', arguments: { path: 'README.md' }, contentItems: [{ type: 'text', text: '失败详情' }], durationMs: 1500 },
+      );
+    }
     const legacyListTitle = process.env.CODEX_TEST_LEGACY_LIST_TITLE && index === count - 1
       ? "Recovered legacy title"
       : null;
+    if (turns.length) materializedThreads.add(id);
     threads.set(id, {
       id,
       cwd: process.env.CODEX_TEST_SEED_CWD,
@@ -83,6 +113,14 @@ input.on("line", (line) => {
     try {
       const result = fakeResult(message.method, message.params);
       process.stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
+      if (process.env.CODEX_TEST_SEED_FOOTER === "1" && (message.method === "thread/resume" || message.method === "thread/read" && message.params?.includeTurns) && !footerSentThreads.has(message.params.threadId)) {
+        const turn = threads.get(message.params.threadId)?.turns.find((entry) => entry.plan);
+        if (turn) {
+          footerSentThreads.add(message.params.threadId);
+          process.stdout.write(`${JSON.stringify({ method: "turn/plan/updated", params: { threadId: message.params.threadId, turnId: turn.id, ...turn.plan } })}\n`);
+          process.stdout.write(`${JSON.stringify({ method: "item/completed", params: { threadId: message.params.threadId, turnId: turn.id, item: { id: "fixture-recovery", type: "commandExecution", command: "node recovered-check.mjs", aggregatedOutput: "本地保留的恢复输出", status: "completed", durationMs: 100, exitCode: 0 } } })}\n`);
+        }
+      }
       if (message.method === "turn/start") {
         emitTurnStarted(message.params, result);
         const userMessageDelay = Number(process.env.CODEX_TEST_USER_MESSAGE_DELAY_MS || 0);
@@ -411,6 +449,7 @@ function emitContextCompaction(params) {
 }
 
 function fakeResult(method, params = {}) {
+  if (process.env.CODEX_TEST_REQUIRE_LOADED === "1" && ["thread/name/set", "thread/goal/set", "thread/goal/clear", "thread/settings/update", "turn/interrupt", "turn/start", "turn/steer"].includes(method) && !pagingLoadedThreads.has(params.threadId)) throw new Error(`thread not loaded: ${params.threadId}`);
   if (method === "initialize") return { userAgent: "codex-lan-http-test" };
   if (method === "account/read") {
     return process.env.CODEX_TEST_LOGIN_REQUIRED === "1"
@@ -460,7 +499,10 @@ function fakeResult(method, params = {}) {
   }
   if (method === "thread/compact/start") return {};
   if (method === "account/rateLimits/read") return {};
-  if (method === "thread/goal/get") return { goal: copy(goals.get(params.threadId) || null) };
+  if (method === "thread/goal/get") {
+    if (process.env.CODEX_TEST_REQUIRE_LOADED === "1" && !pagingLoadedThreads.has(params.threadId)) throw new Error(`thread not loaded: ${params.threadId}`);
+    return { goal: copy(goals.get(params.threadId) || null) };
+  }
   if (method === "thread/goal/set") {
     const current = goals.get(params.threadId);
     const objective = Object.hasOwn(params, "objective") ? String(params.objective || "").trim() : current?.objective;
@@ -494,6 +536,7 @@ function fakeResult(method, params = {}) {
       updatedAt: Math.floor(Date.now() / 1000),
     };
     threads.set(thread.id, thread);
+    pagingLoadedThreads.add(thread.id);
     return { thread };
   }
   if (method === "thread/fork") {
@@ -548,6 +591,7 @@ function fakeResult(method, params = {}) {
     };
   }
   if (method === "thread/turns/list") {
+    if (process.env.CODEX_TEST_REQUIRE_LOADED === "1" && !pagingLoadedThreads.has(params.threadId)) throw new Error(`thread not loaded: ${params.threadId}`);
     const thread = threads.get(params.threadId);
     if (!thread) throw new Error("thread not found");
     const ordered = params.sortDirection === "asc" ? [...(thread.turns || [])] : [...(thread.turns || [])].reverse();
@@ -565,6 +609,7 @@ function fakeResult(method, params = {}) {
     };
   }
   if (method === "thread/items/list") {
+    if (process.env.CODEX_TEST_REQUIRE_LOADED === "1" && !pagingLoadedThreads.has(params.threadId)) throw new Error(`thread not loaded: ${params.threadId}`);
     const thread = threads.get(params.threadId);
     if (!thread) throw new Error("thread not found");
     const ascending = thread.turns.filter((turn) => !params.turnId || turn.id === params.turnId).flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item, startedAtMs: null, completedAtMs: null })));
@@ -582,6 +627,10 @@ function fakeResult(method, params = {}) {
     return { data: copy(data), nextCursor: offset + data.length < ordered.length ? `items-after:${data.at(-1).item.id}` : null, backwardsCursor: null };
   }
   if (method === "thread/read" || method === "thread/resume") {
+    if (method === 'thread/resume' && process.env.CODEX_TEST_ACTIVE_WRITER === '1') throw new Error(`thread ${params.threadId} already has an active writer`);
+    if (method === "thread/read" && process.env.CODEX_TEST_METADATA_REQUIRES_LOADED === "1" && !pagingLoadedThreads.has(params.threadId)) throw new Error(`thread not loaded: ${params.threadId}`);
+    if (method === "thread/resume" && process.env.CODEX_TEST_DENY_RESUME === "1") throw new Error("read-only history must not resume native sessions");
+    if (method === "thread/resume") pagingLoadedThreads.add(params.threadId);
     const thread = threads.get(params.threadId);
     if (!thread) throw new Error("thread not found");
     if (method === "thread/read" && params.includeTurns && !materializedThreads.has(params.threadId)) {

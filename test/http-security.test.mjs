@@ -8,6 +8,8 @@ test("React application enforces authentication, CSRF, project grants, file scop
   const f = await fixtureService(t), { request, admin } = f;
   const project = f.bootstrap.projects[0], projectPath = join(f.workspace, "默认项目");
   const root = await request("/"); assert.equal(root.status, 200); assert.match(root.body, /type="module"/); assert.doesNotMatch(root.body, /app\.js/);
+  const policy = root.response.headers.get("Content-Security-Policy");
+  assert.match(policy, /font-src 'self' data:/); assert.match(policy, /script-src 'self';/); assert.doesNotMatch(policy, /script-src[^;]*'unsafe-inline'/);
   const entry = root.body.match(/src="([^"]+\.js)"/)[1];
   const asset = await request(entry); assert.equal(asset.status, 200); assert.match(asset.response.headers.get("cache-control"), /immutable/);
   assert.equal((await request("/app.js")).status, 404);
@@ -17,7 +19,9 @@ test("React application enforces authentication, CSRF, project grants, file scop
   const created = await request(`/api/lan/projects/${project.id}/conversations`, { ...admin, method: "POST", body: {} }); assert.equal(created.status, 201);
   const id = created.body.id, base = `/api/lan/conversations/${id}`, query = `projectId=${project.id}`;
   const command = (value, credentials = admin) => request(base + "/commands", { ...credentials, method: "POST", body: { projectId: project.id, command: value } });
-  assert.equal((await command({ type: "settings", values: { "codex.model": "test-model", "codex.collaborationMode": "plan" } })).status, 200);
+  const fields = (await request("/api/lan/agents/codex-local/settings", admin)).body;
+  const model = fields.find((field) => field.role === "model").choices[0].value;
+  assert.equal((await command({ type: "settings", values: { "codex.model": model, "codex.collaborationMode": "plan" } })).status, 200);
   const settings = (await request(base + "/controls?" + query, admin)).body.settings; assert.equal(settings["codex.collaborationMode"], "plan");
   const fork = await request(base + "/fork", { ...admin, method: "POST", body: { projectId: project.id } }); assert.equal(fork.status, 201); assert.notEqual(fork.body.id, id);
   assert.equal((await command({ type: "goal", patch: { status: "invented" } })).status, 400);

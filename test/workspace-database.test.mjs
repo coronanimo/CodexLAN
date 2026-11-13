@@ -100,3 +100,43 @@ test("an output update writes one supplement, not unrelated histories or applica
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("canonical recovery locations survive reload without losing unique local output", sqliteTest, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codexlan-recovery-location-"));
+  const options = { dataRoot: root, stateFile: join(root, "state.json"), workspace: root, legacyJsonMirror: false };
+  let store = new WorkspaceStore(options); t.after(() => store.close()); await store.ready;
+  const snapshot = { id: itemId, type: "commandExecution", command: "work", status: "inProgress", aggregatedOutput: "unique fragment" };
+  await store.recordItemMetric(threadId, turnId, itemId, { type: "commandExecution", snapshot });
+  await store.reconcileExecutionSupplements(threadId, [{ id: turnId, items: [{ ...snapshot, status: "completed", aggregatedOutput: "native output" }] }]);
+  store.close(); store = new WorkspaceStore(options); await store.ready;
+  const metric = await store.getItemMetric(threadId, turnId, itemId);
+  assert.equal(metric.canonicalItemPresent, true); assert.equal(metric.snapshot.aggregatedOutput, snapshot.aggregatedOutput);
+  assert.equal((await store.getTurnPresentation(threadId, turnId)).recoveryCount, 0);
+  await store.reconcileExecutionSupplements(threadId, [{ id: turnId, items: [] }]);
+  assert.equal((await store.getTurnPresentation(threadId, turnId)).recoveryCount, 0, "absence from one page does not erase a known location");
+  await store.reconcileExecutionSupplements(threadId, [{ id: turnId, items: [] }], { complete: true });
+  assert.equal((await store.getTurnPresentation(threadId, turnId)).recoveryCount, 1, "a complete changed history can establish that the original item is now missing");
+  assert.equal((await store.getRecoveryItem(threadId, turnId, 0)).snapshot.aggregatedOutput, snapshot.aggregatedOutput);
+});
+
+test("parallel snapshot preserves account/project semantics while excluding live queue delivery and sessions", sqliteTest, async () => {
+  const { parallelSnapshot } = await import("../scripts/archive/parallel/parallel-snapshot.mjs");
+  const root = await mkdtemp(join(tmpdir(), "codexlan-parallel-copy-"));
+  const originalRoot = join(root, "original"), parallelRoot = join(root, "parallel");
+  const original = new WorkspaceStore({ workspace: root, dataRoot: originalRoot, stateFile: join(originalRoot, "state.json"), legacyJsonMirror: false });
+  let copy;
+  try {
+    await original.ready;
+    const user = await original.createFirstAdmin({ username: "fixture", displayName: "Fixture", password: "fixture-pass-123" });
+    const project = (await original.listProjects(user.id))[0];
+    await original.setThreadProject(threadId, project.id); await original.setThreadSettings(threadId, { model: "test-model" });
+    await original.enqueue(threadId, project.id, "must stay in original queue");
+    await original.setSession("fixture-session", { userId: user.id, csrfToken: "fixture", expiresAt: Date.now() + 60_000 });
+    const before = original.storage.read();
+    const report = await parallelSnapshot(original.sqliteFile, parallelRoot);
+    assert.equal(report.excludedFromCopy.queuedMessages, 1);
+    copy = new WorkspaceStore({ workspace: root, dataRoot: parallelRoot, stateFile: join(parallelRoot, "state.json"), legacyJsonMirror: false }); await copy.ready;
+    assert.deepEqual(copy.storage.read(), { ...before, queues: {}, queueRevisions: {}, sessions: {} });
+    assert.deepEqual(original.storage.read(), before);
+  } finally { copy?.close(); original.close(); }
+});
