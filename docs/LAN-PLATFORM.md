@@ -23,6 +23,8 @@ Application input errors use explicit delivery outcomes. A transport timeout is 
 
 - `shared/agent-contract.ts`: capabilities, namespaced settings descriptors and product metadata.
 - `shared/presentation.ts`: committed rows, revision and explicit anchored updates.
+
+Presentation content revisions and confirmed positions are independent. Canonical history reads reconcile the adapter's live order and publish bounded position commits for retained browser rows, including the completion read. Position commits never load missing history rows or override newer content. Display batching retains each row's first insertion anchors while coalescing its content, so splitting a burst into transport chunks cannot create dependencies on a later chunk.
 - `shared/commands.ts`: commands and control DTOs.
 - `shared/read-api.ts`: full LAN client port, history/detail/metadata streams and selection.
 - `server/agents/adapter-contract.ts`: implemented server adapter surface.

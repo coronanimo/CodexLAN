@@ -2,7 +2,7 @@
 
 This file tracks unfinished project-level work and the latest acceptance checkpoint.
 
-React replacement checkpoint (2026-11-07): see [current architecture](ARCHITECTURE.md) and [migration evidence](REACT-MIGRATION.md). The dated sections below describe the retired implementation; their old source paths, commands and screenshots are historical evidence, not current validation entry points. The current Node and web suites validate the replacement.
+Replacement checkpoint (2026-11-07): see [current architecture](ARCHITECTURE.md) and [historical migration evidence](archive/REACT-MIGRATION.md). The dated sections below describe the retired implementation; their old source paths, commands and screenshots are historical evidence, not current validation entry points. The current Node and web suites validate the replacement.
 
 ## 账号额度同步与首屏解耦（2026-11-04）
 

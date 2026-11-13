@@ -1,5 +1,11 @@
 # Deployment, Backup, and Upgrades
 
+The installed application is CodexLAN. Its installation directory is `%LOCALAPPDATA%\Programs\CodexLAN`, its configuration is `%USERPROFILE%\.codexlan\config.json`, and it uses port 8688. Earlier installations and trial deployment notes are kept in the archive.
+
+The installed management entry is `CodexLAN.ps1`; updates use `Update-CodexLAN.ps1 -Release <prepared-release>`. Both read `deployment.json`. Release directories use the application version and build timestamp.
+
+On 2026-11-08 the installation switched to `0.8.0-20261108-154715`. The former installations are archived under `%LOCALAPPDATA%\Programs\CodexLAN-Archive\20261108-154811`; earlier application data and logs are under `%USERPROFILE%\.codexlan-archive\20261108-154811`. The active configuration, startup task, desktop restart entry and updater all use the official CodexLAN paths. Existing attachment references are translated to their new location when opened.
+
 ## Supported deployment
 
 The verified deployment target is a Windows 10/11 server computer on a trusted private LAN. The Node listener does not provide TLS.

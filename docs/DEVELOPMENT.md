@@ -46,7 +46,7 @@ Watch rebuilds static files served by Node, preserving the save/refresh workflow
 - `test/`: Node acceptance; `test/fixtures/` contains the fake upstream.
 - `web/src/dev/`: fixture-only sources; never import them from product features.
 
-See [the architecture diagram](ARCHITECTURE.md), [platform boundaries](LAN-PLATFORM.md) and [migration evidence](REACT-MIGRATION.md).
+See [the architecture diagram](ARCHITECTURE.md), [platform boundaries](LAN-PLATFORM.md) and [historical migration evidence](archive/REACT-MIGRATION.md).
 
 ## Checks
 
