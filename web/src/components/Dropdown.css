@@ -1,0 +1,5 @@
+.topbar-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 9; display: grid; width: 178px; gap: 5px; padding: 7px; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--surface-overlay); box-shadow: 0 13px 36px #10213d20; backdrop-filter: blur(10px); }
+.topbar-menu button { width: 100%; padding: 8px 9px; text-align: left; }
+.topbar-menu .danger-button { border-color: transparent; color: var(--danger); background: transparent; }
+.dropdown { position: relative; }
+:where(.topbar-menu).align-left { right: auto; left: 0; }

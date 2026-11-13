@@ -14,8 +14,27 @@ import { ActionContext } from "../../app/ActionContext";
 import type { ActionPort } from "../../app/ActionContext";
 import { Attachments } from "../../app/controllers/Attachments";
 import type { ReadClient } from "@lan/read-api";
+import { controlsReceived } from "../controls/controlsSlice";
 
 afterEach(cleanup);
+
+it.each(["/goal pause", "/plan"])("keeps text typed while %s is being applied", async (command) => {
+  const store = createAppStore(), drafts = new Map<string, string>();
+  let finish!: () => void;
+  const execute = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+  const attachments = new Attachments({} as ReadClient);
+  const actions = { execute, drafts, attachments, conversationId: "c", selection: { conversationId: "c", projectId: "p", agentInstanceId: "a" },
+    capabilities: { goals: true, plans: true }, settings: [{ key: "provider.plan", role: "planning", switchValues: { enabled: "plan", disabled: "default" } }], currentSettings: () => ({}) } as unknown as ActionPort;
+  const view = <Provider store={store}><ActionContext.Provider value={actions}><Composer conversationId="c" drafts={drafts} /></ActionContext.Provider></Provider>;
+  const first = render(view), input = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "草稿" });
+  fireEvent.change(input, { target: { value: command } }); fireEvent.submit(input.closest("form")!);
+  expect(execute).toHaveBeenCalledTimes(1);
+  fireEvent.change(input, { target: { value: "next message" } });
+  await act(async () => { finish(); });
+  first.unmount(); render(view);
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "草稿" }).value).toBe("next message");
+  attachments.close();
+});
 
 describe("editor and history update boundaries", () => {
   it("keeps typing local, and a stream update changes only the subscribed row", () => {
@@ -64,6 +83,24 @@ describe("editor and history update boundaries", () => {
     view.rerender(show("b"));
     expect(screen.getByRole<HTMLTextAreaElement>("textbox").value).toBe("draft b");
   });
+});
+
+it("replaces Send with Stop only for an empty running editor and resets guide when the run ends", async () => {
+  const store = createAppStore(), drafts = new Map<string, string>(), execute = vi.fn(async () => ({}));
+  const controls = { conversationId: "running", activeRunId: "run", status: "running", queue: [], queueCount: 0, queueRevision: 0, questions: [], approvals: [], answered: [], settings: {}, goal: null };
+  store.dispatch(controlsReceived(controls));
+  const attachments = new Attachments({} as ReadClient), actions = { execute, drafts, attachments, conversationId: "running", selection: { conversationId: "running", agentInstanceId: "agent", projectId: "p" }, capabilities: { steer: true, interrupt: true } } as unknown as ActionPort;
+  render(<Provider store={store}><ActionContext.Provider value={actions}><Composer conversationId="running" drafts={drafts} /></ActionContext.Provider></Provider>);
+  expect(screen.getByRole("button", { name: "停止当前任务" })).toBeTruthy(); expect(screen.queryByRole("button", { name: "加入队列" })).toBeNull();
+  const input = screen.getByRole("textbox", { name: "草稿" }); fireEvent.change(input, { target: { value: "follow up" } });
+  expect(screen.queryByRole("button", { name: "停止当前任务" })).toBeNull(); expect(screen.getByRole("button", { name: "加入队列" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("radio", { name: "引导当前任务" }));
+  expect(screen.getByRole("button", { name: "发送引导" })).toBeTruthy();
+  act(() => store.dispatch(controlsReceived({ ...controls, status: "idle", activeRunId: null })));
+  expect(screen.getByRole<HTMLInputElement>("radio", { name: "排队发送" }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.keyDown(input, { key: "Enter" });
+  await vi.waitFor(() => expect(execute).toHaveBeenCalledWith({ type: "submit", text: "follow up" }));
+  attachments.close();
 });
 
 it("preserves drafts and uploaded attachments after failure, then only clears the accepted submission", async () => {

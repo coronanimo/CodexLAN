@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 import type { ConversationCommand } from "@lan/commands";
-import type { AgentCapabilities } from "@lan/agent-contract";
+import type { AgentCapabilities, AgentSetting } from "@lan/agent-contract";
 import type { ConversationSelection } from "@lan/read-api";
 import type { Attachments } from "./controllers/Attachments";
 
@@ -10,6 +10,13 @@ export type ActionPort = {
   queuedText(itemId: string): Promise<string>;
   drafts: Map<string, string>;
   capabilities: AgentCapabilities;
+  settings?: AgentSetting[];
+  providerName?: string;
+  currentSettings?(): Record<string, string | number | boolean>;
+  localDraft?: boolean;
+  focusRequest?: number;
+  resolveSelection?(): Promise<ConversationSelection>;
+  onSubmitted?(): void;
   selection: ConversationSelection;
   attachments: Attachments;
 };

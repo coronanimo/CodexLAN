@@ -1,0 +1,58 @@
+/* Preserved from the original workbench; owned by this React component. */
+.message { margin: 0 0 var(--ui-space-4); }
+.message:is(.assistant, .guide) { padding-inline: calc(var(--ui-space-2) + 1px); }
+.message.user { margin-left: auto; }
+.conversation-date { display: grid; grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr); align-items: center; gap: 10px; margin: 8px 0 18px; color: #8a97a8; font-size: 10px; line-height: 1; }
+.conversation-date::before, .conversation-date::after { height: 1px; background: #dce4ee; content: ""; }
+.conversation-date time { white-space: nowrap; }
+.message-meta { display: flex; min-height: 24px; align-items: center; margin: 0 0 var(--ui-space-1); color: var(--text-muted); font-size: var(--ui-font-caption); font-weight: 400; line-height: 1.5; }
+.message-role { flex: 0 0 auto; font-weight: 600; text-transform: uppercase; }
+.message-time { flex: 0 0 auto; color: var(--text-faint); font-size: var(--ui-font-time); font-variant-numeric: tabular-nums; }
+.message-time::before { margin: 0 5px; content: "·"; }
+.message-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); font-family: inherit; font-size: var(--ui-font-control); line-height: 1.65; }
+.message.assistant .message-body, .message.guide .message-body { color: var(--text-secondary); }
+.message-actions { display: flex; flex: 0 0 auto; justify-content: flex-end; align-items: center; gap: var(--ui-space-1); margin-left: auto; }
+.message-action-button { border: 0; border-radius: var(--ui-radius-control); padding: var(--ui-space-1) var(--ui-space-2); color: var(--text-muted); background: transparent; font-size: var(--ui-font-caption); font-weight: 500; }
+.message-action-button:hover { color: var(--accent-strong); background: var(--surface-hover); }
+.message-action-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mobile-message-action { display: none; }
+.copy-text-button { border: 0; color: #7b899a; background: transparent; }
+.copy-text-button:hover { color: var(--accent-strong); background: var(--surface-hover); }
+.copy-text-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.copy-text-button.copied { color: #197253; background: #e8f5ef; }
+.icon-copy-button { position: relative; width: 24px; height: 24px; border-radius: 6px; padding: 0; font-size: 0; }
+.icon-copy-button::before, .icon-copy-button::after { position: absolute; width: 8px; height: 8px; border: 1.3px solid currentColor; border-radius: 2px; content: ""; }
+.icon-copy-button::before { top: 6px; left: 6px; }
+.icon-copy-button::after { top: 9px; left: 9px; background: inherit; }
+.icon-copy-button.copied::before { top: 7px; left: 7px; width: 9px; height: 5px; border: 0; border-bottom: 1.6px solid currentColor; border-left: 1.6px solid currentColor; border-radius: 0; transform: rotate(-45deg); }
+.icon-copy-button.copied::after { display: none; }
+.clipboard-source { position: fixed; top: 0; left: -10000px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.message.user .message-body { padding: 11px 13px; border-radius: 13px 13px 4px; background: var(--dispatch); color: white; }
+.message.tool .message-body { padding: 8px 10px; border-left: 2px solid #a7b7cc; color: #516078; background: #f1f5fa; font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px; line-height: 1.55; }
+.message.streaming .message-body::after { display: inline-block; width: 6px; height: 1em; margin-left: 4px; background: var(--dispatch); content: ""; vertical-align: -.18em; animation: blink 1s steps(2) infinite; }
+.progress-message { display: grid; width: min(780px, 100%); min-width: 0; grid-template-columns: 7px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; margin: 1px 0 3px; padding: 1px 10px; color: #53657b; font-size: 12px; line-height: 1.5; }
+.progress-message-marker { width: 6px; height: 6px; border-radius: 50%; background: #7892b5; transform: translateY(-1px); }
+.progress-message.running .progress-message-marker { background: var(--execute); box-shadow: 0 0 0 3px var(--execute-soft); }
+.progress-message.stale .progress-message-marker { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+.progress-message.waiting p { color: var(--accent-strong); font-variant-numeric: tabular-nums; }
+.progress-message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.progress-message-action { align-self: center; padding: 3px 7px; color: var(--accent-strong); font-size: 11px; }
+
+@media (min-width: 761px) {
+  .message {
+  max-width: min(780px, 92%);
+}
+}
+
+@media (max-width: 760px) {
+  .message { max-width: 100%; }
+  .message:is(.assistant, .guide) .message-meta { min-height: 28px; }
+  .icon-copy-button { width: 28px; height: 28px; }
+  .mobile-message-action { display: inline-grid; min-height: 28px; place-items: center; }
+}
+
+.message { width: min(var(--conversation-content-width), 100%); }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .message.streaming .message-body::after { animation: none; } }
+.streaming .message-body > .streaming-message { margin: 0; padding: 0; border: 0; white-space: pre-wrap; overflow-wrap: anywhere; background: transparent; font: inherit; }
+.message.user .message-body { white-space: pre-wrap; }

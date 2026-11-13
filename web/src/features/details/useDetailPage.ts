@@ -3,10 +3,11 @@ import { ReadContext } from "../../transport/ReadContext";
 import type { DetailView } from "../../transport/ReadContext";
 import { useAppSelector } from "../../app/hooks";
 
-export function useDetailPage(ref: string, rowId?: string) {
+export function useDetailPage(ref: string, rowId?: string, autoExpand = false) {
   const source = useContext(ReadContext);
   const key = JSON.stringify([source?.selection, ref]);
-  const [view, setView] = useState<DetailView>(() => source?.details?.get(key) || { open: false, page: null, cursor: null });
+  const [view, setView] = useState<DetailView>(() => source?.details?.get(key) || { open: autoExpand, page: null, cursor: null });
+  const previousAutoExpand = useRef(autoExpand);
   const current = useRef(view);
   const request = useRef<AbortController | null>(null);
   const [error, setError] = useState("");
@@ -23,6 +24,11 @@ export function useDetailPage(ref: string, rowId?: string) {
     }
     setView(value);
   }, [source, key]);
+  useEffect(() => {
+    if (previousAutoExpand.current === autoExpand) return;
+    previousAutoExpand.current = autoExpand;
+    commit({ open: autoExpand });
+  }, [autoExpand, commit]);
   const load = useCallback(async (cursor: string | null) => {
     if (!source) return;
     request.current?.abort();

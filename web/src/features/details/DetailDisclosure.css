@@ -1,0 +1,9 @@
+/* Resource bodies remain bounded and are fetched only when expanded. */
+.execution-detail > p { margin: 0; border-top: 1px solid var(--border-subtle); padding: 10px 12px 12px 68px; color: var(--text-muted); font-size: var(--ui-font-caption); }
+.detail-pagination { display: flex; justify-content: flex-end; gap: var(--ui-space-2); border-top: 1px solid var(--border-subtle); padding: var(--ui-space-1) var(--ui-space-2); }
+.detail-pagination button { padding: var(--ui-space-1); color: var(--text-muted); font-size: var(--execution-font-caption); }
+.detail-pagination button:hover { color: var(--accent-strong); background: var(--surface-hover); }
+.detail-pagination button:focus-visible { outline: 2px solid var(--accent); }
+@media (max-width: 760px) {
+  .execution-detail > p { padding: 9px 10px 11px 60px; }
+}

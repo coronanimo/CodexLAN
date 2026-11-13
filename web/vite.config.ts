@@ -1,10 +1,11 @@
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
+import { codexlan } from "../products/codexlan/manifest.mjs";
 
 export default defineConfig(({ mode }) => ({
   root: fileURLToPath(new URL(".", import.meta.url)),
-  plugins: [react()],
+  plugins: [react(), { name: "edition-title", transformIndexHtml: (html) => html.replace(/<title>.*?<\/title>/, `<title>${codexlan.displayName}</title>`) }],
   resolve: {
     alias: {
       "@lan": fileURLToPath(new URL("../shared", import.meta.url)),
@@ -16,7 +17,7 @@ export default defineConfig(({ mode }) => ({
     port: 5173,
     strictPort: true,
     proxy: { "/api": { target: process.env.LAN_API_ORIGIN || "http://127.0.0.1:8689" } },
-    fs: { allow: [".", "../shared", "../products"].map((path) => fileURLToPath(new URL(path, import.meta.url))) },
+    fs: { allow: [".", "../shared", "../products", "../node_modules/katex/dist/fonts"].map((path) => fileURLToPath(new URL(path, import.meta.url))) },
   },
   build: {
     license: { fileName: "third-party-licenses.md" },

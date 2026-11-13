@@ -41,6 +41,22 @@ describe("selected conversation read lifetime", () => {
     expect(loaded.firstItemIndex + 1).toBe(initial.firstItemIndex);
     expect(await reader.older()).toBeNull();
   });
+
+  it("shares an in-flight older page between repeated boundary and manual requests", async () => {
+    let resolve!: (page: HistoryPage) => void;
+    const history = vi.fn().mockResolvedValueOnce({ conversationId: "a", before: "older", rows: [] })
+      .mockImplementationOnce(() => new Promise<HistoryPage>((done) => { resolve = done; }));
+    const store = createAppStore(), reader = new ConversationReader({ history } as unknown as ReadClient, store);
+    await reader.open({ conversationId: "a", agentInstanceId: "agent", projectId: "project" });
+    const first = reader.older(), second = reader.older();
+    expect(first).toBe(second);
+    expect(history).toHaveBeenCalledTimes(2);
+    expect(history.mock.calls[1]![2].aborted).toBe(false);
+    resolve({ conversationId: "a", before: null, rows: [{ id: "old", conversationId: "a", runId: "r", kind: "user", text: "older" }] });
+    await Promise.all([first, second]);
+    expect(store.getState().conversation.timelines.a!.ids).toEqual(["old"]);
+    reader.close();
+  });
 });
 
 it("reconnect retains older reading coordinates and ignores buffered rows older than the snapshot", async () => {

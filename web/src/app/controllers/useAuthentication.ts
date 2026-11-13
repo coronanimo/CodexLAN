@@ -17,7 +17,7 @@ export function useAuthentication(onSuccess: () => void) {
   const submit = async (values: Record<string, string>) => {
     if (pending) return;
     setPending(true); setError("");
-    try { await (setup ? workspaceClient.setup(values) : workspaceClient.login(values)); onSuccess(); }
+    try { if (setup && values.password !== values.confirmation) throw new Error("两次输入的管理员密码不一致。"); await (setup ? workspaceClient.setup(values) : workspaceClient.login(values)); onSuccess(); }
     catch (error) { setError(error instanceof Error ? error.message : "登录失败。"); }
     finally { setPending(false); }
   };

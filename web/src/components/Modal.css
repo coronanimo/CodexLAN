@@ -1,0 +1,30 @@
+/* Shared dialog shell, preserved from the original dialog styles. */
+.project-dialog, .project-manager-dialog, .global-config-dialog, .thread-dialog, .confirm-dialog { width: min(620px, calc(100vw - 30px)); max-width: calc(100vw - 30px); max-height: min(780px, calc(100dvh - 30px)); overflow-x: hidden; border: 0; border-radius: 16px; padding: 0; color: var(--ink); box-shadow: 0 20px 70px #10213d35; }
+.thread-dialog, .confirm-dialog { width: min(480px, calc(100vw - 30px)); }
+.project-dialog::backdrop, .project-manager-dialog::backdrop, .global-config-dialog::backdrop, .thread-dialog::backdrop, .confirm-dialog::backdrop { background: #10213d42; backdrop-filter: blur(3px); }
+.project-dialog form, .project-manager-dialog form, .global-config-dialog form, .thread-dialog form, .confirm-dialog form { display: grid; min-width: 0; gap: 14px; max-height: inherit; overflow-x: hidden; overflow-y: auto; padding: 20px; }
+.dialog-heading { display: flex; justify-content: space-between; align-items: start; }
+.dialog-heading span { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.dialog-heading h2 { margin: 3px 0 0; font-family: Bahnschrift, sans-serif; font-size: 22px; letter-spacing: -.04em; }
+.project-dialog label, .thread-dialog label { display: grid; min-width: 0; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.project-dialog input, .thread-dialog input, .thread-dialog textarea { width: 100%; min-width: 0; resize: vertical; border: 1px solid var(--line); border-radius: 9px; padding: 10px; color: var(--ink); background: var(--cloud); outline: none; line-height: 1.5; }
+.project-dialog input[readonly] { color: var(--muted); cursor: default; }
+.project-dialog label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 10px; }
+.project-dialog input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 auto; }
+.project-dialog input:focus, .thread-dialog input:focus, .thread-dialog textarea:focus { border-color: var(--dispatch); box-shadow: 0 0 0 3px var(--dispatch-soft); }
+.dialog-actions { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 7px; }
+
+/* React dialogs host several forms, so padding belongs to the dialog shell. */
+.workbench-modal { padding: 20px; background: var(--surface); }
+.workbench-modal .dialog-heading { margin-bottom: 14px; }
+.workbench-modal form { padding: 0; overflow: visible; }
+.workbench-modal label { display: grid; min-width: 0; gap: 6px; margin: 0; color: var(--muted); font-size: 12px; font-weight: 650; }
+.dialog-content { display: grid; min-width: 0; gap: 14px; }
+.workbench-modal input:not([type="checkbox"]), .workbench-modal select, .workbench-modal textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 9px; padding: 10px; color: var(--ink); background: var(--cloud); font: inherit; }
+.preview-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.navigation-modal { position: fixed; inset: 0 auto 0 0; width: min(290px, 84vw); height: 100dvh; max-height: 100dvh; margin: 0; padding: 0; border: 0; border-radius: 0; overflow: hidden; }
+.navigation-modal > .dialog-heading { position: absolute; top: 10px; right: 10px; z-index: 2; margin: 0; }
+.navigation-modal > .dialog-heading h2 { display: none; }
+@media (max-width: 760px) {
+  .workbench-modal input:not([type="checkbox"]), .workbench-modal select, .workbench-modal textarea { font-size: 16px; }
+}

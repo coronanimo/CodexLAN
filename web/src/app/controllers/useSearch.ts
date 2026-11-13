@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ConversationSummary, ReadClient } from "@lan/read-api";
 
 type Result = ConversationSummary & { snippet: string; projectName: string };
-export function useSearch(client: ReadClient, agentId: string) {
-  const [query, setQuery] = useState(""), [results, setResults] = useState<Result[]>([]), [cursor, setCursor] = useState<string | null>(null);
+export function useSearch(client: ReadClient, agentId: string, initialQuery = "") {
+  const [query, setQuery] = useState(initialQuery), [results, setResults] = useState<Result[]>([]), [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false), [error, setError] = useState("");
   const request = useRef<AbortController | null>(null);
   useEffect(() => {

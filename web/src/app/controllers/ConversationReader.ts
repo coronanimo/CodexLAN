@@ -12,6 +12,7 @@ export class ConversationReader {
   private controller: AbortController | null = null;
   private generation = 0;
   private before: string | null = null;
+  private olderRequest: Promise<HistoryPage | null> | null = null;
   private stopWatching: (() => void) | null = null;
   private selectionEpoch = 0;
   private controlsRequest: AbortController | null = null;
@@ -22,7 +23,7 @@ export class ConversationReader {
   private hasSnapshot = false;
   private olderWindow = false;
   private snapshotRevision = 0;
-  constructor(private client: ReadClient, private store: AppStore, private changed: (page: HistoryPage | null, status: string) => void = () => {}) {}
+  constructor(private client: ReadClient, private store: AppStore, private changed: (page: HistoryPage | null, status: string, paused?: boolean) => void = () => {}, private controlsState: (state: { loading: boolean; error: string }) => void = () => {}) {}
 
   open(selection: ConversationSelection) {
     this.close();
@@ -30,7 +31,13 @@ export class ConversationReader {
     return this.client.watch ? this.watch() : this.read(false);
   }
   refresh() { this.paused = false; this.hasSnapshot = false; this.olderWindow = false; return this.client.watch ? this.watch() : this.read(false); }
-  older() { return this.before ? this.read(true) : Promise.resolve(null); }
+  older() {
+    if (this.olderRequest) return this.olderRequest;
+    if (!this.before) return Promise.resolve(null);
+    const request = this.read(true).finally(() => { if (this.olderRequest === request) this.olderRequest = null; });
+    this.olderRequest = request;
+    return request;
+  }
   close() {
     clearTimeout(this.controlsTimer); this.controlsTimer = undefined; this.controlsRequest?.abort();
     this.controller?.abort();
@@ -43,6 +50,7 @@ export class ConversationReader {
     }
     this.selection = null;
     this.before = null;
+    this.olderRequest = null;
     this.costs.clear(); this.retainedSize = 0; this.paused = false; this.hasSnapshot = false; this.olderWindow = false;
     this.snapshotRevision = 0;
   }
@@ -55,9 +63,10 @@ export class ConversationReader {
       this.controlsRequest?.abort();
       const request = this.controlsRequest = new AbortController();
       const epoch = this.selectionEpoch;
+      this.controlsState({ loading: true, error: "" });
       this.client.controls(selection, request.signal).then((value) => {
-        if (!request.signal.aborted && epoch === this.selectionEpoch) this.store.dispatch(controlsReceived(value));
-      }).catch((error: Error) => { if (!request.signal.aborted && epoch === this.selectionEpoch) this.changed(null, error.message); });
+        if (!request.signal.aborted && epoch === this.selectionEpoch) { this.store.dispatch(controlsReceived(value)); this.controlsState({ loading: false, error: "" }); }
+      }).catch((error: Error) => { if (!request.signal.aborted && epoch === this.selectionEpoch) this.controlsState({ loading: false, error: error.message }); });
     }, 100);
   };
   private watch(): Promise<HistoryPage | null> {
@@ -79,11 +88,11 @@ export class ConversationReader {
             if (!this.paused && combined && this.fits(combined)) {
               this.store.dispatch(windowReconciled({ conversationId: selection.conversationId, rows: combined })); this.resetCosts(combined);
               this.changed(null, "实时连接正常");
-            } else { this.paused = true; this.changed(null, "已保留阅读位置；点击最新记录同步后续内容。"); }
+            } else { this.paused = true; this.changed(null, "已保留阅读位置；点击最新记录同步后续内容。", true); }
             resolve(null); this.refreshControls(); return;
           }
           this.store.dispatch(snapshotCommitted({ conversationId: selection.conversationId, rows: page.rows })); this.resetCosts(page.rows); this.hasSnapshot = true;
-          this.before = page.before; this.changed(page, "实时连接正常"); resolve(page);
+          this.before = page.before; this.changed(page, "实时连接正常", false); resolve(page);
           this.refreshControls();
         },
         patch: (patch) => { if (epoch === this.selectionEpoch) this.patch(patch); },
@@ -97,11 +106,11 @@ export class ConversationReader {
   private resetCosts(rows: TimelineRow[]) { this.costs = new Map(rows.map((row) => [row.id, rowSize(row)])); this.retainedSize = [...this.costs.values()].reduce((a, b) => a + b, 0); }
   private patch(patch: PresentationPatch) {
     if (this.paused) return;
-    patch = { ...patch, upserts: patch.upserts.filter(({ row }) => this.costs.has(row.id) || row.revision === undefined || row.revision > this.snapshotRevision) };
+    patch = { ...patch, placements: patch.placements?.filter((entry) => entry.revision > this.snapshotRevision), upserts: patch.upserts.filter(({ row }) => this.costs.has(row.id) || row.revision === undefined || row.revision > this.snapshotRevision) };
     let size = this.retainedSize, count = this.costs.size;
     for (const id of patch.removeIds) { if (this.costs.has(id)) { count--; size -= this.costs.get(id)!; } }
     for (const { row } of patch.upserts) { size += rowSize(row) - (this.costs.get(row.id) || 0); if (!this.costs.has(row.id)) count++; }
-    if (size > 2_000_000 || count > 1500) { this.paused = true; this.changed(null, "已达到本页阅读上限；点击最新记录继续。草稿已保留。"); return; }
+    if (size > 2_000_000 || count > 1500) { this.paused = true; this.changed(null, "已达到本页阅读上限；点击最新记录继续。草稿已保留。", true); return; }
     this.store.dispatch(presentationPatched(patch));
     // Unknown records outside the loaded canonical window are not retained.
     const entities = this.store.getState().conversation.entities;
@@ -125,7 +134,7 @@ export class ConversationReader {
       const replace = !older || !this.fits(combined);
       this.store.dispatch((replace ? snapshotCommitted : orderedRowsPrepended)({ conversationId: selection.conversationId, rows: page.rows }));
       this.resetCosts(replace ? page.rows : combined);
-      if (older) { this.olderWindow = true; if (replace) { this.paused = true; this.changed(page, "正在阅读更早一页；点击最新记录恢复实时内容。"); } }
+      if (older) { this.olderWindow = true; if (replace) { this.paused = true; this.changed(page, "正在阅读更早一页；点击最新记录恢复实时内容。", true); } }
       this.before = page.before;
       if (!older) this.refreshControls();
       return page;

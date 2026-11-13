@@ -1,0 +1,31 @@
+/* Preserved from the original workbench; owned by this React component. */
+.execution-entry { width: min(var(--conversation-content-width), 100%); min-width: 0; margin: 0 0 var(--ui-space-1); overflow: hidden; border: 1px solid var(--border); border-radius: var(--ui-radius-panel); background: var(--surface-subtle); }
+.execution-summary { display: grid; min-width: 0; min-height: var(--execution-row-height); grid-template-columns: var(--execution-kind-width) minmax(0, 1fr) auto; gap: var(--ui-space-2); align-items: center; padding: 0 var(--ui-space-2); }
+.execution-summary { min-height: calc(var(--execution-row-height) - 2px); cursor: pointer; list-style: none; }
+.execution-entry.empty > summary { cursor: default; }
+.execution-entry.diff-preview-entry > summary { cursor: zoom-in; }
+.execution-kind { color: var(--text-muted); font-size: var(--execution-font-caption); font-weight: 600; line-height: 1.5; }
+.execution-summary strong { display: flex; min-width: 0; align-items: baseline; gap: var(--ui-space-2); overflow: hidden; color: var(--text-secondary); font-size: var(--execution-font-content); font-weight: 400; white-space: nowrap; }
+.execution-title-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.diff-stat { flex: 0 0 auto; font-family: Consolas, "Cascadia Mono", monospace; font-size: var(--execution-font-caption); font-weight: 400; font-variant-numeric: tabular-nums; }
+.diff-stat.added { color: var(--complete); }
+.diff-stat.removed { color: var(--danger); }
+.execution-item-status { color: var(--text-faint); font-size: var(--execution-font-caption); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.execution-entry.running .execution-item-status { color: var(--accent); }
+.execution-entry.failed .execution-item-status { color: var(--danger); }
+.execution-entry pre { max-height: 280px; margin: 0; overflow-x: hidden; overflow-y: auto; border-top: 1px solid var(--border-subtle); padding: 10px 12px 12px 68px; color: var(--text-code); background: var(--surface-subtle); font-family: Consolas, "Cascadia Mono", monospace; font-size: var(--ui-font-caption); line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
+.execution-entry pre.live-output-truncated::before { content: "…前面的实时输出已截断…\A\A"; color: var(--muted); }
+.execution-entry pre span[style*="background-color"] { border-radius: 2px; padding: 0 1px; }
+.ansi-bold { font-weight: 800; }
+.ansi-dim { opacity: .68; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; text-underline-offset: 2px; }
+.ansi-strike { text-decoration: line-through; }
+
+@media (max-width: 760px) {
+  .execution-entry pre { max-height: 220px; padding: 9px 10px 11px 60px; }
+}
+
+/* React uses an accessible button to keep detail fetching independent of the row. */
+button.execution-summary { width: 100%; border: 0; border-radius: 0; background: transparent; text-align: left; }
+.execution-entry .detail-disclosure { margin: 0; }

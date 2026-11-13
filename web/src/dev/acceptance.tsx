@@ -1,10 +1,10 @@
+import "../app/styles.css";
 import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
 import { App } from "../app/App";
 import { createAppStore } from "../app/store";
 import type { ReadClient, ConversationSelection, StreamHandlers, WorkspaceUpdate } from "@lan/read-api";
 import type { TimelineRow } from "@lan/presentation";
-import "../app/styles.css";
 
 const store = createAppStore(), stats = { historyReads: 0, detailReads: 0, watches: 0, commands: 0 };
 const selection: ConversationSelection = { conversationId: "fixture-a", agentInstanceId: "test-agent", projectId: "fixture-project" };
@@ -16,6 +16,14 @@ const rows: TimelineRow[] = [
   { id: "summary", conversationId: selection.conversationId, runId: "large-run", kind: "summary", status: "completed", revision: 1 },
 ];
 let handlers: StreamHandlers, workspace: (event: WorkspaceUpdate) => void, revision = 1;
+const orderIds = ["order-user", "order-progress", "order-search-1", "order-reasoning-1", "order-search-2", "order-reasoning-2", "order-answer"];
+const orderRows: TimelineRow[] = orderIds.map((id, index) => {
+  const base = { id, conversationId: selection.conversationId, runId: "order-run" };
+  if (index === 0) return { ...base, kind: "user", text: "网络上怎么说的，没有人主持公道吗？" };
+  if (index === 1) return { ...base, kind: "assistant", appearance: "progress", text: "我会查公开讨论、媒体报道。" };
+  if (index === 6) return { ...base, kind: "assistant", text: "有用户公开抗议，也有媒体报道。" };
+  return { ...base, kind: "execution", label: index % 2 ? "思考" : "搜索", title: `过程 ${index - 1}`, status: "completed" };
+});
 const summary = { id: selection.conversationId, projectId: selection.projectId, agentInstanceId: selection.agentInstanceId, title: "隔离验收 · 2000 次工具执行" };
 const client: ReadClient = {
   bootstrap: async () => ({ version: 1, edition: { id: "test", displayName: "LAN Fixture", defaultProviderId: "test" },
@@ -31,6 +39,10 @@ const client: ReadClient = {
 };
 Object.assign(window, { __lanAcceptance: {
   stats, state: () => store.getState(),
+  showMisorderedConversation: () => handlers.snapshot({ conversationId: selection.conversationId, before: null, revision: ++revision,
+    rows: [orderRows[0]!, orderRows[6]!, ...orderRows.slice(1, 6)] }),
+  reconcileConversationOrder: () => handlers.patch({ conversationId: selection.conversationId, appendRun: false, removeIds: [], upserts: [],
+    placements: orderIds.map((id, index) => ({ id, revision: revision + 1, afterId: orderIds[index - 1], beforeId: orderIds[index + 1] })) }),
   patch: (text: string) => handlers.patch({ conversationId: selection.conversationId, appendRun: false, removeIds: [], upserts: [{ row: { ...rows.at(-2)!, kind: "assistant", text, revision: ++revision } }] }),
   metadata: () => workspace({ kind: "changed", conversation: { ...summary, title: "标题更新", status: "running" } }),
 } });

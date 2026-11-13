@@ -48,7 +48,7 @@ export const lanClient: ReadClient = {
   async command(selection, command, signal) {
     return write(`/api/lan/conversations/${encodeURIComponent(selection.conversationId)}/commands`, { projectId: selection.projectId, agentId: selection.agentInstanceId, command }, signal);
   },
-  create(projectId, agentId, signal) { return write(`/api/lan/projects/${encodeURIComponent(projectId)}/conversations`, { agentId }, signal); },
+  create(projectId, agentId, signal, options) { return write(`/api/lan/projects/${encodeURIComponent(projectId)}/conversations`, { agentId, settings: options?.settings }, signal); },
   configuration(agentId, signal) { return request(`/api/lan/agents/${encodeURIComponent(agentId)}/settings`, signal); },
   watch(selection, handlers) {
     const query = selectionQuery(selection);
@@ -62,7 +62,9 @@ export const lanClient: ReadClient = {
         if (value.kind === "patch") {
           if (value.conversationId !== selection.conversationId || !Array.isArray(value.upserts) || value.upserts.length > 10
             || !Array.isArray(value.removeIds) || value.removeIds.some((id: unknown) => typeof id !== "string")) throw new Error();
+          if (value.placements !== undefined && (!Array.isArray(value.placements) || value.placements.length > 10 || value.placements.some((entry) => typeof entry.id !== "string" || !Number.isSafeInteger(entry.revision)))) throw new Error();
           handlers.patch({ conversationId: selection.conversationId, appendRun: value.appendRun === true, removeIds: value.removeIds,
+            placements: value.placements?.map(({ id, revision, beforeId, afterId }) => ({ id, revision, beforeId: typeof beforeId === "string" ? beforeId : undefined, afterId: typeof afterId === "string" ? afterId : undefined })),
             upserts: value.upserts.map((entry: { row: TimelineRow; beforeId?: string; afterId?: string }) => ({ row: decodeRow(entry.row, selection.conversationId),
               beforeId: typeof entry.beforeId === "string" ? entry.beforeId : undefined, afterId: typeof entry.afterId === "string" ? entry.afterId : undefined })) });
         } else if (value.kind === "removed") {
@@ -76,8 +78,12 @@ export const lanClient: ReadClient = {
     if (value.version !== 1 || !Array.isArray(value.projects) || !Array.isArray(value.agents)) throw new Error("工作台接口版本不兼容。");
     return value;
   },
-  list(projectId, agentId, cursor, signal) {
-    const query = new URLSearchParams({ agentId });
+  listAll(agentId, cursor, signal, order = "original") {
+    const query = new URLSearchParams({ agentId, order }); if (cursor) query.set("cursor", cursor);
+    return request(`/api/lan/conversations?${query}`, signal);
+  },
+  list(projectId, agentId, cursor, signal, order = "original") {
+    const query = new URLSearchParams({ agentId, order });
     if (cursor) query.set("cursor", cursor);
     return request(`/api/lan/projects/${encodeURIComponent(projectId)}/conversations?${query}`, signal);
   },
@@ -87,9 +93,10 @@ export const lanClient: ReadClient = {
     const value = await request<HistoryPage>(`/api/lan/conversations/${encodeURIComponent(selection.conversationId)}/history?${query}`, signal);
     return decodeHistory(value, selection.conversationId);
   },
-  async details(selection, ref, cursor, signal) {
+  async details(selection, ref, cursor, signal, options) {
     const query = selectionQuery(selection);
     query.set("ref", ref); if (cursor) query.set("after", cursor);
+    if (options?.raw) query.set("raw", "true");
     const value = await request<Awaited<ReturnType<ReadClient["details"]>>>(`/api/lan/conversations/${encodeURIComponent(selection.conversationId)}/details?${query}`, signal);
     if (typeof value.text !== "string" || value.text.length > 16_000
       || !(value.nextCursor === null || typeof value.nextCursor === "string" && value.nextCursor !== cursor)) throw new Error("输出响应无效。");
@@ -109,21 +116,37 @@ function decodeRow(row: TimelineRow, conversationId: string): TimelineRow {
   if (!row || row.conversationId !== conversationId || typeof row.id !== "string" || typeof row.runId !== "string") throw new Error("历史记录无效。");
   const base = { id: row.id, conversationId, runId: row.runId, revision: Number.isSafeInteger(row.revision) ? row.revision : undefined };
   const files = "files" in row && Array.isArray(row.files) ? row.files.slice(0, 20).filter((file) => typeof file.path === "string" && file.path.length <= 4096 && typeof file.name === "string")
-    .map((file) => ({ path: file.path, name: file.name.slice(0, 256), image: file.image === true })) : [];
+    .map((file) => ({ path: file.path, name: file.name.slice(0, 256), image: file.image === true, ...(typeof file.label === "string" ? { label: file.label.slice(0, 256) } : {}) })) : [];
   const detail = "detailId" in row && typeof row.detailId === "string" && row.detailId.length <= 4096 ? { detailId: row.detailId } : {};
   if (row.kind === "user" || row.kind === "assistant") {
     if (typeof row.text !== "string" || row.text.length > 12_000) throw new Error("消息摘要超出限制。");
-    return { ...base, kind: row.kind, text: row.text, files, streaming: row.streaming === true, author: typeof row.author === "string" ? row.author.slice(0, 100) : undefined, truncated: row.truncated === true,
+    const visualizations = Array.isArray(row.visualizations) ? row.visualizations.slice(0, 20)
+      .filter((entry) => typeof entry.path === "string" && entry.path.length <= 4096 && typeof entry.title === "string")
+      .map(({ path, title, mode }) => ({ path, title: title.slice(0, 256), mode: mode === "wide" ? "wide" as const : "standard" as const })) : [];
+    return { ...base, kind: row.kind, text: row.text, files, visualizations, streaming: row.streaming === true, author: typeof row.author === "string" ? row.author.slice(0, 100) : undefined, truncated: row.truncated === true,
+      timestamp: typeof row.timestamp === "number" && Number.isFinite(row.timestamp) && row.timestamp > 0 ? row.timestamp : null,
+      ...(typeof row.replyTo === "string" && row.replyTo.length <= 200 ? { replyTo: row.replyTo } : {}),
+      ...(row.appearance === "guidance" || row.appearance === "progress" ? { appearance: row.appearance } : {}),
       ...(row.request && Array.isArray(row.request.questions) ? { request: { id: String(row.request.id), delivery: row.request.delivery,
         questions: row.request.questions.map((question) => ({ id: String(question.id), header: String(question.header), question: String(question.question),
           isOther: question.isOther === true, isSecret: question.isSecret === true, options: (question.options || []).map(({ label, description }) => ({ label: String(label), description: String(description) })) })) } } : {}), ...detail };
   }
   if (row.kind !== "execution" && row.kind !== "summary") throw new Error("历史记录类型不支持。");
   if (!["running", "completed", "failed", "interrupted"].includes(row.status)) throw new Error("执行状态无效。");
+  const changes = row.changes && [row.changes.files, row.changes.added, row.changes.removed].every((value) => Number.isSafeInteger(value) && value >= 0) ? { changes: { files: row.changes.files, added: row.changes.added, removed: row.changes.removed } } : {};
   if (row.kind === "summary") return { ...base, kind: "summary", status: row.status,
+    ...(typeof row.label === "string" ? { label: row.label.slice(0, 200) } : {}),
+    ...(row.timing && [row.timing.totalMs, row.timing.commandMs, row.timing.commandCount, row.timing.commandUnknownCount].every((value) => Number.isFinite(value) && value >= 0) ? { timing: { totalMs: row.timing.totalMs, commandMs: row.timing.commandMs, commandCount: row.timing.commandCount, commandUnknownCount: row.timing.commandUnknownCount, providerMs: typeof row.timing.providerMs === "number" && row.timing.providerMs >= 0 ? row.timing.providerMs : null } } : {}),
+    ...changes, ...(typeof row.diffDetailId === "string" && row.diffDetailId.length <= 4096 ? { diffDetailId: row.diffDetailId } : {}),
     ...(typeof row.recoveryDetailId === "string" && row.recoveryDetailId.length <= 4096 ? { recoveryDetailId: row.recoveryDetailId } : {}),
     startedAt: typeof row.startedAt === "number" ? row.startedAt : null, completedAt: typeof row.completedAt === "number" ? row.completedAt : null,
     ...(row.plan && Array.isArray(row.plan.plan) ? { plan: { explanation: String(row.plan.explanation || ""), plan: row.plan.plan.map((step) => ({ step: String(step.step), status: String(step.status) })) } } : {}), ...detail };
   if (typeof row.title !== "string" || row.title.length > 256 || typeof row.label !== "string" || row.label.length > 40) throw new Error("执行摘要无效。");
-  return { ...base, kind: "execution", title: row.title, label: row.label, status: row.status, files, ...detail };
+  return { ...base, kind: "execution", title: row.title, label: row.label, status: row.status, files,
+    startedAt: typeof row.startedAt === "number" && Number.isFinite(row.startedAt) ? row.startedAt : null,
+    completedAt: typeof row.completedAt === "number" && Number.isFinite(row.completedAt) ? row.completedAt : null,
+    ...(typeof row.durationMs === "number" && Number.isFinite(row.durationMs) && row.durationMs >= 0 ? { durationMs: row.durationMs } : {}),
+    ...(row.autoExpand === true ? { autoExpand: true } : {}),
+    ...changes, hideCompletedStatus: row.hideCompletedStatus === true,
+    ...(row.preview === "diff" || row.preview === "image" ? { preview: row.preview } : {}), ...detail };
 }

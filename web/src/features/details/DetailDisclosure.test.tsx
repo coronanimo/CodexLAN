@@ -20,9 +20,13 @@ it("loads output only after expansion and replaces chunks instead of accumulatin
   expect(details).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "查看输出" }));
   expect(await screen.findByText("first chunk")).toBeTruthy();
+  expect(screen.queryByText("下载完整 Markdown")).toBeNull();
+  expect(screen.queryByRole("button", { name: "回到开头" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "分享到其他应用" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "下一段" }));
   expect(await screen.findByText("last chunk")).toBeTruthy();
   expect(screen.queryByText("first chunk")).toBeNull();
+  expect(screen.getByRole("button", { name: "回到开头" })).toBeTruthy();
   expect(details).toHaveBeenLastCalledWith(expect.anything(), "opaque-reference", "opaque-next", expect.any(AbortSignal));
 });
 
@@ -33,6 +37,17 @@ it("restores the open output page after a virtual row unmounts", async () => {
   const first = render(row()); fireEvent.click(screen.getByRole("button", { name: "查看输出" }));
   await screen.findByText("retained output"); first.unmount(); render(row());
   expect(screen.getByText("retained output")).toBeTruthy(); expect(details).toHaveBeenCalledTimes(1);
+});
+
+it('opens active reasoning automatically and folds it after completion', async () => {
+  const details = vi.fn().mockResolvedValue({ text: 'live reasoning', nextCursor: null });
+  const source = { client: { details } as unknown as ReadClient, selection: { conversationId: 'a', agentInstanceId: 'agent', projectId: 'project' } };
+  const view = (autoExpand: boolean) => <Provider store={createAppStore()}><ReadContext.Provider value={source}><DetailDisclosure detailId="reason" autoExpand={autoExpand} /></ReadContext.Provider></Provider>;
+  const { rerender } = render(view(true));
+  await screen.findByText('live reasoning');
+  rerender(view(false));
+  expect(screen.queryByText('live reasoning')).toBeNull();
+  expect(screen.getByRole('button', { name: '查看输出' }).getAttribute('aria-expanded')).toBe('false');
 });
 
 it("refreshes only expanded live output and coalesces invalidations", async () => {

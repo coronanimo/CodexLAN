@@ -1,0 +1,9 @@
+.markdown-mermaid-block { margin: 1.15em 0; overflow: auto; border: 1px solid #c9d8e8; border-radius: 9px; padding: 18px; background: #fff; color: #142d4f; text-align: center; }
+.markdown-mermaid-stage { min-height: 24px; color: var(--muted); }
+.markdown-mermaid-stage.is-ready { cursor: zoom-in; }
+.markdown-mermaid-stage:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: -3px; }
+.markdown-mermaid-stage svg { display: block; width: 100%; max-width: 100%; height: auto; margin: 0 auto; }
+.markdown-mermaid-error, .markdown-mermaid-unavailable { color: #8a3f4a; font-family: Consolas, "Cascadia Mono", monospace; text-align: left; white-space: pre-wrap; }
+.diagram-document { display: block; width: 100%; height: auto; border: 0; pointer-events: none; }
+.markdown-mermaid-stage[role="button"] { cursor: zoom-in; }
+.markdown-mermaid-source { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }

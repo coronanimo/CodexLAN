@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Project, User } from "@lan/workspace";
+import type { Project, ProjectMember, User } from "@lan/workspace";
 import { workspaceClient } from "../../transport/workspace-client";
 
 export function useManagement(kind: "projects" | "users") {
@@ -17,7 +17,7 @@ export function useManagement(kind: "projects" | "users") {
 }
 
 export function useProjectMembers(projectId: string) {
-  const [members, setMembers] = useState<(User & { granted: boolean })[]>([]), [error, setError] = useState("");
+  const [members, setMembers] = useState<ProjectMember[]>([]), [error, setError] = useState("");
   useEffect(() => {
     let active = true; setMembers([]); setError("");
     workspaceClient.members(projectId).then((value) => { if (active) setMembers(value); }).catch((error: Error) => { if (active) setError(error.message); });

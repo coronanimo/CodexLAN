@@ -21,7 +21,7 @@ export function useAttachments(conversationId: string) {
   return { items, input,
     add: (files: File[]) => actions?.attachments.add(conversationId, files),
     remove: (id: string) => actions?.attachments.remove(conversationId, id),
-    upload: (items: Attachment[]) => actions!.attachments.upload(actions!.selection, items),
+    upload: async (items: Attachment[]) => actions!.attachments.upload(actions!.resolveSelection ? await actions!.resolveSelection() : actions!.selection, items, conversationId),
     clearSent: (items: Attachment[]) => actions?.attachments.clearSent(conversationId, items),
   };
 }

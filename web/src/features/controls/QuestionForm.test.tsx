@@ -1,0 +1,30 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import type { QuestionRequest } from "@lan/commands";
+import { ActionContext } from "../../app/ActionContext";
+import type { ActionPort } from "../../app/ActionContext";
+import { PreferencesContext } from "../../app/PreferencesContext";
+import { Preferences } from "../../app/controllers/Preferences";
+import { QuestionForm } from "./QuestionForm";
+afterEach(() => { cleanup(); localStorage.clear(); });
+const request: QuestionRequest = { id: "q", delivery: "async", questions: [{ id: "choice", header: "选择", question: "怎么进行？", isOther: true, isSecret: false, options: [{ label: "继续", description: "沿用当前方案" }, { label: "暂停", description: "等待后续输入" }] }] };
+it("keeps async radio defaults local, supports defer/resume and sends an explicit other answer", async () => {
+  const execute = vi.fn(async () => ({})), drafts = new Map<string, string>();
+  const actions = { conversationId: "c", execute, drafts } as unknown as ActionPort;
+  const show = () => <PreferencesContext.Provider value={new Preferences("question-user")}><ActionContext.Provider value={actions}><QuestionForm request={request} /></ActionContext.Provider></PreferencesContext.Provider>;
+  const view = render(show());
+  expect(screen.getByRole<HTMLInputElement>("radio", { name: /继续/ }).checked).toBe(true);
+  expect(execute).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "稍后回答" }));
+  expect(screen.getByRole("button", { name: "继续回答" })).toBeTruthy();
+  view.unmount(); render(show());
+  expect(screen.getByRole("button", { name: "继续回答" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "继续回答" }));
+  fireEvent.click(screen.getByRole("radio", { name: "其他" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "选择：其他回答" }), { target: { value: "先检查迁移记录" } });
+  fireEvent.click(screen.getByRole("button", { name: "提交回答" }));
+  await screen.findByText("已回答");
+  expect(execute).toHaveBeenCalledWith({ type: "answer", requestId: "q", delivery: "async", answers: { choice: { answers: ["先检查迁移记录"] } } });
+  expect(screen.getByText(/我的回答：先检查迁移记录/)).toBeTruthy();
+});

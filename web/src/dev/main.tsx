@@ -1,3 +1,4 @@
+import "../app/styles.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Provider } from "react-redux";
@@ -6,7 +7,6 @@ import { createAppStore } from "../app/store";
 import { snapshotCommitted } from "../features/conversation/model/conversationSlice";
 import { createConversationFixture } from "./fixtures";
 import { Preview } from "./Preview";
-import "../app/styles.css";
 
 const store = createAppStore();
 document.title = `${codexlan.displayName} · React 迁移预览`;

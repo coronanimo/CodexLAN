@@ -1,0 +1,64 @@
+/* Preserved from the original workbench; owned by this React component. */
+.workbench { position: relative; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; }
+.conversation-stage { grid-row: 2; }
+.workbench > .queue-panel { grid-row: 3; }
+.workbench > .composer-zone { grid-row: 4; }
+.conversation-stage { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.conversation-stage.thread-switching { cursor: progress; }
+.conversation-stage.thread-switching .conversation { pointer-events: none; }
+.conversation-stage.thread-switching::after { position: absolute; top: 10px; left: 50%; z-index: 3; border: 1px solid #ccd8e7; border-radius: 999px; padding: 6px 10px; color: #52637a; background: var(--surface-overlay-strong); box-shadow: 0 3px 12px #18345d12; content: "正在打开聊天…"; font-size: 11px; font-weight: 700; transform: translateX(-50%); }
+.conversation { flex: 1; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+.jump-latest { position: absolute; z-index: 2; border: 1px solid #b9c9e1; border-radius: 999px; padding: 8px 12px; color: var(--accent-strong); background: var(--surface-overlay-strong); box-shadow: 0 5px 18px #18335f1f; font-size: 12px; font-weight: 750; }
+.history-loader { display: block; margin: 2px auto 18px; border: 1px solid #c9d7e8; border-radius: 999px; padding: 7px 12px; color: #516078; background: var(--surface-muted); font-size: 11px; font-weight: 700; }
+.history-loader:disabled { opacity: .6; }
+.empty-state { max-width: 420px; margin: 12vh auto 0; padding: 26px; border: 1px dashed #bdcce0; border-radius: 16px; background: #ffffff80; text-align: center; }
+.empty-state b { display: block; margin-bottom: 7px; font-family: Bahnschrift, sans-serif; font-size: 20px; letter-spacing: -.04em; }
+.empty-state p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+
+@media (min-width: 761px) {
+  .workspace-shell {
+  display: grid;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-columns: 270px minmax(0, 1fr);
+}
+  .workbench {
+  --content-gutter: max(26px, calc((100% - 1128px) / 2));
+  --topbar-gutter: max(14px, calc((100% - 1152px) / 2));
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto) minmax(0, auto);
+}
+  .conversation {
+  padding: 12px var(--content-gutter) 28px;
+}
+  .jump-latest {
+  right: var(--content-gutter);
+  bottom: 14px;
+}
+}
+
+@media (max-width: 760px) {
+  .workspace-shell { display: block; height: var(--app-viewport-height); }
+  .mobile-only { display: inline-grid; }
+  .workbench { width: 100%; height: var(--app-viewport-height); min-height: 0; }
+  .conversation { padding: 11px 15px 20px; }
+  .jump-latest { right: 15px; bottom: 10px; }
+  .empty-state { margin-top: 8vh; }
+}
+
+/* Item gutters replace padding on the old scroll container. Virtuoso owns scrolling. */
+.workspace-shell { overflow: hidden; }
+.desktop-navigation { min-width: 0; min-height: 0; }
+.workbench > .workbench-header { grid-row: 1; min-width: 0; }
+.workbench > .timeline-panel { grid-row: 2; contain: layout paint; }
+.workbench > .composer-zone { grid-row: 4; }
+.timeline-item { display: flow-root; min-width: 0; padding-inline: var(--content-gutter, 15px); }
+.timeline-panel [data-viewport-type] { scrollbar-width: thin; scrollbar-color: #bdc8d4 transparent; }
+.timeline-history-header { display: flow-root; padding-top: 12px; }
+.timeline-history-footer { height: 28px; }
+@media (max-width: 760px) {
+  .desktop-navigation { display: none; }
+  .timeline-item { padding-inline: 15px; }
+}

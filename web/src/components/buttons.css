@@ -1,0 +1,15 @@
+/* Preserved from the original workbench; owned by this React component. */
+.text-button, .quiet-button, .icon-button { border: 0; color: inherit; background: transparent; }
+.quiet-button, .primary-button, .danger-button { border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; color: var(--ink); background: var(--paper); font-size: 12px; font-weight: 650; }
+.primary-button { border-color: var(--dispatch); color: white; background: var(--dispatch); }
+.danger-button { border-color: #f0c4ca; color: var(--danger); background: var(--danger-soft); }
+.icon-button { display: inline-grid; width: 31px; height: 31px; place-items: center; border-radius: 8px; padding: 0; font-size: 18px; line-height: 1; }
+.icon-button:hover { background: var(--surface-raised); }
+.form-error { min-height: 16px; margin: -7px 0 0; color: var(--danger); font-size: 12px; }
+.status-dot { color: var(--muted); font-size: 10px; }
+.status-dot::before { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: var(--execute); content: ""; }
+.status-dot.online::before { background: var(--complete); }
+.status-dot.offline::before { background: var(--danger); }
+
+.icon-button > svg { width: 17px; height: 17px; }
+[role="alert"] { color: var(--danger); font-size: var(--ui-font-caption); }

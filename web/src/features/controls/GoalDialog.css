@@ -1,0 +1,25 @@
+.goal-summary { --goal-color: #8895a6; display: grid; grid-template-columns: 13px minmax(0, 1fr); align-items: start; gap: 10px; border-left: 2px solid var(--goal-color); border-radius: 2px 10px 10px 2px; padding: 10px 12px 10px 10px; background: var(--surface-canvas); }
+.goal-summary[data-tone="active"] { --goal-color: var(--goal); background: #f3f0ff; }
+.goal-summary[data-tone="paused"], .goal-summary[data-tone="blocked"] { --goal-color: #737d8c; }
+.goal-summary[data-tone="limited"] { --goal-color: #c57d1f; background: #fff7e9; }
+.goal-summary[data-tone="complete"] { --goal-color: var(--complete); background: var(--complete-soft); }
+.goal-summary-mark { width: 8px; height: 8px; margin-top: 4px; border: 2px solid var(--goal-color); border-radius: 2px; transform: rotate(45deg); }
+.goal-summary strong, .goal-summary small { display: block; }
+.goal-summary strong { color: var(--goal-color); font-family: Bahnschrift, "Segoe UI Variable", sans-serif; font-size: 13px; letter-spacing: -.01em; }
+.goal-summary small { margin-top: 3px; color: #68778b; font-family: "Cascadia Mono", Consolas, monospace; font-size: 10px; line-height: 1.45; }
+.goal-dialog textarea { min-height: 120px; }
+.dialog-actions.goal-dialog-actions { grid-template-columns: auto minmax(12px, 1fr) 72px 72px 96px; gap: 8px; }
+.goal-dialog-actions > span { min-width: 0; }
+.goal-dialog-actions button { width: 100%; min-height: 36px; padding: 7px 10px; font-size: 12px; white-space: nowrap; }
+.goal-dialog-actions .danger-button { width: auto; min-width: 78px; justify-self: start; }
+.goal-dialog-actions .goal-cancel { grid-column: 3; }
+.goal-dialog-actions .goal-toggle { grid-column: 4; }
+.goal-dialog-actions .goal-save { grid-column: 5; }
+@media (max-width: 760px) {
+  .dialog-actions.goal-dialog-actions { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.3fr); }
+  .goal-dialog-actions > span { display: none; }
+  .goal-dialog-actions .danger-button { grid-column: 1 / -1; width: auto; }
+  .goal-dialog-actions .goal-cancel { grid-column: 1; }
+  .goal-dialog-actions .goal-toggle { grid-column: 2; }
+  .goal-dialog-actions .goal-save { grid-column: 3; }
+}

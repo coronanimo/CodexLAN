@@ -1,0 +1,83 @@
+/* Preserved from the original workbench; owned by this React component. */
+:root {
+  color-scheme: only light;
+  supported-color-schemes: light;
+  --surface-canvas: #f5f7fa;
+  --surface: #ffffff;
+  --surface-subtle: #fbfcfe;
+  --surface-muted: #f8fafd;
+  --surface-hover: #eef2f5;
+  --surface-selected: #e9f4fd;
+  --surface-raised: #edf2f8;
+  --surface-accent: #e9f4fd;
+  --surface-control: #f6f8fb;
+  --surface-overlay: #fffffff7;
+  --surface-overlay-strong: #fffffff2;
+  --text: #10213d;
+  --text-secondary: #33445f;
+  --text-code: #263b56;
+  --text-muted: #6d7b90;
+  --text-faint: #718096;
+  --border: #dce5f0;
+  --border-strong: #ced9e8;
+  --border-subtle: #dde6f1;
+  --border-card: #cbd9eb;
+  --accent: #3c82c4;
+  --accent-strong: #24669f;
+  --accent-soft: #e9f4fd;
+  --focus-ring: #3c82c433;
+  --signal: #2a9189;
+  --signal-soft: #e1f1ef;
+  --goal: #6b4ce6;
+  --complete: #2a9189;
+  --complete-soft: #e1f1ef;
+  --danger: #c9505e;
+  --danger-soft: #fff0f2;
+  --warning: #a66d18;
+  --warning-soft: #fbf1df;
+  --cloud: var(--surface-canvas);
+  --paper: var(--surface);
+  --ink: var(--text);
+  --muted: var(--text-muted);
+  --line: var(--border);
+  --dispatch: var(--accent);
+  --dispatch-soft: var(--accent-soft);
+  --execute: var(--accent);
+  --execute-soft: var(--accent-soft);
+  /* Shared scales; only conversation components consume these initially. */
+  --ui-font-body: 14px;
+  --ui-font-control: 13px;
+  --ui-font-caption: 12px;
+  --ui-font-time: 11px;
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-radius-control: 6px;
+  --ui-radius-panel: 8px;
+  --ui-control-height: 32px;
+  --ui-row-height: 38px;
+  --conversation-content-width: 780px;
+  --execution-kind-width: 48px;
+  --execution-row-height: 32px;
+  --execution-font-caption: 10px;
+  --execution-font-content: 11px;
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { width: 100%; height: 100%; max-width: 100%; overflow: hidden; }
+body { margin: 0; min-width: 0; min-height: 100%; color: var(--ink); background: var(--cloud); }
+button, textarea, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .45; }
+
+@media (max-width: 760px) {
+  :root { --app-viewport-height: 100dvh; --app-viewport-top: 0px; --ui-control-height: 44px; --ui-row-height: 44px; --execution-kind-width: 42px; --execution-row-height: 44px; }
+  html.android-shell, html.android-shell body { overscroll-behavior: none; }
+}
+
+/* React mount point; the original page used the body as its mount. */
+#root { width: 100%; height: 100%; min-width: 0; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
